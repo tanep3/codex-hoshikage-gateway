@@ -7,7 +7,7 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/gateway --config %h/.config/codex-hoshikage-gateway/config.toml run
+ExecStart=%h/.cargo/bin/codex-hoshikage-gateway --config %h/.config/codex-hoshikage-gateway/config.toml run
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30

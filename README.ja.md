@@ -18,6 +18,8 @@
 
 ## GatewayとProxy、2つで動きます
 
+実行ファイル名は `codex-hoshikage-gateway` です。リポジトリのディレクトリで `cargo install --path . --locked` を実行するとインストールできます。`cargo install --path .` だけでも使えます。
+
 使うのは、このGatewayと [Codex Hoshikage Proxy](https://github.com/tanep3/codex-hoshikage-proxy) の2つです。ProxyはCodexをOpenAI互換APIから使えるようにするソフトウェア。Gatewayはそこに、Discordのチャンネル・会話スレッド・コマンド・返信の仕組みを加えます。
 
 ```text

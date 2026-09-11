@@ -80,13 +80,13 @@ From your chosen source directory:
 ```sh
 git clone https://github.com/tanep3/codex-hoshikage-gateway.git
 cd codex-hoshikage-gateway
-cargo build --release --locked
-install -d "$HOME/.local/bin"
-install -m 755 target/release/gateway "$HOME/.local/bin/gateway"
+cargo install --path . --locked
 install -d -m 700 "$HOME/.config/codex-hoshikage-gateway"
 cp config/config.example.toml "$HOME/.config/codex-hoshikage-gateway/config.toml"
 chmod 600 "$HOME/.config/codex-hoshikage-gateway/config.toml"
 ```
+
+Install with `cargo install --path .`. The example adds `--locked` to use the dependency versions in Cargo.lock. The usual executable path is `~/.cargo/bin/codex-hoshikage-gateway`. If `~/.cargo/bin` is on your PATH, check it with `codex-hoshikage-gateway --version`. If you customize `CARGO_HOME` or the Cargo install directory, adjust the paths below and the service’s `ExecStart` to match.
 
 The copy is for a **new installation**. Preserve your existing configuration when upgrading. Run these steps as the service user, not root.
 
@@ -169,9 +169,9 @@ Use byte counts, not strings such as `"10MB"`. Allow for image encoding overhead
 ## 8. Start it up and say hello
 
 ```sh
-"$HOME/.local/bin/gateway" --config "$HOME/.config/codex-hoshikage-gateway/config.toml" check
-"$HOME/.local/bin/gateway" --config "$HOME/.config/codex-hoshikage-gateway/config.toml" init
-"$HOME/.local/bin/gateway" --config "$HOME/.config/codex-hoshikage-gateway/config.toml" run
+"$HOME/.cargo/bin/codex-hoshikage-gateway" --config "$HOME/.config/codex-hoshikage-gateway/config.toml" check
+"$HOME/.cargo/bin/codex-hoshikage-gateway" --config "$HOME/.config/codex-hoshikage-gateway/config.toml" init
+"$HOME/.cargo/bin/codex-hoshikage-gateway" --config "$HOME/.config/codex-hoshikage-gateway/config.toml" run
 ```
 
 `--config` must precede the subcommand. `check` validates local configuration and credential files; it does **not** test Discord or Proxy connectivity. `init` runs once for a new installation and creates the database and adjacent configuration-directory `gateway-instance.json` identity marker. `run` requires that initialized state.
@@ -209,8 +209,8 @@ Keep your configuration, state, and `gateway-instance.json` marker. Initial iden
 While the Gateway is running, the local service user can inspect it and create a consistent backup:
 
 ```sh
-"$HOME/.local/bin/gateway" --config "$HOME/.config/codex-hoshikage-gateway/config.toml" admin status
-"$HOME/.local/bin/gateway" --config "$HOME/.config/codex-hoshikage-gateway/config.toml" admin backup --to /absolute/path/new-backup-bundle
+"$HOME/.cargo/bin/codex-hoshikage-gateway" --config "$HOME/.config/codex-hoshikage-gateway/config.toml" admin status
+"$HOME/.cargo/bin/codex-hoshikage-gateway" --config "$HOME/.config/codex-hoshikage-gateway/config.toml" admin backup --to /absolute/path/new-backup-bundle
 ```
 
 Replace the backup path with a new, private destination. Do not copy only a live SQLite file. This bundle backs up Gateway state, not project files, Discord message history, credentials, or lost replies. Preserve configuration and identity files separately with appropriate access controls. Restoring a backup deliberately quarantines old requests instead of resending them; see the [technical recovery design](system-design.ja.md) before performing recovery.

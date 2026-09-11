@@ -578,16 +578,16 @@ Responses readerは受信済み本文を有界メモリへ保持する。DBに�
 
 | コマンド案 | 動作 |
 | --- | --- |
-| `gateway init --config <path>` | 空の専用状態領域を明示初期化。既存DB/インスタンスを上書きしない。 |
-| `gateway run --config <path>` | 第6.4節の起動順でschemaとmigrationを確認し、Supervisor下で常駐。 |
-| `gateway check --config <path>` | 秘密を表示せず設定・パス・必須値を確認。生成要求は送らない。 |
-| `gateway admin status` | socket経由で稼働状態・保留・配信欠落を取得。 |
-| `gateway admin reload` | 設定を全体検証し、世代単位で適用。明示Project廃止を含む。不正なら旧設定を維持。 |
-| `gateway admin backup --to <新規bundleディレクトリ>` | daemon経由でDBとmanifestを整合したバックアップとして作成。既存出力は上書きしない。 |
-| `gateway restore --from <backup>` | 停止中だけ実行。DB外マーカーを先に保存し、安全な復元を行う。 |
-| `gateway run --recovery` | 復元診断モードを強制し、通常受付/送信を開始しない。 |
-| `gateway admin recovery release --restore-id <id> --reason <理由> --accept-risk` | 復元保留を監査付き解除。旧依頼の送信資格を戻さない。 |
-| `gateway admin abandon --request <id> --reason <理由> --accept-risk` | 指定UNKNOWNのholdだけ監査付き解除。 |
+| `codex-hoshikage-gateway --config <path> init` | 空の専用状態領域を明示初期化。既存DB/インスタンスを上書きしない。 |
+| `codex-hoshikage-gateway --config <path> run` | 第6.4節の起動順でschemaとmigrationを確認し、Supervisor下で常駐。 |
+| `codex-hoshikage-gateway --config <path> check` | 秘密を表示せず設定・パス・必須値を確認。生成要求は送らない。 |
+| `codex-hoshikage-gateway --config <path> admin status` | socket経由で稼働状態・保留・配信欠落を取得。 |
+| `codex-hoshikage-gateway --config <path> admin reload` | 設定を全体検証し、世代単位で適用。明示Project廃止を含む。不正なら旧設定を維持。 |
+| `codex-hoshikage-gateway --config <path> admin backup --to <新規bundleディレクトリ>` | daemon経由でDBとmanifestを整合したバックアップとして作成。既存出力は上書きしない。 |
+| `codex-hoshikage-gateway --config <path> restore --from <backup>` | 停止中だけ実行。DB外マーカーを先に保存し、安全な復元を行う。 |
+| `codex-hoshikage-gateway --config <path> run --recovery` | 復元診断モードを強制し、通常受付/送信を開始しない。 |
+| `codex-hoshikage-gateway --config <path> admin recovery release --restore-id <id> --reason <理由> --accept-risk` | 復元保留を監査付き解除。旧依頼の送信資格を戻さない。 |
+| `codex-hoshikage-gateway --config <path> admin abandon --request-id <id> --generation <世代> --reason <理由> --accept-risk` | 指定UNKNOWNのholdだけ監査付き解除。 |
 
 管理socketは0700のディレクトリ、接続元UIDを確認する。管理CLIが稼働中DBへ直接書かない。例外のoffline restoreは同じ排他lock取得下でのみDBを置換する。socket経由の管理操作はdaemon停止時に拒否し、復旧/診断状態でdaemonを起動してから管理する。DBを正常に開けない状態では解除も行わない。
 
@@ -634,7 +634,7 @@ SIGTERMでは新規受付/送信を止め、active Conversationのpauseと対象
 
 #### 14.4.1 バックアップ復元の強制保留（R-08）
 
-正式な復元経路は`gateway restore --from <backup>`とする。serviceを停止し自動再起動を抑えたうえで、restoreコマンドがrunと同じ排他lockを取得する。稼働中なら拒否する。**DB置換前に**設定領域の専用`recovery/restore-pending.json`へrestore UUID・対象state_dir・バックアップ照合情報を保存し、ファイルと親ディレクトリの同期を完了する。このマーカーはDBバックアップに含めず、通常の一時ファイル掃除でも削除しない。
+正式な復元経路は`codex-hoshikage-gateway --config <path> restore --from <backup>`とする。serviceを停止し自動再起動を抑えたうえで、restoreコマンドがrunと同じ排他lockを取得する。稼働中なら拒否する。**DB置換前に**設定領域の専用`recovery/restore-pending.json`へrestore UUID・対象state_dir・バックアップ照合情報を保存し、ファイルと親ディレクトリの同期を完了する。このマーカーはDBバックアップに含めず、通常の一時ファイル掃除でも削除しない。
 
 第14.4.2節のmanifest形式・checksum・DB整合性・schema互換性・instance_uuidをすべて検証して整合したSQLite復元を行い、古いDB/WALとの混在を防ぐ。マーカーは残したまま終了する。runは通常の復旧worker・Discord受付・管理操作の開始前に外部マーカーとDB内復元保留を確認する。どちらかが保留、読取不能、破損、不一致なら復元診断モードとなり、新規受付/生成を行わない。設定不備があってもDBと安全に確立できるローカル管理socketによる診断は可能とし、未検証の外部操作は行わない。明示`run --recovery`も通常処理開始前に外部保留を作る。通常のRECOVERINGとは異なり、検証成功だけでREADYへ移行しない。
 
@@ -642,7 +642,7 @@ SIGTERMでは新規受付/送信を止め、active Conversationのpauseと対象
 
 バックアップ作成後に新規依頼/Projectが増え、復元DBに存在しない可能性もあるため、バックアップ内と現行設定の全Projectにrestore_blocksを設ける。個別Requestのholdだけで全実行を把握できたとは扱わない。
 
-照合と運用確認後、本人が`gateway admin recovery release --restore-id <id> --reason <理由> --accept-risk`で復元保留を解除する。復元IDを検証し、理由・未照合範囲・リスク承認・解除をDB監査へ同時commitした後、外部マーカーを削除して親ディレクトリを同期する。途中crashでマーカーが残れば保留を維持し、同じrestore_idの監査を確認して後処理を完了する。削除失敗ではREADYにしない。解除後の再起動で同じrestore_idを再隔離しないよう、完了済み監査との照合を起動時に行う。
+照合と運用確認後、本人が`codex-hoshikage-gateway --config <path> admin recovery release --restore-id <id> --reason <理由> --accept-risk`で復元保留を解除する。復元IDを検証し、理由・未照合範囲・リスク承認・解除をDB監査へ同時commitした後、外部マーカーを削除して親ディレクトリを同期する。途中crashでマーカーが残れば保留を維持し、同じrestore_idの監査を確認して後処理を完了する。削除失敗ではREADYにしない。解除後の再起動で同じrestore_idを再隔離しないよう、完了済み監査との照合を起動時に行う。
 
 この解除は復元全体の保留だけを解除し、個々のUNKNOWN holdやpauseは解除しない。必要なら既存の監査付きabandonを別途使う。**隔離した旧依頼のdispatch_eligibleは永久にfalseのまま**で、新しく本人が投稿した依頼だけを実行候補にできる。照合できない旧依頼をQUEUEDへ戻さない。解除commit時のUTC時刻を永続admission_floor_msに保存し、それ以前に作成された未登録Discord投稿/Interactionは、遅着・再配送されても新規実行/状態変更として採用しない。Discord IDの時刻情報と作成時刻を検証し、時刻が不確かな場合も自動受付しない。これは新規投稿の入口条件であり、未知の過去実行がないことを保証する操作ではない。
 
@@ -650,7 +650,7 @@ SIGTERMでは新規受付/送信を止め、active Conversationのpauseと対象
 
 #### 14.4.2 正式なバックアップ作成（FNL-03）
 
-正式コマンドは`gateway admin backup --to <新規bundleディレクトリ>`。ローカル管理socket経由でdaemonへ依頼し、同時backupは1件、既存の出力先は上書きしない。DB workerの更新接続を長時間占有せず、専用backup workerの読取接続からSQLite Online Backup APIで段階的にコピーする。通常DB更新はDB workerに集約したまま、backupに限り読取接続を追加する。[SQLite Backup API](https://www.sqlite.org/backup.html)
+正式コマンドは`codex-hoshikage-gateway --config <path> admin backup --to <新規bundleディレクトリ>`。ローカル管理socket経由でdaemonへ依頼し、同時backupは1件、既存の出力先は上書きしない。DB workerの更新接続を長時間占有せず、専用backup workerの読取接続からSQLite Online Backup APIで段階的にコピーする。通常DB更新はDB workerに集約したまま、backupに限り読取接続を追加する。[SQLite Backup API](https://www.sqlite.org/backup.html)
 
 コピーは有界stepとbusy時の待機・全体期限を持たせ、承認/停止用DB処理を待たせ続けない。更新負荷で期限内に完了しなければbackup失敗とし、部分コピーを有効と表示しない。Supervisorがworkerを監視する。migration前の退避はdaemon起動前なので、同じエンジンを起動処理が排他lock下で直接呼ぶ。
 

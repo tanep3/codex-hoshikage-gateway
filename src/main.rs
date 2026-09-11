@@ -13,7 +13,11 @@ use codex_hoshikage_gateway::{
 use std::{path::PathBuf, sync::atomic::Ordering, time::Duration};
 use tokio::{sync::mpsc, task::JoinSet};
 #[derive(Parser)]
-#[command(name = "gateway", version, about = "Codex Hoshikage Gateway")]
+#[command(
+    name = "codex-hoshikage-gateway",
+    version,
+    about = "Codex Hoshikage Gateway"
+)]
 struct Cli {
     #[arg(long)]
     config: PathBuf,
@@ -81,7 +85,7 @@ async fn main() {
         eprintln!("Gateway内部タスクの異常を検出しました（内容は非表示）。")
     }));
     tracing_subscriber::fmt()
-        .with_env_filter("codex_hoshikage_gateway=info,gateway=info")
+        .with_env_filter("codex_hoshikage_gateway=info")
         .with_target(false)
         .init();
     if let Err(error) = run(Cli::parse()).await {

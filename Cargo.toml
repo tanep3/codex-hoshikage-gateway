@@ -8,7 +8,7 @@ authors = ["Tane Channel Technology"]
 description = "A private Discord gateway for codex-hoshikage-proxy"
 
 [[bin]]
-name = "gateway"
+name = "codex-hoshikage-gateway"
 path = "src/main.rs"
 
 [dependencies]

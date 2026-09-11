@@ -11,7 +11,7 @@ fn cli_checks_secrets_initializes_once_and_preserves_existing_database() {
     let path = t.path().join("config.toml");
     std::fs::write(&path, toml::to_string(&cfg).unwrap()).unwrap();
     let run = |cmd: &str| {
-        std::process::Command::new(env!("CARGO_BIN_EXE_gateway"))
+        std::process::Command::new(env!("CARGO_BIN_EXE_codex-hoshikage-gateway"))
             .arg("--config")
             .arg(&path)
             .arg(cmd)

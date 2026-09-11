@@ -18,6 +18,8 @@ The first version is for **one authorized user in one configured Discord server*
 
 ## Meet the two parts
 
+The executable is named `codex-hoshikage-gateway`. From the repository directory, install it with `cargo install --path . --locked` (plain `cargo install --path .` also works).
+
 You will run two services: this Gateway and [Codex Hoshikage Proxy](https://github.com/tanep3/codex-hoshikage-proxy). The Proxy connects clients to Codex through an OpenAI-compatible API. The Gateway adds the Discord experience: project channels, conversation threads, commands, and replies.
 
 ```text

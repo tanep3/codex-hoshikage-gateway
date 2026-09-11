@@ -80,13 +80,13 @@ TOMLでは引用符で囲んだ文字列として設定します。名前や招�
 ```sh
 git clone https://github.com/tanep3/codex-hoshikage-gateway.git
 cd codex-hoshikage-gateway
-cargo build --release --locked
-install -d "$HOME/.local/bin"
-install -m 755 target/release/gateway "$HOME/.local/bin/gateway"
+cargo install --path . --locked
 install -d -m 700 "$HOME/.config/codex-hoshikage-gateway"
 cp config/config.example.toml "$HOME/.config/codex-hoshikage-gateway/config.toml"
 chmod 600 "$HOME/.config/codex-hoshikage-gateway/config.toml"
 ```
+
+`cargo install --path .` でインストールできます。上の例は依存バージョンをCargo.lockにそろえるため `--locked` も付けています。通常の配置先は `~/.cargo/bin/codex-hoshikage-gateway` です。`~/.cargo/bin` にPATHが通っていれば、`codex-hoshikage-gateway --version` で確認できます。`CARGO_HOME` やCargoのインストール先を変更している場合は、以降のパスとサービスの `ExecStart` を実際の配置先に合わせてください。
 
 設定例のコピーは**新規導入用**です。更新時は既存の設定を上書きしないでください。rootではなく、サービスを実行する本人のアカウントで作業します。
 
@@ -169,9 +169,9 @@ install -d -m 700 "$HOME/.local/state/codex-hoshikage-gateway/temp"
 ## 8. 起動して、ひとこと話しかけてみましょう
 
 ```sh
-"$HOME/.local/bin/gateway" --config "$HOME/.config/codex-hoshikage-gateway/config.toml" check
-"$HOME/.local/bin/gateway" --config "$HOME/.config/codex-hoshikage-gateway/config.toml" init
-"$HOME/.local/bin/gateway" --config "$HOME/.config/codex-hoshikage-gateway/config.toml" run
+"$HOME/.cargo/bin/codex-hoshikage-gateway" --config "$HOME/.config/codex-hoshikage-gateway/config.toml" check
+"$HOME/.cargo/bin/codex-hoshikage-gateway" --config "$HOME/.config/codex-hoshikage-gateway/config.toml" init
+"$HOME/.cargo/bin/codex-hoshikage-gateway" --config "$HOME/.config/codex-hoshikage-gateway/config.toml" run
 ```
 
 `--config` はサブコマンドより前に置きます。`check` はローカルの設定・キーファイルの検証であり、DiscordやProxyへの接続試験ではありません。`init` は新規導入時に1回だけ実行し、DBと設定ディレクトリ内の識別マーカー `gateway-instance.json` を作ります。`run` には初期化済みの状態が必要です。
@@ -209,8 +209,8 @@ journalctl --user -u codex-hoshikage-gateway.service -n 50 --no-pager
 稼働中はサービス実行ユーザーがローカルで状態を確認し、整合したバックアップを作成できます。
 
 ```sh
-"$HOME/.local/bin/gateway" --config "$HOME/.config/codex-hoshikage-gateway/config.toml" admin status
-"$HOME/.local/bin/gateway" --config "$HOME/.config/codex-hoshikage-gateway/config.toml" admin backup --to /absolute/path/new-backup-bundle
+"$HOME/.cargo/bin/codex-hoshikage-gateway" --config "$HOME/.config/codex-hoshikage-gateway/config.toml" admin status
+"$HOME/.cargo/bin/codex-hoshikage-gateway" --config "$HOME/.config/codex-hoshikage-gateway/config.toml" admin backup --to /absolute/path/new-backup-bundle
 ```
 
 保存先は本人だけがアクセスできる新しいパスに変更してください。稼働中のSQLite本体だけをコピーしないでください。このバックアップはGatewayの状態用で、プロジェクトのファイル・Discord履歴・キー・失われた回答本文は含みません。設定と識別ファイルは別途適切な権限で保管してください。復元時は古い依頼を再送せず隔離します。復元操作の前に[技術設計の復旧規則](system-design.ja.md)を確認してください。
