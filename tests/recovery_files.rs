@@ -68,7 +68,12 @@ async fn restored_queued_request_is_never_dispatchable_even_after_release() {
 fn artifact_rejects_symlinks_hardlinks_special_files_and_escape() {
     let t = tempfile::tempdir().unwrap();
     let cfg = common::config(&t);
-    let workspace = cfg.validate().unwrap().remove(0);
+    let mut workspace = cfg.validate().unwrap().remove(0);
+    use std::os::unix::fs::MetadataExt;
+    workspace.path = workspace.project.cwd.canonicalize().unwrap();
+    let md = workspace.path.metadata().unwrap();
+    workspace.dev = md.dev();
+    workspace.ino = md.ino();
     let root = &workspace.path;
     std::fs::write(root.join("ok.txt"), b"report").unwrap();
     assert_eq!(
@@ -87,7 +92,7 @@ fn artifact_rejects_symlinks_hardlinks_special_files_and_escape() {
     assert!(files::artifact(&workspace, "pipe", 100).is_err());
 }
 #[test]
-fn canonical_nested_workspaces_are_rejected() {
+fn legacy_cwd_is_not_validated_by_gateway() {
     let t = tempfile::tempdir().unwrap();
     let mut cfg = common::config(&t);
     let mut nested = cfg.projects[0].clone();
@@ -96,5 +101,28 @@ fn canonical_nested_workspaces_are_rejected() {
     nested.cwd = nested.cwd.join("sub");
     std::fs::create_dir(&nested.cwd).unwrap();
     cfg.projects.push(nested);
-    assert!(cfg.validate().is_err());
+    assert!(cfg.validate().is_ok());
+}
+
+#[test]
+fn orphan_cleanup_removes_only_gateway_owned_regular_cache_files() {
+    use std::os::unix::fs::symlink;
+    let t = tempfile::tempdir().unwrap();
+    let dir = t.path().join("cache");
+    std::fs::create_dir(&dir).unwrap();
+    let owned = dir.join(format!("delivery-{}", uuid::Uuid::new_v4()));
+    std::fs::write(&owned, "cache").unwrap();
+    let source = t.path().join("keep");
+    std::fs::write(&source, "user file").unwrap();
+    let link = dir.join(format!("delivery-{}", uuid::Uuid::new_v4()));
+    symlink(&source, &link).unwrap();
+    std::fs::write(dir.join("notes.txt"), "keep").unwrap();
+    assert_eq!(
+        codex_hoshikage_gateway::resources::clean_orphan_cache(&dir).unwrap(),
+        1
+    );
+    assert!(!owned.exists());
+    assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+    assert!(source.exists());
+    assert!(dir.join("notes.txt").exists());
 }

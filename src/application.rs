@@ -32,6 +32,9 @@ pub struct Settings {
 #[derive(Clone)]
 pub struct App {
     pub settings: Arc<RwLock<Settings>>,
+    pub config_mutation: Arc<Mutex<()>>,
+    pub(crate) resource_mutation: Arc<RwLock<()>>,
+    pub(crate) pending_projects: Arc<Mutex<HashMap<String, crate::projects::PendingProject>>>,
     pub store: Store,
     pub discord: Discord,
     pub files: Files,
@@ -54,13 +57,17 @@ pub struct Output {
 }
 impl App {
     pub fn new(cfg: Config, store: Store, discord: Discord, proxy: Proxy) -> Result<Self> {
+        let cfg = cfg.with_registered_projects(&store.path)?;
         let workspaces = cfg.validate()?;
         Ok(Self {
+            config_mutation: Arc::new(Mutex::new(())),
+            resource_mutation: Arc::new(RwLock::new(())),
+            pending_projects: Arc::new(Mutex::new(HashMap::new())),
             settings: Arc::new(RwLock::new(Settings {
                 cfg,
                 revision: 1,
                 workspaces,
-                proxy,
+                proxy: proxy.with_store(store.clone()),
             })),
             delivery: Delivery {
                 store: store.clone(),
@@ -80,67 +87,96 @@ impl App {
     pub async fn settings(&self) -> Settings {
         self.settings.read().await.clone()
     }
-    pub async fn authorized_thread(&self, thread: &str) -> Result<crate::domain::Conversation> {
+    async fn verify_location(&self, channel: &str) -> Result<()> {
         let s = self.settings().await;
-        let cv = self.store.conversation(thread).await?;
-        let p = s
-            .cfg
-            .projects
-            .iter()
-            .find(|p| p.id == cv.project_id && p.lifecycle == "ACTIVE")
-            .context("project inactive")?;
         let v = self
             .discord
-            .get(&format!("/channels/{}", snowflake(thread)?))
+            .get(&format!("/channels/{}", snowflake(channel)?))
             .await?;
         ensure!(
-            v["id"] == thread
-                && v["guild_id"] == s.cfg.discord.guild_id
-                && ((v["id"] == p.channel_id && v["type"] == 0)
-                    || (v["parent_id"] == p.channel_id
-                        && matches!(v["type"].as_u64(), Some(11 | 12))))
-                && v["thread_metadata"]["archived"] != true
-                && v["thread_metadata"]["locked"] != true,
-            "conversation unavailable or identity changed"
+            v["id"] == channel && v["guild_id"] == s.cfg.discord.guild_id,
+            "channel identity mismatch"
         );
-        Ok(cv)
+        match v["type"].as_u64() {
+            Some(0) => {}
+            Some(11 | 12) => {
+                ensure!(
+                    v["thread_metadata"]["archived"] != true
+                        && v["thread_metadata"]["locked"] != true,
+                    "conversation closed"
+                );
+                let parent = v["parent_id"].as_str().context("parent missing")?;
+                let p = self
+                    .discord
+                    .get(&format!("/channels/{}", snowflake(parent)?))
+                    .await?;
+                ensure!(
+                    p["id"] == parent
+                        && p["guild_id"] == s.cfg.discord.guild_id
+                        && matches!(p["type"].as_u64(), Some(0 | 15)),
+                    "parent mismatch"
+                );
+            }
+            _ => anyhow::bail!("unsupported conversation location"),
+        }
+        Ok(())
+    }
+    pub async fn authorized_thread(&self, thread: &str) -> Result<crate::domain::Conversation> {
+        self.verify_location(thread).await?;
+        self.store.conversation(thread).await
     }
     pub async fn ensure_channel_conversation(&self, channel: &str) -> Result<bool> {
-        let s = self.settings().await;
-        if let Some(p) = s
-            .cfg
-            .projects
-            .iter()
-            .find(|p| p.channel_id == channel && p.lifecycle == "ACTIVE")
-        {
-            self.store
-                .add_conversation(channel.into(), p.id.clone())
-                .await?;
-            return Ok(true);
-        }
-        Ok(self.store.conversation(channel).await.is_ok())
+        self.verify_location(channel).await?;
+        self.store
+            .add_conversation(channel.into(), crate::storage::PROXY_SCOPE.into())
+            .await?;
+        Ok(true)
     }
     pub async fn admit_loop(&self, mut rx: mpsc::Receiver<Incoming>) -> Result<()> {
         let mut workers = JoinSet::new();
+        let mut controls = JoinSet::new();
         loop {
             tokio::select! {
-                _=self.cancel.cancelled()=>{workers.shutdown().await;return Ok(())},
+                _=self.cancel.cancelled()=>{workers.shutdown().await;controls.shutdown().await;return Ok(())},
+                result=controls.join_next(),if !controls.is_empty()=>{if result.is_some_and(|r|r.is_err()){tracing::warn!(event="text_control_worker_lost");}},
                 result=workers.join_next(),if !workers.is_empty()=>{if result.is_some_and(|r|r.is_err()){tracing::warn!(event="validation_worker_lost");}},
                 event=rx.recv()=>{
                     let Some(Incoming::Message(v))=event else{ensure!(!rx.is_closed(),"Discord admission channel closed");continue};
                     let s=self.settings().await;
                     if v["guild_id"]!=s.cfg.discord.guild_id||v["author"]["id"]!=s.cfg.discord.allowed_user_id||v["author"]["bot"]==true||!v["webhook_id"].is_null(){continue;}
+                    if crate::commands::is_text_control(v["content"].as_str().unwrap_or("")) {
+                        let (Some(channel),Some(id))=(v["channel_id"].as_str(),v["id"].as_str()) else {continue};
+                        if !self.store.admissible_event(id.into()).await? {continue;}
+                        if controls.len()>=8 {
+                            self.notice(id.into(),channel.into(),"操作が混み合っています。少し待ってから操作してください。AIには送っていません。").await?;
+                            continue;
+                        }
+                        let app=self.clone();let channel=channel.to_owned();let id=id.to_owned();
+                        controls.spawn(async move {
+                            let result=tokio::time::timeout(Duration::from_secs(45),app.text_control_command(&v)).await;
+                            let text=match result {Ok(Ok(text))=>text,_=>"操作の適用を確認できませんでした。/model または /status で確認してください。AIには送っていません。".into()};
+                            if let Some(components) = app.project_menu(&v).await {
+                                app.discord.api(reqwest::Method::POST,&format!("/channels/{}/messages",snowflake(&channel)?),Some(serde_json::json!({"content":text,"components":components,"allowed_mentions":{"parse":[]}}))).await?;
+                                Ok(())
+                            } else { app.notice(id,channel,&text).await }
+                        });
+                        continue;
+                    }
                     if !self.discord.should_respond(&v,s.cfg.discord.response_mode){continue;}
                     let (Some(channel),Some(message))=(v["channel_id"].as_str(),v["id"].as_str()) else {continue};
-                    if !self.ensure_channel_conversation(channel).await? {
-                        self.notice(message.into(),channel.into(),"このチャンネルの作業フォルダーは未登録です。設定の projects に channel_id と cwd を登録し、設定を再読み込みしてください。").await?;
+                    if !self.ensure_channel_conversation(channel).await.unwrap_or(false) {
+                        self.notice(message.into(),channel.into(),"この場所では会話を開始できません。通常チャンネルか開いているスレッドで、Botの閲覧権限を確認してください。").await?;
+                        continue;
+                    }
+                    if self.store.conversation(channel).await?.selected_model.is_empty() {
+                        self.notice(message.into(),channel.into(),"初期モデルを選んでください。/model を開くと選択メニューが表示されます。cwd登録は不要です。選択後にもう一度話しかけてください。").await?;
                         continue;
                     }
                     if self.reloading.load(Ordering::SeqCst)||self.recovery.load(Ordering::SeqCst)||!s.proxy.gate.is_ready()||!self.connected.load(Ordering::SeqCst){if let (Some(t),Some(id))=(v["channel_id"].as_str(),v["id"].as_str()) && self.store.conversation(t).await.is_ok(){self.notice(id.into(),t.into(),"受付停止中です。/status で状態を確認してください。").await?;}continue;}
                     let m=match input_message(&v,&s.cfg.discord.guild_id){Ok(m)=>m,Err(_)=>continue};
                     if workers.len()>=s.cfg.limits.queue_global{continue;}
                     // The Store transaction is the acceptance ordering boundary, before network validation.
-                    let id=match self.store.reserve(m.id.clone(),m.thread_id.clone(),m.metadata_digest(),s.cfg.limits.clone()).await{Ok(Some(id))=>id,Ok(None)=>continue,Err(_)=>{if self.store.conversation(&m.thread_id).await.is_ok(){self.notice(m.id.clone(),m.thread_id.clone(),"受付できませんでした。会話が継続不可の場合は /new で新しい会話を作成してください。詳しくは /status で確認できます。").await?;}continue}};
+                    let id=match self.store.reserve(m.id.clone(),m.thread_id.clone(),m.metadata_digest(),s.cfg.limits.clone()).await{Ok(Some(id))=>id,Ok(None)=>continue,Err(_)=>{if self.store.conversation(&m.thread_id).await.is_ok(){self.notice(m.id.clone(),m.thread_id.clone(),"受付できませんでした。待機上限または会話の安全確認が必要な状態です。/status で確認できます。この投稿はAIへ送信していません。").await?;}continue}};
                     let app=self.clone();workers.spawn(async move{
                         let result=async{
                             let cv=app.authorized_thread(&m.thread_id).await?;
@@ -175,22 +211,22 @@ impl App {
         let mut tick = tokio::time::interval(Duration::from_millis(500));
         loop {
             tokio::select! {
-                            _=self.cancel.cancelled()=>{jobs.shutdown().await;return Ok(())},
-                            result=jobs.join_next_with_id(),if !jobs.is_empty()=>{
-                                let result=result.context("request task vanished")?;
-                                let task=match &result{Ok((id,_))=>*id,Err(e)=>e.id()};
-                                if let Some(id)=ids.remove(&task){busy.remove(&id);let s=self.settings().await;let r=self.store.request(&id).await?;if !matches!(r.state,RequestState::Queued|RequestState::Received)&&!r.state.terminal(){s.proxy.reconcile(&self.store,&id).await?;}
-            if let Some(o)=self.output.lock().await.get_mut(&id){o.done=true;if !matches!(result,Ok((_,Ok(())))){o.lost=true;}}}
-                            },
-                            _=tick.tick()=>{
-                                let s=self.settings().await;if self.reloading.load(Ordering::SeqCst)||self.recovery.load(Ordering::SeqCst)||!s.proxy.gate.is_ready()||!self.connected.load(Ordering::SeqCst)||jobs.len()>=2{continue;}
-                                for r in self.store.candidates().await?{
-                                    if jobs.len()>=2{break;}
-            if !busy.insert(r.id.clone()){continue;}
-                                    let app=self.clone();let id=r.id.clone();let handle=jobs.spawn(async move{app.execute(r).await});ids.insert(handle.id(),id);
-                                }
-                            }
-                        }
+                                        _=self.cancel.cancelled()=>{jobs.shutdown().await;return Ok(())},
+                                        result=jobs.join_next_with_id(),if !jobs.is_empty()=>{
+                                            let result=result.context("request task vanished")?;
+                                            let task=match &result{Ok((id,_))=>*id,Err(e)=>e.id()};
+                                            if let Some(id)=ids.remove(&task){busy.remove(&id);let s=self.settings().await;let r=self.store.request(&id).await?;if !matches!(r.state,RequestState::Queued|RequestState::Received)&&!r.state.terminal(){s.proxy.reconcile(&self.store,&id).await?;}
+            }
+                                        },
+                                        _=tick.tick()=>{
+                                            let s=self.settings().await;if self.reloading.load(Ordering::SeqCst)||self.recovery.load(Ordering::SeqCst)||!s.proxy.gate.is_ready()||!self.connected.load(Ordering::SeqCst)||jobs.len()>=2{continue;}
+                                            for r in self.store.candidates().await?{
+                                                if jobs.len()>=2{break;}
+                        if !busy.insert(r.id.clone()){continue;}
+                                                let app=self.clone();let id=r.id.clone();let handle=jobs.spawn(async move{app.execute(r).await});ids.insert(handle.id(),id);
+                                            }
+                                        }
+                                    }
         }
     }
     async fn execute(&self, r: Request) -> Result<()> {
@@ -225,140 +261,61 @@ impl App {
                 return Ok(());
             }
         };
-        let workspace = s
-            .workspaces
-            .iter()
-            .find(|w| w.project.id == r.project_id)
-            .context("workspace inactive")?;
-        workspace.verify()?;
-        ensure!(
-            !self.reloading.load(Ordering::SeqCst),
-            "configuration reload in progress"
-        );
-        let epoch = s.proxy.gate.epoch.load(Ordering::SeqCst);
+        let conversation = s
+            .proxy
+            .ensure_conversation_v2(&self.store, &r.thread_id)
+            .await?;
         let permit = s.proxy.authorize(r.id.clone(), s.revision).await?;
-        {
-            let mut cache = self.output.lock().await;
-            let total: usize = cache.values().map(|o| o.text.len()).sum();
-            ensure!(
-                total.saturating_add(s.cfg.limits.output_bytes) <= s.cfg.limits.output_total_bytes,
-                "output memory capacity unavailable"
-            );
-            cache.insert(
-                r.id.clone(),
-                Output {
-                    thread: r.thread_id.clone(),
-                    text: String::new(),
-                    done: false,
-                    lost: false,
-                    created: Instant::now(),
-                    last_progress: Instant::now(),
-                    retention: Duration::from_secs(s.cfg.limits.delivery_retention_secs),
-                },
-            );
+        let r = self
+            .store
+            .begin_send_authorized(r.id.clone(), permit)
+            .await?;
+        if self.store.request(&r.id).await?.stop_requested {
+            s.proxy.stop_v2(&self.store, &r).await?;
+            s.proxy.reconcile(&self.store, &r.id).await?;
+            return Ok(());
         }
-        let r = match self.store.begin_send_authorized(r.id.clone(), permit).await {
-            Ok(r) => r,
-            Err(e) => {
-                self.output.lock().await.remove(&r.id);
-                return Err(e);
-            }
-        };
-        // If stop/shutdown wins after the durable boundary, do not create a new remote turn.
-        if self.cancel.is_cancelled()
-            || !s.proxy.gate.is_ready()
-            || epoch != s.proxy.gate.epoch.load(Ordering::SeqCst)
-            || self.store.request(&r.id).await?.stop_requested
+        let result = s.proxy.start_v2(&r, &conversation, p.input).await;
+        drop(p.reservation);
+        if let Err(error) = &result
+            && error
+                .downcast_ref::<crate::proxy_v2::ApiError>()
+                .is_some_and(|e| {
+                    e.status == 409
+                        && matches!(
+                            e.code.as_str(),
+                            "provider_busy" | "workspace_busy" | "conversation_busy"
+                        )
+                })
         {
             self.store
-                .observe(
-                    r.id,
-                    RequestState::Unknown,
-                    "dispatch_cancelled_after_commit",
-                    false,
-                )
+                .observe(r.id.clone(), RequestState::Failed, "proxy_busy", true)
                 .await?;
             return Ok(());
         }
-        let response = s
-            .proxy
-            .start(
-                &r,
-                p.input,
-                workspace.path.to_str().context("workspace encoding")?,
-            )
-            .await?;
-        drop(p.reservation);
-        let headers = response.headers();
-        if let (Some(resp), Some(thread), Some(turn)) = (
-            headers.get("x-response-id").and_then(|h| h.to_str().ok()),
-            headers
-                .get("x-codex-thread-id")
-                .and_then(|h| h.to_str().ok()),
-            headers.get("x-codex-turn-id").and_then(|h| h.to_str().ok()),
-        ) {
+        if let Ok(value) = &result {
+            ensure!(
+                value["resource"]["type"] == "response",
+                "execution receipt mismatch"
+            );
+            let response = crate::proxy::field(&value["resource"], "id")?;
+            let id = r.id.clone();
             self.store
-                .identify(r.id.clone(), resp.into(), thread.into(), turn.into())
+                .call(true, move |c| {
+                    c.execute(
+                        "UPDATE requests SET response_id=?2 WHERE id=?1 AND response_id IS NULL",
+                        params![id, response],
+                    )?;
+                    Ok(())
+                })
                 .await?;
         }
-        let expected_response = self.store.request(&r.id).await?.response_id;
-        let mut redactor = Redactor::new(self.secrets(&s));
-        let mut decoder = SseDecoder::default();
-        let mut stream = response.bytes_stream();
-        let mut raw_lost = false;
-        loop {
-            let chunk = tokio::select! {_=self.cancel.cancelled()=>break,chunk=tokio::time::timeout(Duration::from_secs(90),stream.next())=>chunk.context("Responses stream silent")?};
-            let Some(chunk) = chunk else { break };
-            for event in decoder.feed(&chunk.context("Responses stream lost")?)? {
-                let value: Value = match serde_json::from_str(&event.data) {
-                    Ok(v) => v,
-                    Err(_) => {
-                        raw_lost = true;
-                        continue;
-                    }
-                };
-                if event.event == "response.output_text.delta" && !raw_lost {
-                    if expected_response
-                        .as_deref()
-                        .is_none_or(|id| value["id"].as_str() != Some(id))
-                    {
-                        raw_lost = true;
-                        continue;
-                    }
-                    if let Some(delta) = value["delta"].as_str() {
-                        let clean = redactor.push(delta);
-                        let mut cache = self.output.lock().await;
-                        let total: usize = cache.values().map(|o| o.text.len()).sum();
-                        if let Some(o) = cache.get_mut(&r.id) {
-                            if o.text.len() + clean.len() <= s.cfg.limits.output_bytes
-                                && total + clean.len() <= s.cfg.limits.output_total_bytes
-                            {
-                                o.text.push_str(&clean);
-                                o.last_progress = Instant::now();
-                            } else {
-                                o.lost = true;
-                                raw_lost = true;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        if let Some(o) = self.output.lock().await.get_mut(&r.id) {
-            if !raw_lost {
-                o.text.push_str(&redactor.finish());
-            }
-            o.done = true;
-            o.lost |= raw_lost;
-        }
         s.proxy.reconcile(&self.store, &r.id).await?;
+        result?;
         Ok(())
     }
     pub fn secrets(&self, s: &Settings) -> Vec<String> {
         let mut v = vec![self.discord.secret(), s.proxy.secret()];
-        for w in &s.workspaces {
-            v.push(w.path.to_string_lossy().into_owned());
-        }
         v.push(s.cfg.storage.state_dir.to_string_lossy().into_owned());
         v.push(s.cfg.storage.temp_dir.to_string_lossy().into_owned());
         v.extend(self.retired_secrets.read().unwrap().clone());
@@ -386,7 +343,7 @@ impl App {
                 _=tick.tick()=>{
                     for r in self.store.pending().await?{
                         if jobs.len()>=2{break;}
-                        if r.turn_id.is_none()||r.state.terminal()||active.contains(&r.id)||attempts.get(&r.id).is_some_and(|t|t.elapsed()<Duration::from_secs(5)){continue;}
+                        if r.response_id.is_none()||r.state.terminal()||active.contains(&r.id)||attempts.get(&r.id).is_some_and(|t|t.elapsed()<Duration::from_secs(5)){continue;}
                         active.insert(r.id.clone());attempts.insert(r.id.clone(),Instant::now());let app=self.clone();let id=r.id.clone();let task=jobs.spawn(async move{app.watch_events(r).await});ids.insert(task.id(),id);
                     }
                     attempts.retain(|id,t|active.contains(id)||t.elapsed()<Duration::from_secs(60));
@@ -399,20 +356,34 @@ impl App {
         let response = tokio::time::timeout(
             Duration::from_secs(15),
             s.proxy
-                .monitor(r.turn_id.as_deref().context("Turn missing")?),
+                .monitor_v2(r.response_id.as_deref().context("Response missing")?),
         )
         .await??;
         let mut stream = response.bytes_stream();
         let mut decoder = SseDecoder::default();
         let mut tick = tokio::time::interval(Duration::from_secs(3));
         let mut last_byte = Instant::now();
+        let mut redactor = Redactor::new(self.secrets(&s));
         loop {
             tokio::select! {
                 _=self.cancel.cancelled()=>return Ok(()),
                 _=tick.tick()=>{if self.store.request(&r.id).await?.state.terminal(){return Ok(())}ensure!(last_byte.elapsed()<Duration::from_secs(90),"Turn monitor silent");},
                 chunk=stream.next()=>{let Some(chunk)=chunk else{return Ok(())};last_byte=Instant::now();for event in decoder.feed(&chunk?)?{
                     match event.event.as_str(){
-                        "codex.events.reset"|"codex.events.gap"|"codex.turn.snapshot"=>{s.proxy.reconcile(&self.store,&r.id).await?;},
+                        "snapshot"|"gap"|"response.execution_terminal"|"response.output_ready"|"response.output_failed"=>{s.proxy.reconcile(&self.store,&r.id).await?;},
+                        "response.delta"=>{
+                            let v:Value=serde_json::from_str(&event.data)?;
+                            ensure!(v["response_id"].as_str()==r.response_id.as_deref(),"delta target mismatch");
+                            if let Some(delta)=v["delta"].as_str(){
+                                let delta=redactor.push(delta);
+                                let mut cache=self.output.lock().await;
+                                let total:usize=cache.values().map(|o|o.text.len()).sum();
+                                if total+delta.len()<=s.cfg.limits.output_total_bytes {
+                                    let o=cache.entry(r.id.clone()).or_insert_with(||Output{thread:r.thread_id.clone(),text:String::new(),done:false,lost:false,created:Instant::now(),last_progress:Instant::now(),retention:Duration::from_secs(s.cfg.limits.delivery_retention_secs)});
+                                    if !o.done&&o.text.len()+delta.len()<=s.cfg.limits.output_bytes {o.text.push_str(&delta);o.last_progress=Instant::now();}
+                                }
+                            }
+                        },
                         "approval_requested"=>{let v:Value=serde_json::from_str(&event.data)?;ensure!(v["threadId"].as_str()==r.proxy_thread_id.as_deref()&&v["turnId"].as_str()==r.turn_id.as_deref(),"event target mismatch");self.discover_approvals(&r).await?;},
                         _=>{}
                     }
@@ -429,7 +400,7 @@ impl App {
                     let state=s.proxy.reconcile(&self.store,&r.id).await?;
                     let current=self.store.request(&r.id).await?;
                     if current.stop_requested&&!state.terminal(){let _=self.interrupt(&current).await;}
-                    if state==RequestState::ApprovalRequired{let _=self.discover_approvals(&current).await;}
+                    if matches!(state,RequestState::Running|RequestState::ApprovalRequired)&&current.proxy_thread_id.is_some(){let _=self.discover_approvals(&current).await;}
                 }
             }}
         }
@@ -444,15 +415,18 @@ impl App {
                 for(id,t)in silent{self.notice(id,t,"この案内の時点で120秒以上、新しい回答テキストを受信していません。作業停止とは断定できません。/status と /stop を利用できます。").await?;}
                 let snapshots:Vec<_>=self.output.lock().await.iter().map(|(id,o)|(id.clone(),o.thread.clone(),o.text.clone(),o.done,o.lost)).collect();
                 for(id,thread,text,done,lost)in snapshots{
+                    let _guard=self.resource_mutation.read().await;
+                    if !self.output.lock().await.contains_key(&id){continue;}
                     let mut confirmed=true;
                     for(i,part)in chunks(&text).iter().enumerate(){if !self.delivery.text(&id,&thread,"answer",i as i64,part,json!([])).await?{confirmed=false;break;}}
-                    if done&&confirmed&& (!lost || self.delivery.text(&id,&thread,"delivery",0,"回答表示に欠落があります。再実行はしていません。",json!([])).await?){self.output.lock().await.remove(&id);let rid=id.clone();self.store.call(false,move|c|{c.execute("UPDATE output_state SET state='DELIVERED' WHERE request_id=?1",[rid])?;Ok(())}).await?;}
+                    if done&&confirmed {confirmed=self.delivery.trim_answer(&id,&thread,chunks(&text).len()).await?;}
+                    if done&&confirmed&& (!lost || self.delivery.text(&id,&thread,"delivery",0,"回答表示に欠落があります。再実行はしていません。",json!([])).await?){self.output.lock().await.remove(&id);let rid=id.clone();self.store.call(false,move|c|{c.execute("UPDATE output_state SET state='DELIVERED' WHERE request_id=?1",[&rid])?;c.execute("UPDATE resource_deliveries SET state='RELEASE_PENDING' WHERE id=?1",[rid])?;Ok(())}).await?;}
                 }
                 // State cards remain recoverable without retaining answer text.
-                let rows=self.store.call(false,|c|{let mut st=c.prepare("SELECT id,thread_id,state FROM requests ORDER BY updated_at DESC LIMIT 20")?;Ok(st.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?)}).await?;
-                for(id,thread,state)in rows {
+                let rows=self.store.call(false,|c|{let mut st=c.prepare("SELECT id,thread_id,state,error_code FROM requests ORDER BY updated_at DESC LIMIT 20")?;Ok(st.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<String>>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?)}).await?;
+                for(id,thread,state,error)in rows {
                     let message=match state.as_str(){
-                        "FAILED"=>"作業を完了できませんでした。/status で確認してください。",
+                        "FAILED"=>failure_message(error.as_deref()),
                         "CANCELLED"=>"作業を中断しました。",
                         "CANCEL_REQUESTED"=>"中断を要求しました。停止の確認を待っています。",
                         "UNKNOWN"=>"作業の状態を確認できません。再実行せず保留しています。/status で確認してください。",
@@ -461,7 +435,7 @@ impl App {
                     let _=self.delivery.text(&id,&thread,"status",0,message,json!([])).await?;
                 }
                 let expired:Vec<_>=self.output.lock().await.iter().filter(|(_,o)|o.done&&o.created.elapsed()>=o.retention).map(|(id,_)|id.clone()).collect();
-                for id in expired{self.output.lock().await.remove(&id);self.store.call(false,move|c|{c.execute("UPDATE output_state SET state='UNAVAILABLE' WHERE request_id=?1",[id])?;Ok(())}).await?;}
+                for id in expired{self.output.lock().await.remove(&id);self.store.call(false,move|c|{c.execute("UPDATE output_state SET state='UNAVAILABLE' WHERE request_id=?1 AND NOT EXISTS(SELECT 1 FROM resource_deliveries WHERE id=?1 AND resource_type='response_output')",[id])?;Ok(())}).await?;}
                 let lost=self.store.call(false,|c|{let mut st=c.prepare("SELECT o.request_id,r.thread_id FROM output_state o JOIN requests r ON r.id=o.request_id WHERE o.state='UNAVAILABLE' ORDER BY r.updated_at DESC LIMIT 20")?;Ok(st.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?)}).await?;
                 for(id,t)in lost{let _=self.delivery.text(&id,&t,"output_unavailable",0,"再起動または配信失敗により、回答全文を再取得できません。実行状態は別途確認します。自動再実行はしません。",json!([])).await?;}
                 let notices=self.store.call(false,|c|{let mut st=c.prepare("SELECT id,thread_id,code FROM notices UNION ALL SELECT request_id,thread_id,'入力を確認できなかったため、実行していません。' FROM admissions WHERE status='REJECTED' LIMIT 50")?;Ok(st.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?)}).await?;
@@ -529,7 +503,8 @@ impl App {
         }
         Ok(())
     }
-    pub async fn notice(&self, id: String, thread: String, text: &'static str) -> Result<()> {
+    pub async fn notice(&self, id: String, thread: String, text: &str) -> Result<()> {
+        let text = text.to_owned();
         self.store
             .call(false, move |c| {
                 c.execute(
@@ -541,43 +516,15 @@ impl App {
             .await
     }
     pub async fn interrupt(&self, r: &Request) -> Result<()> {
-        if self.reloading.load(Ordering::SeqCst) || self.recovery.load(Ordering::SeqCst) {
-            return Ok(());
-        }
-        let Some(turn) = &r.turn_id else {
-            return Ok(());
+        let value = self.settings().await.proxy.stop_v2(&self.store, r).await?;
+        let next = match value["stop_status"].as_str() {
+            Some("cancelled_before_start" | "interrupted") => RequestState::Cancelled,
+            Some("waiting_for_start" | "interrupt_pending") => RequestState::CancelRequested,
+            _ => return Ok(()),
         };
-        let s = self.settings().await;
-        let op = format!("interrupt-{}", r.id);
-        let (op2, rid, turn2, thread) = (
-            op.clone(),
-            r.id.clone(),
-            turn.clone(),
-            r.proxy_thread_id.clone(),
-        );
-        let send=self.store.call(true,move|c|{let tx=c.transaction()?;let active:bool=tx.query_row("SELECT stop_requested=1 AND state NOT IN ('COMPLETED','FAILED','CANCELLED') AND turn_id=?2 FROM requests WHERE id=?1",params![rid,turn2],|r|r.get(0))?;if !active{return Ok(false)};let changed=tx.execute("INSERT OR IGNORE INTO operations(id,kind,target_request_id,target_turn_id,target_thread_id,state,send_state,created_at) VALUES(?1,'interrupt',?2,?3,?4,'SENDING','SENDING',?5)",params![op2,rid,turn2,thread,domain::now_ms()])?;tx.commit()?;Ok(changed==1)}).await?;
-        if !send {
-            return Ok(());
-        }
-        let result = s
-            .proxy
-            .control(
-                &format!("/v1/codex/turns/{}/interrupt", path_id(turn)?),
-                None,
-            )
-            .await;
-        self.finish_operation(op, result.is_ok()).await?;
-        if result.is_ok() {
-            self.store
-                .observe(
-                    r.id.clone(),
-                    RequestState::CancelRequested,
-                    "interrupt_accepted_not_confirmed",
-                    false,
-                )
-                .await?;
-        }
-        Ok(())
+        self.store
+            .observe(r.id.clone(), next, "v2_stop_observed", true)
+            .await
     }
     pub async fn finish_operation(&self, id: String, accepted: bool) -> Result<()> {
         self.store
@@ -593,5 +540,26 @@ impl App {
                 Ok(())
             })
             .await
+    }
+}
+
+pub(crate) fn failure_message(code: Option<&str>) -> &'static str {
+    match code {
+        Some("proxy_busy") => {
+            "Proxyが混み合っていたため開始できませんでした。少し待って、新しいメッセージとして依頼してください。この依頼は自動再送しません。"
+        }
+        Some("proxy_capacity") => {
+            "Proxyの保存容量が不足しており開始できませんでした。空き容量を確認してください。"
+        }
+        Some("workspace_access_revoked") => {
+            "Proxyが作業先へのアクセスを拒否しました。作業先の権限を確認してください。"
+        }
+        Some("proxy_invalid_cwd") => {
+            "Proxyが作業フォルダーを拒否したため、実行を開始していません。Proxy側の作業先の許可設定を確認してください。自動再実行はしません。"
+        }
+        Some("proxy_start_rejected") => {
+            "Proxyが依頼を開始前に拒否しました。接続・モデル・作業先の設定を確認してください。自動再実行はしません。"
+        }
+        _ => "作業を完了できませんでした。/status で確認してください。",
     }
 }

@@ -10,3 +10,17 @@ pub mod application;
 pub mod commands;
 pub mod delivery;
 pub mod discord;
+
+mod projects;
+
+pub mod proxy_v2;
+
+pub mod resources;
+
+pub mod selections;
+
+pub mod retention;
+
+pub mod resource_controls;
+
+pub mod proxy_recovery;

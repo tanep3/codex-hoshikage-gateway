@@ -113,6 +113,39 @@ impl Discord {
         }
         anyhow::bail!("Discord rate limit exhausted")
     }
+    pub async fn remove_own_message(&self, thread: &str, message: &str) -> Result<bool> {
+        let url = format!(
+            "{}/channels/{}/messages/{}",
+            self.base,
+            snowflake(thread)?,
+            snowflake(message)?
+        );
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bot {}", self.token.as_str()))
+            .send()
+            .await?;
+        if response.status().as_u16() == 404 {
+            return Ok(true);
+        }
+        ensure!(
+            response.status().is_success(),
+            "surplus message lookup failed"
+        );
+        let value: Value = response.json().await?;
+        ensure!(
+            value["id"] == message && value["channel_id"] == thread && self.owns_message(&value),
+            "surplus message ownership mismatch"
+        );
+        let response = self
+            .client
+            .delete(url)
+            .header("Authorization", format!("Bot {}", self.token.as_str()))
+            .send()
+            .await?;
+        Ok(response.status().is_success() || response.status().as_u16() == 404)
+    }
     pub async fn get(&self, path: &str) -> Result<Value> {
         self.api(reqwest::Method::GET, path, None).await
     }
@@ -150,6 +183,15 @@ impl Discord {
         Ok(())
     }
     pub async fn reply(&self, app: &str, token: &str, text: &str) -> Result<()> {
+        self.reply_components(app, token, text, json!([])).await
+    }
+    pub async fn reply_components(
+        &self,
+        app: &str,
+        token: &str,
+        text: &str,
+        components: Value,
+    ) -> Result<()> {
         ensure!(
             token
                 .bytes()
@@ -159,7 +201,7 @@ impl Discord {
         self.api(
             reqwest::Method::PATCH,
             &format!("/webhooks/{}/{token}/messages/@original", snowflake(app)?),
-            Some(json!({"content":text,"allowed_mentions":{"parse":[]}})),
+            Some(json!({"content":text,"components":components,"allowed_mentions":{"parse":[]}})),
         )
         .await?;
         Ok(())
@@ -171,14 +213,16 @@ impl Discord {
             Some(me["id"].as_str().context("bot identity missing")?.into());
         let opt = |name: &str, description: &str, required: bool| json!({"type":3,"name":name,"description":description,"required":required});
         let commands = json!([
-            {"name":"new","description":"このプロジェクトで会話を作成","options":[opt("title","会話の名前",true)]},
+            {"name":"new","description":"新しい会話を作成","options":[opt("title","会話の名前",true)]},
             {"name":"status","description":"実行・配信・会話の状態を表示"},
             {"name":"stop","description":"待ち行列を停止し、実行中の依頼へ中断を要求"},
             {"name":"resume","description":"一時停止した待ち行列の自動開始を再開"},
             {"name":"models","description":"利用可能なモデルを一覧表示"},
             {"name":"model","description":"選択中モデルの確認／次の依頼のモデル変更","options":[opt("id","ProxyのモデルID",false)]},
             {"name":"steer","description":"現在のTurnへ追加指示","options":[opt("text","追加指示",true)]},
-            {"name":"get","description":"指定した成果物を返送","options":[opt("path","プロジェクト相対パス",true)]}
+            {"name":"workspace","description":"会話を始める前に共有ワークを選択（通常は不要）"},
+            {"name":"retry","description":"未配信・結果不明の保存版を選び、明示的に再送"},
+            {"name":"get","description":"指定した成果物を返送","options":[opt("path","ワーク内の相対パス（省略で一覧）",false),{"type":3,"name":"scope","description":"成果物一覧の範囲","required":false,"choices":[{"name":"この会話","value":"conversation"},{"name":"共有ワーク全体","value":"shared"}]}]}
         ]);
         self.api(
             reqwest::Method::PUT,

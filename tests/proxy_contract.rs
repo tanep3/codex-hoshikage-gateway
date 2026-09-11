@@ -25,8 +25,9 @@ struct Mock {
     cap_bad: std::sync::atomic::AtomicBool,
 }
 fn caps() -> Value {
-    json!({"contract_version":"1.0","responses":true,"streaming":true,"conversation_resume":true,"conversation_model_change":true,"identity_on_start":true,"request_lookup":true,"persistent_turn_status":true,"turn_status":true,"turn_events":true,"turn_interrupt":true,"turn_steer":true,"interactive_approval":true,"auto_approval_suppression":true,"event_reconnect":true,"output_retrieval":false,"limits":{"auth_scope":"shared_operator","continuation":"successful_response_only","disconnect_interrupts":true,"event_history_replay":false,"event_reconnect":"snapshot_only","steer_idempotency":false,"model_change_scope":"same_provider"}})
+    common::caps_v2()
 }
+
 async fn start(
     State(s): State<Arc<Mock>>,
     headers: HeaderMap,
@@ -38,21 +39,30 @@ async fn start(
     *s.seen.lock().unwrap() = Some(body);
     StatusCode::SERVICE_UNAVAILABLE.into_response()
 }
-async fn request(State(s): State<Arc<Mock>>, Path(key): Path<String>) -> Response {
-    if s.status.lock().unwrap().as_str() == "missing" {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    assert_eq!(key, *s.key.lock().unwrap());
-    Json(json!({"client_request_id":key,"phase":"started","response_id":"resp_one","thread_id":"thread_one","turn_id":"turn_one"})).into_response()
-}
-async fn status(State(s): State<Arc<Mock>>) -> Json<Value> {
-    Json(
-        json!({"response_id":"resp_one","thread_id":"thread_one","turn_id":"turn_one","status":*s.status.lock().unwrap(),"pending_approvals":[]}),
+fn bound(v: Value) -> Response {
+    (
+        [
+            ("X-Proxy-Instance-Id", "pxy_test"),
+            ("X-Proxy-Recovery-Generation", "gen_test"),
+        ],
+        Json(v),
     )
+        .into_response()
 }
 async fn server() -> (Proxy, Arc<Mock>, tokio::task::JoinHandle<()>) {
     let state = Arc::new(Mock::default());
-    let router=Router::new().route("/readyz",get(||async{Json(json!({"status":"ready"}))})).route("/v1/codex/capabilities",get(|State(s):State<Arc<Mock>>|async move{let mut c=caps();if s.cap_bad.load(Ordering::SeqCst){c["turn_interrupt"]=json!(false);}Json(c)})).route("/v1/responses",post(start)).route("/v1/codex/requests/{key}",get(request)).route("/v1/codex/turns/turn_one/status",get(status)).route("/v1/codex/responses/resp_one",get(||async{Json(json!({"response_id":"resp_one","thread_id":"thread_one","turn_id":"turn_one","continuable":true}))})).route("/v1/codex/turns/turn_one/interrupt",post(|State(s):State<Arc<Mock>>|async move{s.controls.fetch_add(1,Ordering::SeqCst);(StatusCode::ACCEPTED,Json(json!({"status":"accepted"})))})).with_state(state.clone());
+    let router=Router::new()
+        .route("/readyz",get(||async{Json(json!({"status":"ready"}))}))
+        .route("/v2/codex/capabilities",get(|State(s):State<Arc<Mock>>|async move{let mut c=caps();if s.cap_bad.load(Ordering::SeqCst){c["features"]["stop_by_request"]=json!(false);}Json(c)}))
+        .route("/v2/codex/conversations/conv_one/responses",post(start))
+        .route("/v2/codex/operations/by-key/{key}",get(|State(s):State<Arc<Mock>>,Path(key):Path<String>|async move{
+            assert_eq!(key,*s.key.lock().unwrap());
+            if *s.status.lock().unwrap()=="missing"{return (StatusCode::NOT_FOUND,bound(json!({"error":{"code":"not_found"}}))).into_response();}
+            bound(json!({"resource":{"type":"response","id":"resp_one"}}))
+        }))
+        .route("/v2/codex/responses/resp_one",get(|State(s):State<Arc<Mock>>|async move{let status=s.status.lock().unwrap().clone();bound(json!({"response_id":"resp_one","conversation_id":"conv_one","workspace_id":"ws_one","phase":if status=="completed"{"finished"}else{"started"},"execution_status":if status=="inProgress"{"in_progress"}else{&status}}))}))
+        .route("/v2/codex/conversations/conv_one",get(||async{bound(json!({"conversation_id":"conv_one","workspace_id":"ws_one","state":"ready"}))}))
+        .route("/v1/codex/turns/turn_one/interrupt",post(|State(s):State<Arc<Mock>>|async move{s.controls.fetch_add(1,Ordering::SeqCst);(StatusCode::ACCEPTED,Json(json!({"status":"accepted"})))})).with_state(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let proxy = Proxy::new(
         format!("http://{}", listener.local_addr().unwrap()),
@@ -61,6 +71,9 @@ async fn server() -> (Proxy, Arc<Mock>, tokio::task::JoinHandle<()>) {
     .unwrap();
     let job = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     (proxy, state, job)
+}
+async fn bind_conversation(store: &codex_hoshikage_gateway::storage::Store) {
+    store.call(true,|c|{c.execute("INSERT INTO proxy_conversations(thread_id,request_key,request_json,conversation_id,workspace_id,state) VALUES('4','conversation-test','{}','conv_one','ws_one','READY')",[])?;Ok(())}).await.unwrap();
 }
 #[tokio::test]
 async fn ambiguous_503_and_404_never_create_a_second_post() {
@@ -73,8 +86,9 @@ async fn ambiguous_503_and_404_never_create_a_second_post() {
     *m.key.lock().unwrap() = r.client_request_id.clone().unwrap();
     *m.status.lock().unwrap() = "missing".into();
     p.check().await.unwrap();
+    bind_conversation(&store).await;
     assert!(
-        p.start(&r, json!([{ "role":"user","content":"test"}]), "/workspace")
+        p.start_v2(&r, "conv_one", json!([{ "role":"user","content":"test"}]))
             .await
             .is_err()
     );
@@ -103,6 +117,8 @@ async fn current_status_resolves_unknown_without_new_generation() {
     let (p, m, server) = server().await;
     *m.key.lock().unwrap() = r.client_request_id.unwrap();
     *m.status.lock().unwrap() = "inProgress".into();
+    p.check().await.unwrap();
+    bind_conversation(&store).await;
     assert_eq!(p.reconcile(&store, &id).await.unwrap(), S::Running);
     *m.status.lock().unwrap() = "completed".into();
     assert_eq!(p.reconcile(&store, &id).await.unwrap(), S::Completed);

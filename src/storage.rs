@@ -15,7 +15,10 @@ use std::{
 };
 use tokio::sync::{mpsc, oneshot};
 
-pub const SCHEMA: i64 = 1;
+pub const SCHEMA: i64 = 4;
+pub const MIGRATION_V4: &str = include_str!("../migrations/004_recovery_delivery.sql");
+pub const MIGRATION_V3: &str = include_str!("../migrations/003_delivery_controls.sql");
+pub const MIGRATION_V2: &str = include_str!("../migrations/002_proxy_v2.sql");
 pub const MIGRATION: &str = include_str!("../migrations/001_initial.sql");
 pub fn private_dir(p: &Path) -> Result<()> {
     std::fs::create_dir_all(p)?;
@@ -51,6 +54,31 @@ impl Drop for StateLock {
         unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
     }
 }
+// Internal execution group only; this is not a configured filesystem workspace.
+pub const PROXY_SCOPE: &str = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+fn ensure_proxy_scope(c: &mut Connection, model: &str, fresh: bool) -> Result<()> {
+    let tx = c.transaction()?;
+    tx.execute("INSERT OR IGNORE INTO projects VALUES(?1,'proxy-default','Proxy default','',0,0,'ACTIVE',?2)",params![PROXY_SCOPE,model])?;
+    tx.execute(
+        "UPDATE projects SET default_model=?2 WHERE id=?1",
+        params![PROXY_SCOPE, model],
+    )?;
+    let migrated = tx
+        .prepare("SELECT 1 FROM admin_audit WHERE id='proxy-default-scope-v1'")?
+        .exists([])?;
+    if !migrated {
+        if !fresh {
+            tx.execute("UPDATE admissions SET status='REJECTED',version=version+1,error_code='execution_scope_changed' WHERE status='VALIDATING'",[])?;
+            tx.execute("UPDATE requests SET state='FAILED',dispatch_eligible=0,error_code='execution_scope_changed' WHERE state IN ('QUEUED','RECEIVED')",[])?;
+            tx.execute("UPDATE conversations SET continuation='NEW_CONVERSATION_REQUIRED',paused=1 WHERE EXISTS(SELECT 1 FROM requests r WHERE r.thread_id=conversations.thread_id AND (r.response_id IS NOT NULL OR r.turn_id IS NOT NULL OR r.state NOT IN ('FAILED','CANCELLED')))",[])?;
+            // No prior execution identity or uncertain execution: only new messages may start.
+            tx.execute("UPDATE conversations SET continuation='NEW',paused=0 WHERE NOT EXISTS(SELECT 1 FROM requests r WHERE r.thread_id=conversations.thread_id AND (r.response_id IS NOT NULL OR r.turn_id IS NOT NULL OR r.state NOT IN ('FAILED','CANCELLED')))",[])?;
+        }
+        tx.execute("INSERT INTO admin_audit VALUES('proxy-default-scope-v1',?1,'execution_scope_change',?2,'Proxy owns cwd; old pending requests not replayed',0,?3)",params![unsafe{libc::geteuid()},PROXY_SCOPE,domain::now_ms()])?;
+    }
+    tx.commit()?;
+    Ok(())
+}
 pub fn db_path(cfg: &Config) -> PathBuf {
     cfg.storage.state_dir.join("gateway.sqlite3")
 }
@@ -72,21 +100,59 @@ pub fn initialize(cfg: &Config) -> Result<String> {
     configure(&c)?;
     let tx = c.transaction()?;
     tx.execute_batch(MIGRATION)?;
-    tx.execute("INSERT INTO schema_meta(singleton,schema_version,instance_uuid,fixed_digest) VALUES(1,?1,?2,?3)",params![SCHEMA,instance,cfg.fixed_digest()])?;
+    tx.execute("INSERT INTO schema_meta(singleton,schema_version,instance_uuid,fixed_digest) VALUES(1,?1,?2,?3)",params![1,instance,cfg.fixed_digest()])?;
     tx.execute(
         "INSERT INTO schema_migrations VALUES(?1,?2,?3)",
-        params![
-            SCHEMA,
-            domain::digest(MIGRATION.as_bytes()),
-            domain::now_ms()
-        ],
+        params![1, domain::digest(MIGRATION.as_bytes()), domain::now_ms()],
     )?;
     for w in ws {
         insert_project(&tx, &w)?;
     }
     tx.commit()?;
+    ensure_proxy_scope(&mut c, cfg.registration_model().unwrap_or(""), true)?;
+    migrate_v2(&mut c, false)?;
     c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
     Ok(instance)
+}
+fn migrate_v2(c: &mut Connection, quarantine: bool) -> Result<()> {
+    let version: i64 = c.query_row("SELECT schema_version FROM schema_meta", [], |r| r.get(0))?;
+    if version == SCHEMA {
+        return Ok(());
+    }
+    ensure!((1..=3).contains(&version), "unsupported schema migration");
+    if version == 1 {
+        let tx = c.transaction()?;
+        tx.execute_batch(MIGRATION_V2)?;
+        if quarantine {
+            // Preserve old request identities and history; never dispatch them under a new workspace.
+            tx.execute("UPDATE requests SET dispatch_eligible=0 WHERE state NOT IN ('COMPLETED','FAILED','CANCELLED')", [])?;
+            tx.execute(
+                "UPDATE conversations SET paused=1,continuation='NEW_CONVERSATION_REQUIRED'",
+                [],
+            )?;
+            tx.execute("UPDATE admissions SET status='QUARANTINED',version=version+1 WHERE status='VALIDATING'", [])?;
+        }
+        tx.execute(
+            "INSERT INTO schema_migrations VALUES(2,?1,?2)",
+            params![domain::digest(MIGRATION_V2.as_bytes()), domain::now_ms()],
+        )?;
+        tx.execute("UPDATE schema_meta SET schema_version=2", [])?;
+        tx.commit()?;
+    }
+    for (target, sql) in [(3, MIGRATION_V3), (4, MIGRATION_V4)] {
+        if version >= target {
+            continue;
+        }
+        let tx = c.transaction()?;
+        tx.execute_batch(sql)?;
+        tx.execute(
+            "INSERT INTO schema_migrations VALUES(?1,?2,?3)",
+            params![target, domain::digest(sql.as_bytes()), domain::now_ms()],
+        )?;
+        tx.execute("UPDATE schema_meta SET schema_version=?1", [target])?;
+        tx.commit()?;
+    }
+    Ok(())
 }
 fn configure(c: &Connection) -> Result<()> {
     c.busy_timeout(Duration::from_secs(2))?;
@@ -105,18 +171,32 @@ pub fn validate_database(path: &Path) -> Result<(i64, String)> {
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     ensure!(
-        v == SCHEMA,
+        (1..=SCHEMA).contains(&v),
         "unsupported schema; no database writes performed"
     );
     let hash: String = c.query_row(
         "SELECT checksum FROM schema_migrations WHERE version=?1",
-        [SCHEMA],
+        [1],
         |r| r.get(0),
     )?;
     ensure!(
         hash == domain::digest(MIGRATION.as_bytes()),
         "schema migration checksum mismatch"
     );
+    for (version, migration) in [(2, MIGRATION_V2), (3, MIGRATION_V3), (4, MIGRATION_V4)] {
+        if v < version {
+            continue;
+        }
+        let checksum: String = c.query_row(
+            "SELECT checksum FROM schema_migrations WHERE version=?1",
+            [version],
+            |r| r.get(0),
+        )?;
+        ensure!(
+            checksum == domain::digest(migration.as_bytes()),
+            "schema migration checksum mismatch"
+        );
+    }
     let integrity: String = c.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
     ensure!(integrity == "ok", "database integrity check failed");
     ensure!(
@@ -125,7 +205,7 @@ pub fn validate_database(path: &Path) -> Result<(i64, String)> {
     );
     Ok((v, id))
 }
-fn insert_project(c: &Connection, w: &Workspace) -> Result<()> {
+pub(crate) fn insert_project(c: &Connection, w: &Workspace) -> Result<()> {
     c.execute(
         "INSERT INTO projects VALUES(?1,?2,?3,?4,?5,?6,'ACTIVE',?7)",
         params![
@@ -168,28 +248,11 @@ impl Store {
             fixed == cfg.fixed_digest(),
             "initialized identity does not match configuration"
         );
-        for w in cfg.validate()? {
-            if recovery {
-                continue;
-            }
-            let actual: (String, String, i64, i64, String) = c.query_row(
-                "SELECT channel_id,cwd,dev,ino,lifecycle FROM projects WHERE id=?1",
-                [&w.project.id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-            )?;
-            ensure!(
-                actual
-                    == (
-                        w.project.channel_id.clone(),
-                        w.path.to_string_lossy().into_owned(),
-                        w.dev as i64,
-                        w.ino as i64,
-                        "ACTIVE".into()
-                    ),
-                "workspace differs from registered identity; use admin reload"
-            );
-        }
+        cfg.validate()?;
+        let _ = recovery;
         configure(&c)?;
+        ensure_proxy_scope(&mut c, cfg.registration_model().unwrap_or(""), false)?;
+        migrate_v2(&mut c, true)?;
         let (urgent, mut ur) = mpsc::channel::<Job>(64);
         let (normal, mut nr) = mpsc::channel::<Job>(128);
         let (finished, done) = oneshot::channel();
@@ -262,7 +325,14 @@ impl Store {
             ensure!(!recovery_pending(&tx)?,"recovery pending");
             let floor:i64=tx.query_row("SELECT admission_floor_ms FROM schema_meta",[],|r|r.get(0))?;
             if floor>0{let snowflake=message.parse::<u64>()?;let created=((snowflake>>22) as i64)+1420070400000;ensure!(created>floor&&created<=domain::now_ms()+5000,"old or invalid Discord message");}
-            let cv=read_conversation(&tx,&thread)?;ensure!(cv.continuation!="NEW_CONVERSATION_REQUIRED","new conversation required");
+            let cv=read_conversation(&tx,&thread)?;
+            if cv.continuation=="NEW_CONVERSATION_REQUIRED" {
+                let safe:bool=tx.query_row("SELECT NOT EXISTS(SELECT 1 FROM proxy_conversations WHERE thread_id=?1) AND NOT EXISTS(SELECT 1 FROM requests WHERE thread_id=?1 AND state NOT IN ('COMPLETED','FAILED','CANCELLED')) AND NOT EXISTS(SELECT 1 FROM holds h JOIN requests r ON r.id=h.request_id WHERE r.thread_id=?1 AND h.released=0)",[&thread],|r|r.get(0))?;
+                ensure!(safe,"conversation recovery required");
+                let stopped:bool=tx.query_row("SELECT coalesce((SELECT kind='stop' FROM operations WHERE thread_id=?1 AND kind IN ('stop','resume') AND state='APPLIED' ORDER BY created_at DESC,rowid DESC LIMIT 1),0)",[&thread],|r|r.get(0))?;
+                tx.execute("UPDATE conversations SET continuation='NEW',paused=?2,last_response_id=NULL,proxy_thread_id=NULL,effective_model=NULL WHERE thread_id=?1",params![thread,stopped])?;
+                tx.execute("INSERT INTO admin_audit VALUES(?1,?2,'conversation_initialize',?3,'Initialize missing Proxy conversation for a new message; prior executions retained',0,?4)",params![domain::id(),unsafe{libc::geteuid()},thread,domain::now_ms()])?;
+            }
             let active:bool=tx.query_row("SELECT lifecycle='ACTIVE' FROM projects WHERE id=?1",[&cv.project_id],|r|r.get(0))?;ensure!(active,"project retired");
             let count=|t:Option<&str>|->Result<i64>{Ok(tx.query_row("SELECT count(*) FROM admissions a WHERE (?1 IS NULL OR thread_id=?1) AND (status='VALIDATING' OR (status='ACCEPTED' AND EXISTS(SELECT 1 FROM requests r WHERE r.id=a.request_id AND r.state IN ('RECEIVED','QUEUED') AND r.dispatch_eligible=1)))",[t],|r|r.get(0))?)};
             ensure!(count(None)?<(limits.queue_global as i64)&&count(Some(&thread))?<(limits.queue_conversation as i64),"queue capacity exceeded");
@@ -327,7 +397,7 @@ impl Store {
     }
     pub async fn candidates(&self) -> Result<Vec<Request>> {
         self.call(false,|c|{
-        let mut st=c.prepare(&format!("{REQUEST_SELECT} WHERE r.state='QUEUED' AND r.dispatch_eligible=1 AND p.lifecycle='ACTIVE' AND NOT EXISTS(SELECT 1 FROM holds h WHERE h.project_id=p.id AND h.released=0) AND (SELECT count(*) FROM holds WHERE released=0)<2 AND cv.paused=0 AND cv.continuation IN ('NEW','READY') AND NOT EXISTS(SELECT 1 FROM admissions a LEFT JOIN requests prior ON a.request_id=prior.id WHERE a.thread_id=r.thread_id AND a.sequence<r.sequence AND (a.status='VALIDATING' OR prior.state IN ('RECEIVED','QUEUED'))) ORDER BY r.updated_at,r.sequence LIMIT 20"))?;
+        let mut st=c.prepare(&format!("{REQUEST_SELECT} WHERE r.state='QUEUED' AND r.dispatch_eligible=1 AND p.lifecycle='ACTIVE' AND NOT EXISTS(SELECT 1 FROM holds h JOIN requests held ON held.id=h.request_id WHERE held.thread_id=r.thread_id AND h.released=0) AND (SELECT count(*) FROM holds WHERE released=0)<2 AND cv.paused=0 AND cv.continuation IN ('NEW','READY') AND NOT EXISTS(SELECT 1 FROM admissions a LEFT JOIN requests prior ON a.request_id=prior.id WHERE a.thread_id=r.thread_id AND a.sequence<r.sequence AND (a.status='VALIDATING' OR prior.state IN ('RECEIVED','QUEUED'))) ORDER BY r.updated_at,r.sequence LIMIT 20"))?;
         Ok(st.query_map([],request_row)?.collect::<rusqlite::Result<Vec<_>>>()?)
     }).await
     }
@@ -350,7 +420,9 @@ impl Store {
         let tx=c.transaction()?;ensure!(!recovery_pending(&tx)?,"recovery pending");let r=read_request(&tx,&id)?;let cv=read_conversation(&tx,&r.thread_id)?;
         ensure!(r.state==RequestState::Queued&&r.dispatch_eligible&&!cv.paused&&matches!(cv.continuation.as_str(),"NEW"|"READY"),"request not dispatchable");
         let (total,project):(i64,i64)=tx.query_row("SELECT count(*),coalesce(sum(project_id=?1),0) FROM holds WHERE released=0",[&r.project_id],|r|Ok((r.get(0)?,r.get(1)?)))?;
-        ensure!(total<2&&project==0,"execution capacity unavailable");
+        let _=project;
+        ensure!(total<2&&!tx.prepare("SELECT 1 FROM holds h JOIN requests r ON r.id=h.request_id WHERE r.thread_id=?1 AND h.released=0")?.exists([&r.thread_id])?,"execution capacity unavailable");
+        ensure!(!tx.prepare("SELECT 1 FROM holds h JOIN requests held ON held.id=h.request_id JOIN proxy_conversations occupied ON occupied.thread_id=held.thread_id JOIN proxy_conversations desired ON desired.thread_id=?1 WHERE h.released=0 AND occupied.workspace_id=desired.workspace_id")?.exists([&r.thread_id])?,"workspace occupied");
         ensure!(!tx.prepare("SELECT 1 FROM admissions a LEFT JOIN requests r ON r.id=a.request_id WHERE a.thread_id=?1 AND a.sequence<?2 AND (a.status='VALIDATING' OR r.state IN ('RECEIVED','QUEUED'))")?.exists(params![r.thread_id,r.sequence])?,"prior admission pending");
         ensure!(!tx.prepare("SELECT 1 FROM operations WHERE thread_id=?1 AND kind='model' AND state='VALIDATING'")?.exists([&r.thread_id])?,"model validation pending");
         ensure!(tx.query_row("SELECT lifecycle='ACTIVE' FROM projects WHERE id=?1",[&r.project_id],|r|r.get::<_,bool>(0))?,"project retired");
@@ -398,6 +470,8 @@ impl Store {
             let cv=read_conversation(&tx,&r.thread_id)?;
             if next==RequestState::Completed&&continuable&&r.response_id.is_some(){
                 tx.execute("UPDATE conversations SET continuation='READY',last_response_id=?2,last_success_sequence=?3 WHERE thread_id=?1 AND last_success_sequence<=?3",params![r.thread_id,r.response_id,r.sequence])?;
+            }else if continuable {
+                tx.execute("UPDATE conversations SET continuation='READY' WHERE thread_id=?1 AND continuation!='NEW_CONVERSATION_REQUIRED'",[&r.thread_id])?;
             }else if next!=RequestState::Completed {
                 if cv.last_response_id.is_some(){tx.execute("UPDATE conversations SET continuation='READY' WHERE thread_id=?1",[&r.thread_id])?;}
                 else if r.client_request_id.is_some(){close_conversation(&tx,&r.thread_id)?;}
@@ -409,7 +483,7 @@ impl Store {
     }).await
     }
     pub async fn pending(&self) -> Result<Vec<Request>> {
-        self.call(true,|c|{let mut st=c.prepare(&format!("{REQUEST_SELECT} WHERE (r.state NOT IN ('COMPLETED','FAILED','CANCELLED','QUEUED','RECEIVED') AND EXISTS(SELECT 1 FROM holds h WHERE h.request_id=r.id AND h.released=0)) OR (r.state='COMPLETED' AND cv.continuation='VERIFYING') ORDER BY r.updated_at DESC LIMIT 40"))?;Ok(st.query_map([],request_row)?.collect::<rusqlite::Result<Vec<_>>>()?)}).await
+        self.call(true,|c|{let mut st=c.prepare(&format!("{REQUEST_SELECT} WHERE (r.state NOT IN ('COMPLETED','FAILED','CANCELLED','QUEUED','RECEIVED') AND EXISTS(SELECT 1 FROM holds h WHERE h.request_id=r.id AND (h.released=0 OR r.state='UNKNOWN'))) OR (r.state='COMPLETED' AND cv.continuation='VERIFYING') ORDER BY r.updated_at ASC LIMIT 40"))?;Ok(st.query_map([],request_row)?.collect::<rusqlite::Result<Vec<_>>>()?)}).await
     }
     pub async fn active(&self, thread: &str) -> Result<Option<Request>> {
         let t = thread.to_owned();
@@ -455,7 +529,7 @@ impl Store {
     }
     pub async fn startup_recover(&self) -> Result<()> {
         self.call(true,|c|{
-        c.execute_batch("BEGIN; UPDATE output_state SET state='UNAVAILABLE' WHERE state='VOLATILE'; UPDATE operations SET state='UNKNOWN',send_state='UNKNOWN' WHERE send_state='SENDING'; UPDATE admissions SET status='REJECTED',version=version+1,error_code='validation_interrupted' WHERE status='VALIDATING'; UPDATE operations SET state='SUPERSEDED' WHERE state='VALIDATING' AND kind IN ('resume','model'); COMMIT;")?;Ok(())
+        c.execute_batch("BEGIN; UPDATE output_state SET state='UNAVAILABLE' WHERE state='VOLATILE' AND NOT EXISTS(SELECT 1 FROM requests r JOIN proxy_conversations pc ON pc.thread_id=r.thread_id WHERE r.id=output_state.request_id); UPDATE operations SET state='UNKNOWN',send_state='UNKNOWN' WHERE send_state='SENDING'; UPDATE admissions SET status='REJECTED',version=version+1,error_code='validation_interrupted' WHERE status='VALIDATING'; UPDATE operations SET state='SUPERSEDED' WHERE state='VALIDATING' AND kind IN ('resume','model'); COMMIT;")?;Ok(())
     }).await
     }
     pub async fn status(&self) -> Result<serde_json::Value> {
@@ -471,7 +545,7 @@ impl Store {
 }
 fn recovery_pending(c: &Connection) -> Result<bool> {
     Ok(c.query_row(
-        "SELECT recovery_pending FROM schema_meta WHERE singleton=1",
+        "SELECT recovery_pending OR EXISTS(SELECT 1 FROM proxy_binding WHERE blocked=1) FROM schema_meta WHERE singleton=1",
         [],
         |r| r.get(0),
     )?)

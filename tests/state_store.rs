@@ -88,8 +88,10 @@ async fn first_turn_failure_releases_unsubmitted_queue() {
     assert!(
         s.reserve("12".into(), "4".into(), "meta".into(), c.limits.clone())
             .await
-            .is_err()
+            .unwrap()
+            .is_some()
     );
+    assert_eq!(s.conversation("4").await.unwrap().continuation, "NEW");
 }
 #[tokio::test]
 async fn sweep_rejects_late_worker() {
@@ -183,4 +185,98 @@ async fn stale_stop_button_cannot_pause_or_interrupt_a_later_request() {
     );
     assert!(!s.conversation("4").await.unwrap().paused);
     assert!(!s.request(&second).await.unwrap().stop_requested);
+}
+
+#[tokio::test]
+async fn released_unknown_stays_monitored_and_late_running_reacquires_hold() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = common::config(&tmp);
+    let (s, _lock) = common::store(&cfg).await;
+    let id = common::queued(&s, &cfg, "10").await;
+    s.begin_send(id.clone()).await.unwrap();
+    s.observe(
+        id.clone(),
+        codex_hoshikage_gateway::domain::RequestState::Unknown,
+        "lost",
+        false,
+    )
+    .await
+    .unwrap();
+    let i = id.clone();
+    s.call(true, move |c| {
+        c.execute("UPDATE holds SET released=1 WHERE request_id=?1", [&i])?;
+        c.execute("UPDATE requests SET dispatch_eligible=0 WHERE id=?1", [i])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert!(s.active("4").await.unwrap().is_none());
+    assert!(s.pending().await.unwrap().iter().any(|r| r.id == id));
+    s.observe(
+        id.clone(),
+        codex_hoshikage_gateway::domain::RequestState::Running,
+        "late_execution",
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(s.active("4").await.unwrap().unwrap().id, id);
+    assert!(!s.request(&id).await.unwrap().dispatch_eligible);
+}
+
+#[tokio::test]
+async fn existing_discord_place_initializes_missing_proxy_conversation_without_replaying_history() {
+    for scenario in ["completed", "unknown", "stop", "existing_proxy"] {
+        let t = tempfile::tempdir().unwrap();
+        let cfg = common::config(&t);
+        let (s, _lock) = common::store(&cfg).await;
+        let old = common::queued(&s, &cfg, "100").await;
+        s.begin_send(old.clone()).await.unwrap();
+        let state = if scenario == "unknown" {
+            S::Unknown
+        } else {
+            S::Completed
+        };
+        s.observe(old.clone(), state, "test", true).await.unwrap();
+        if scenario == "stop" {
+            s.stop("stop-1".into(), "4".into()).await.unwrap();
+        }
+        let proxy_exists = scenario == "existing_proxy";
+        s.call(true, move |c| {
+            c.execute("UPDATE conversations SET continuation='NEW_CONVERSATION_REQUIRED',paused=1,last_response_id='old-response',proxy_thread_id='old-thread' WHERE thread_id='4'", [])?;
+            if proxy_exists {
+                c.execute("INSERT INTO proxy_conversations(thread_id,request_key,request_json) VALUES('4','creation-key','{}')", [])?;
+            }
+            Ok(())
+        }).await.unwrap();
+        // Duplicate Discord event never triggers initialization or another execution.
+        assert!(
+            s.reserve("100".into(), "4".into(), "meta".into(), cfg.limits.clone())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            s.conversation("4").await.unwrap().continuation,
+            "NEW_CONVERSATION_REQUIRED"
+        );
+        let new = s
+            .reserve("101".into(), "4".into(), "meta".into(), cfg.limits.clone())
+            .await;
+        if matches!(scenario, "unknown" | "existing_proxy") {
+            assert!(new.is_err(), "{scenario}");
+            assert_eq!(
+                s.conversation("4").await.unwrap().continuation,
+                "NEW_CONVERSATION_REQUIRED"
+            );
+        } else {
+            assert!(new.unwrap().is_some());
+            let cv = s.conversation("4").await.unwrap();
+            assert_eq!(cv.continuation, "NEW");
+            assert_eq!(cv.paused, scenario == "stop");
+            assert!(cv.last_response_id.is_none());
+            assert!(cv.proxy_thread_id.is_none());
+        }
+        assert_eq!(s.request(&old).await.unwrap().state, state);
+    }
 }

@@ -1,151 +1,53 @@
 # User manual
 
-[日本語](user-manual.ja.md) · [Product overview](../README.md) · [Installation guide](installation.md)
+[日本語](user-manual.ja.md) · [Installation](installation.md)
 
-Ready to ask Codex for a hand? This guide walks you through a conversation, from your first message to picking up a finished file. Your Bot, account, and project channel should already be set up; if they are not, start with the [installation guide](installation.md).
+This guide targets API v2. API v2 integration is implemented and acceptance testing is in progress; see [implementation status (Japanese)](implementation-status.ja.md). This is not a production rollout guide.
 
-Behind the scenes, [Codex Hoshikage Proxy](https://github.com/tanep3/codex-hoshikage-proxy) connects to Codex, while this Gateway handles your Discord conversations. You can do your day-to-day work right here in Discord.
+## Start a conversation
 
-The current version is for one authorized user. Bot command descriptions, buttons, and replies currently use Japanese; commands themselves use the names shown below. Live-service acceptance testing is still pending for development version 0.1.0.
+Talk in an authorized text channel, thread, or forum post. No cwd or `/project` registration is needed. Each text channel has its own conversation; threads and forum posts have separate conversations.
 
-## Start with a message
+The administrator chooses whether the Bot responds to all authorized posts or only mentions. The configured model is reused; a selection menu appears when a model must be chosen.
 
-Say hello in a registered project channel. Continue there to keep that channel's context; use another project channel for another project. Normal replies contain the answer only, without request IDs, COMPLETED cards, or delivery-complete notices. Use `/status` for details.
+## Choose models and control work
 
-Choose a response mode under `[discord]`:
-
-```toml
-response_mode = "all" # Every authorized post (default)
-# response_mode = "mention" # Explicit Bot mentions only
-```
-
-In mention mode, mention the Bot itself. Mentions of other people and replies without a Bot mention do not trigger work. Slash commands work in both modes. The operator applies configuration changes with `admin reload`.
-
-In an unregistered location, the Bot explains workspace registration without starting Codex. DMs, other servers, and unauthorized users remain out of scope. Anyone who can view the channel can also see the replies.
-
-Use `/new title:NAME` in the parent channel only when you want an additional independent thread. Existing registered conversation threads continue to work.
-
-## Another task, or a change to the current one?
-
-While Codex is working, an ordinary post is **another queued request**. It does not immediately change the running task. Requests run in order within a conversation. The Gateway allows up to two executions overall, with one at a time for a workspace. Other conversations in the same project may therefore wait.
-
-To give the active task an additional instruction, use:
-
-```text
-/steer text:Focus on the parser first. Do not change the public API.
-```
-
-Steer targets the current task only. It is unavailable when there is no suitable running task, while approval is pending, or when stopping/finished. It does not guarantee that the task will follow the instruction. **Use `/stop` when you need to request a stop.**
-
-Avoid editing or deleting a queued original message or its attachments. The Gateway checks the original input again before sending it; changed or unavailable input is rejected. To correct a request, first check its state so you do not accidentally create a second task with overlapping effects.
-
-## Stop and resume
-
-```text
-/stop
-```
-
-This immediately pauses the conversation's queue, then requests interruption if there is an active task. New replies do not include a stop button; stop buttons on older posts remain supported.
-
-- If only waiting requests exist, the queue is paused without an active task to interrupt.
-- If a request is still being sent and its execution identity is not known, the pause takes effect, but stopping cannot yet be confirmed.
-- A stop request being accepted does **not** mean execution has stopped. Check the following status updates or `/status`.
-- Stopping does not undo file edits or other effects already made.
-
-You may still post while paused; accepted requests wait without starting automatically. To allow those waiting requests to start:
-
-```text
-/resume
-```
-
-Resume does not restart an interrupted task. Write a new request if you want further work after checking the prior result. A pause survives Gateway restarts. Resume also does not clear an `UNKNOWN` execution hold; that requires operator investigation.
-
-## Respond to approval requests
-
-When the Proxy requests approval, the Bot shows buttons for that particular action:
-
-| Button text | Meaning |
+| Command | Purpose |
 | --- | --- |
-| 今回のみ承認 | Approve this action only |
-| 拒否 | Deny the action |
-| 取消 | Cancel the approval request |
+| `/new title:NAME` | Start a new thread or forum post |
+| `/workspace` | Choose a shared workspace before starting a conversation (optional) |
+| `/retry` | Select an undelivered or uncertain saved reply/file and confirm redelivery |
+| `/get scope:shared` | Explicitly list artifacts from the shared workspace |
+| `/models` | List available models |
+| `/model` | Show the selected model, or open the initial selection menu |
+| `/model id:MODEL_ID` | Select the next request's model while preserving same-provider context |
+| `/status` | Check conversation, model, pause, and Proxy connection state |
+| `/steer text:INSTRUCTION` | Add an instruction to the current Turn; ordinary messages queue the next request |
+| `/stop` | Pause the queue and stop the accepted request, including before Turn start |
+| `/resume` | Resume the queue, without rerunning a cancelled request |
 
-Read the action before selecting a button. Only the configured user can respond. Buttons expire or become invalid when their task/approval no longer matches, so use the current prompt rather than an old one. The Gateway does not offer permanent or session-wide approval. Denial or cancellation may cause the task to fail or stop; inspect its eventual result.
+Stop acceptance and confirmed termination are different. The Bot reports uncertainty rather than claiming success. When approval is required, inspect the target and details before using the approval buttons.
 
-Not every task produces a prompt: approval behavior depends on the Proxy's policy and what Codex needs to do.
+## Send input and collect files
 
-## Choose a model
+Attach supported images or UTF-8 text to your message. Oversized input is rejected before execution.
 
-Inside a conversation, `/models` shows available models (up to 25 in the current list). Select a provider-qualified ID from the available models:
+Use `/get` to select an artifact registered through the model's dedicated tool. For an unregistered file, use `/get path:output/report.pdf`. Paths are relative to the Proxy workspace; you do not need its absolute path.
 
-```text
-/model id:PROVIDER/MODEL_ID
-```
+An artifact ID identifies fixed bytes. Resending that version differs from capturing an updated source file. Lists show 25 items per page; use the next-page button to continue. Selections expire after ten minutes. Open `/get` again if a menu expires. Use `/retry` to select an undelivered or uncertain delivery, then confirm the possibility of duplicate messages. This never reruns the AI task.
 
-Replace the placeholder with an actual model ID. Select `/model` in Discord and fill its `id` option rather than posting command-like text as a normal message. Without an option, `/model` shows the selected model. The selection applies to the **next task**, preserving the conversation context; it does not replace the model already running. Use `/status` to distinguish the selected model from the active task's model. A change to a different provider requires a new conversation.
+## After a connection problem
 
-## Attach input and retrieve output
+Disconnecting the Gateway does not stop Proxy execution. Use `/stop` when you intend to stop. Saved final replies and artifacts can be retrieved by the same ID within the Proxy retention period, even after Gateway cache loss. Storage failure, expiration, or revoked access can prevent retrieval. Delivery recovery never automatically reruns the AI task.
 
-Attach files to your ordinary request message using Discord's attachment control. Supported input is:
+Uncertain execution and changes to the Proxy recovery generation require operator reconciliation. See [Operations](operations.md) for recovery procedures.
 
-- Still PNG, JPEG, or WebP images.
-- UTF-8 text files.
+## Share files across conversations
 
-Animated images, PDF/document parsing, and archive extraction are not supported input features. Both the operator's configured limits and Discord's own upload limits apply. The sample allows up to four attachments, 8 MiB each, within a combined 16 MiB input budget including encoding; text has a separate 256 KiB limit. Your operator can change these values. See the [installation guide](installation.md) for all defaults. Files and prompts pass through Discord and the Proxy; include only what you intend those services to receive.
+Each conversation normally gets its own workspace. If you want to share files, use `/workspace` before sending the first request and choose an authorized shared workspace. No config entry or host path is needed. Changes made by other conversations are visible there.
 
-To receive an output file, explicitly name it relative to the project folder:
+An existing conversation cannot change workspaces. Create another with `/new title:NAME` and choose there. Inside a forum post, this creates another post in the same forum. For forums that require tags, use Discord's standard post-creation screen.
 
-```text
-/get path:output/report.pdf
-```
+See [Operations guide](operations.md).
 
-This example retrieves a file already present on the **server**, not a file on your phone or computer. An output may be a PDF even though PDF input parsing is unsupported. The Bot does not automatically scan or send new/changed files, and a path mentioned in a Codex reply is not a download instruction.
-
-Absolute paths, paths outside the project, symbolic links, hard links, special files, and files that fail the safe-read checks are rejected. A file may also exceed the configured return limit or Discord's limit. In that case, ask for a smaller suitable output and explicitly retrieve it.
-
-## What is happening with my request?
-
-Use `/status` in a conversation to inspect its pause state, model selection, current held request, and Proxy readiness. Common request states mean:
-
-| State | What it means for you |
-| --- | --- |
-| `QUEUED` | Waiting for its turn, capacity, or resume |
-| `SENDING` | The request is being handed to the Proxy; execution may not yet be confirmed |
-| `RUNNING` | Execution is in progress |
-| `APPROVAL_REQUIRED` | Your decision is needed |
-| `CANCEL_REQUESTED` | Interruption was requested; stopping is not yet confirmed |
-| `CANCELLED` | Cancellation was confirmed |
-| `COMPLETED` | Codex execution completed; Discord reply delivery is a separate matter |
-| `FAILED` | The task failed; inspect the reported result before trying new work |
-| `UNKNOWN` | Execution status cannot be established reliably; automatic rerun is blocked |
-
-There may also be an input-validation step before a request is queued. A rejected input was not accepted for execution. A full queue can prevent acceptance of another request.
-
-## Coming back after a restart or connection problem
-
-Return to the same Discord channel (or the thread for an older conversation). Previously posted Discord messages remain there. The Gateway preserves conversation identity and queue pause state, and can recover eligible unsent requests by reading their original Discord messages again. Deleted, edited, or inaccessible input will not be executed automatically.
-
-An uncertain request is not automatically submitted again. `UNKNOWN` can hold up later work in its workspace, and `/resume` does not override it. Ask the host operator to compare Gateway and Proxy status. If you are also the operator, begin with local `admin status` and the recovery instructions linked from the [installation guide](installation.md).
-
-**Execution completion and receiving the complete answer are different.** The current Proxy contract cannot retrieve final answer text again. After a Gateway restart or reply-memory expiry, missing answer text may be unrecoverable even when completion is known. The Bot will report the limitation; it will not rerun Codex to reconstruct the answer. Existing project files can still be requested individually with `/get` when available.
-
-An initial failed/cancelled task may leave no usable conversation context. If the Bot reports `NEW_CONVERSATION_REQUIRED`, use `/new` in the parent channel and describe the work you want to continue. If a thread is archived or locked, restore its usability through Discord if you have permission, or create a new conversation; do not assume the Bot will reopen it automatically.
-
-## Command reference
-
-The `name:value` notation below represents Discord command options. Choose the command in the picker and fill the displayed fields.
-
-| Command | Where | Purpose |
-| --- | --- | --- |
-| `/new title:NAME` | Registered project channel | Create a conversation |
-| Ordinary message, optionally with attachments | Registered project channel / existing thread | Submit the next work request |
-| `/status` | Project channel / existing thread | Inspect status and models |
-| `/stop` | Project channel / existing thread | Pause the queue and request interruption |
-| `/resume` | Project channel / existing thread | Resume automatic start of waiting requests |
-| `/steer text:INSTRUCTION` | Project channel / existing thread | Instruct the active task |
-| `/models` | Project channel / existing thread | Show models |
-| `/model` | Project channel / existing thread | Show the selected model |
-| `/model id:PROVIDER/MODEL_ID` | Project channel / existing thread | Choose the next task's model |
-| `/get path:RELATIVE_PATH` | Project channel / existing thread | Retrieve a specified output file |
-
-If the Bot is offline, commands are missing, or all requests are rejected, see [installation troubleshooting](installation.md). If one request is uncertain, check it before posting the same work again.
+Post normally in the place you want to use. `/new` is an optional shortcut to create a different Discord thread or forum post, not a prerequisite for conversation.

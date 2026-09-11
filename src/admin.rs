@@ -5,7 +5,7 @@ use crate::{
     domain, storage,
 };
 use anyhow::{Context, Result, ensure};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -24,6 +24,12 @@ use tokio::{
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Command {
     Status,
+    ProxyInspect,
+    ProxyAccept {
+        review_token: String,
+        reason: String,
+        accept_risk: bool,
+    },
     Reload,
     Reconcile {
         request_id: String,
@@ -93,7 +99,7 @@ pub async fn serve(app: App, config_path: PathBuf) -> Result<()> {
     let listener = UnixListener::bind(path)?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     let backup_slots = Arc::new(Semaphore::new(1));
-    let reload_lock = Arc::new(Mutex::new(()));
+    let reload_lock = app.config_mutation.clone();
     let mut jobs = JoinSet::new();
     loop {
         tokio::select! {
@@ -122,6 +128,15 @@ async fn execute(
     reload_lock: Arc<Mutex<()>>,
 ) -> Result<Value> {
     match command {
+        Command::ProxyInspect => app.inspect_proxy_recovery().await,
+        Command::ProxyAccept {
+            review_token,
+            reason,
+            accept_risk,
+        } => {
+            app.accept_proxy_recovery(&review_token, &reason, accept_risk)
+                .await
+        }
         Command::Status => {
             let s = app.settings().await;
             let db = app.store.status().await?;
@@ -149,7 +164,30 @@ async fn execute(
                 accept_risk && !reason.trim().is_empty() && reason.len() <= 1024,
                 "risk acknowledgement and reason required"
             );
-            app.store.call(true,move|c|{let tx=c.transaction()?;let n=tx.execute("UPDATE holds SET released=1 WHERE request_id=?1 AND generation=?2 AND released=0 AND EXISTS(SELECT 1 FROM requests WHERE id=?1 AND state='UNKNOWN')",params![request_id,generation])?;ensure!(n==1,"UNKNOWN hold or generation mismatch");tx.execute("INSERT INTO admin_audit VALUES(?1,?2,'abandon',?3,?4,1,?5)",params![domain::id(),unsafe{libc::geteuid()},request_id,reason,domain::now_ms()])?;tx.commit()?;Ok(())}).await?;
+            let request = app.store.request(&request_id).await?;
+            if let Some(response) = request.response_id.as_deref() {
+                let remote = app
+                    .settings()
+                    .await
+                    .proxy
+                    .v2_json(
+                        reqwest::Method::GET,
+                        &format!("/v2/codex/responses/{}", crate::proxy::path_id(response)?),
+                        None,
+                        None,
+                    )
+                    .await?;
+                ensure!(
+                    remote["response_id"] == response
+                        && remote["execution_status"] == "unknown"
+                        && remote["hold_state"] == "administratively_released"
+                        && remote["dispatch_eligible"] == false,
+                    "Proxy operator must release the hold first"
+                );
+            } else {
+                anyhow::bail!("Proxy execution identity must be reconciled before release");
+            }
+            app.store.call(true,move|c|{let tx=c.transaction()?;let n=tx.execute("UPDATE holds SET released=1 WHERE request_id=?1 AND generation=?2 AND released=0 AND EXISTS(SELECT 1 FROM requests WHERE id=?1 AND state='UNKNOWN')",params![request_id,generation])?;ensure!(n==1,"UNKNOWN hold or generation mismatch");tx.execute("UPDATE requests SET dispatch_eligible=0 WHERE id=?1",[&request_id])?;tx.execute("UPDATE conversations SET paused=1,continuation='NEW_CONVERSATION_REQUIRED' WHERE thread_id=(SELECT thread_id FROM requests WHERE id=?1)",[&request_id])?;tx.execute("INSERT INTO admin_audit VALUES(?1,?2,'abandon',?3,?4,1,?5)",params![domain::id(),unsafe{libc::geteuid()},request_id,reason,domain::now_ms()])?;tx.commit()?;Ok(())}).await?;
             Ok(json!({"hold_released":true,"state":"UNKNOWN"}))
         }
         Command::Backup { to } => {
@@ -173,7 +211,7 @@ async fn execute(
         Command::Reload => {
             let _guard = reload_lock.lock().await;
             let current = app.settings().await;
-            let next = Config::read(config_path)?;
+            let next = Config::read(config_path)?.with_registered_projects(&app.store.path)?;
             let workspaces = next.validate()?;
             current.cfg.check_reload(&next)?;
             // Existing work snapshots must not be invalidated by shrinking live limits.
@@ -202,37 +240,16 @@ async fn execute(
                 next.proxy.base_url.clone(),
                 secret(&next.proxy.api_key_file)?,
             )?;
+            let proxy = proxy.with_store(app.store.clone());
             proxy.check().await?;
-            let known=app.store.call(true,|c|Ok(c.query_row("SELECT client_request_id FROM requests WHERE client_request_id IS NOT NULL LIMIT 1",[],|r|r.get::<_,String>(0)).optional()?)).await?;
-            if let Some(key) = known {
-                let v = proxy
-                    .get(&format!(
-                        "/v1/codex/requests/{}",
-                        crate::proxy::path_id(&key)?
-                    ))
-                    .await?;
-                ensure!(
-                    v["client_request_id"] == key,
-                    "new credential cannot read known request"
-                );
-            }
-            let n = next.clone();
+            let model = next.registration_model().unwrap_or("").to_owned();
             let revision = current.revision;
-            let ws = workspaces.clone();
             let mut settings = app.settings.write().await;
             let result=app.store.call(true,move|c|{let tx=c.transaction()?;
-            let existing={let mut st=tx.prepare("SELECT id,channel_id,cwd,lifecycle FROM projects")?;st.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?};
-            for(id,channel,cwd,lifecycle)in existing{
-                let candidate=n.projects.iter().find(|p|p.id==id);if let Some(p)=candidate{ensure!(p.channel_id==channel,"project channel changed");if p.lifecycle=="ACTIVE"{let w=ws.iter().find(|w|w.project.id==id).context("workspace missing")?;ensure!(w.path.to_string_lossy()==cwd&&lifecycle=="ACTIVE","project identity changed or resurrected");}}
-                if candidate.is_none_or(|p|p.lifecycle=="RETIRED"){
-                    ensure!(!tx.prepare("SELECT 1 FROM holds WHERE project_id=?1 AND released=0")?.exists([&id])?,"project has execution hold");
-                    ensure!(!tx.prepare("SELECT 1 FROM admissions a JOIN conversations cv ON cv.thread_id=a.thread_id LEFT JOIN requests r ON r.id=a.request_id WHERE cv.project_id=?1 AND (a.status='VALIDATING' OR r.state IN ('QUEUED','RECEIVED'))")?.exists([&id])?,"project has queued work");tx.execute("UPDATE projects SET lifecycle='RETIRED' WHERE id=?1",[&id])?;
-                }
-            }
-            for w in ws{let existing:Option<i64>=tx.query_row("SELECT 1 FROM projects WHERE id=?1",[&w.project.id],|r|r.get(0)).optional()?;
-                if existing.is_some(){tx.execute("UPDATE projects SET name=?2,default_model=?3 WHERE id=?1",params![w.project.id,w.project.name,w.project.default_model])?;}else{tx.execute("INSERT INTO projects VALUES(?1,?2,?3,?4,?5,?6,'ACTIVE',?7)",params![w.project.id,w.project.channel_id,w.project.name,w.path.to_string_lossy(),w.dev as i64,w.ino as i64,w.project.default_model])?;}
-            }ensure!(tx.execute("UPDATE schema_meta SET config_revision=config_revision+1 WHERE config_revision=?1",[revision])?==1,"config revision conflict");tx.commit()?;Ok(())
-        }).await;
+                tx.execute("UPDATE projects SET default_model=?2 WHERE id=?1",params![crate::storage::PROXY_SCOPE,model])?;
+                ensure!(tx.execute("UPDATE schema_meta SET config_revision=config_revision+1 WHERE config_revision=?1",[revision])?==1,"config revision conflict");
+                tx.commit()?;Ok(())
+            }).await;
             if result.is_err() {
                 app.cancel.cancel();
                 result?;

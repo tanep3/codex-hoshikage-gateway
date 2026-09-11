@@ -1,3 +1,5 @@
+default_model = "chatgpt/gpt-5.6-luna" # Choose an available Proxy model.
+
 # Replace the IDs, paths and model for your environment before check/init.
 # Resource limits below are ready-to-use defaults. Store secrets in separate files.
 [discord]
@@ -10,11 +12,11 @@ token_file = "/home/tane/.config/codex-hoshikage-gateway/discord-token"
 [proxy]
 base_url = "http://127.0.0.1:4040"
 api_key_file = "/home/tane/.config/codex-hoshikage-gateway/proxy-key"
-contract_version = "1.0"
+contract_version = "2.0"
 
 [storage]
 state_dir = "/home/tane/.local/state/codex-hoshikage-gateway"
-temp_dir = "/home/tane/.local/state/codex-hoshikage-gateway/temp"
+temp_dir = "/home/tane/.config/codex-hoshikage-gateway/temp"
 socket_path = "/run/user/1000/codex-hoshikage-gateway/admin.sock"
 
 [limits]
@@ -33,11 +35,3 @@ delivery_retention_secs = 900 # 15 minutes
 queue_conversation = 5
 queue_global = 20
 validation_secs = 120
-
-[[projects]]
-id = "00000000-0000-4000-8000-000000000001"
-name = "プロジェクト名"
-channel_id = "REPLACE_WITH_CHANNEL_ID"
-cwd = "/ABSOLUTE/WORKSPACE"
-default_model = "chatgpt/REPLACE_WITH_MODEL_ID"
-lifecycle = "ACTIVE"

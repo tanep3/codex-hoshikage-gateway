@@ -1,36 +1,20 @@
-# 導入手順書
+# 導入手順
 
-[English](installation.md) · [製品概要](../README.ja.md) · [ユーザーマニュアル](user-manual.ja.md)
+[English](installation.md) · [ユーザーマニュアル](user-manual.ja.md)
 
-DiscordからCodexへ話しかけられるように、順番に準備していきましょう。Proxyを用意し、サーバーにBotを追加して、Gatewayを起動するところまで案内します。コマンドはGatewayを置くUbuntuホストのBashで実行してください。準備ができたら、日常の使い方は[ユーザーマニュアル](user-manual.ja.md)へどうぞ。
+**Proxy API v2対応版が必要です。** Proxyを用意してから、以下の手順でGatewayを導入します。
 
-対象は開発版0.1.0のソース導入です。まず検証用プロジェクトで以下の確認を行ってください。実サービスの受入試験とリリース用パッケージの検証は未完了です。
+## 1. Proxyを用意する
 
-## 1. まずはProxyとホストを用意しましょう
-
-**このGatewayには [Codex Hoshikage Proxy](https://github.com/tanep3/codex-hoshikage-proxy) が必要です。** Codexへの接続をProxyが、Discordでの操作をGatewayが担当し、それぞれ別のサービスとして動きます。
-
-まだProxyを導入していなければ、先に[Proxyの導入手順書](https://github.com/tanep3/codex-hoshikage-proxy/blob/main/docs/installation.ja.md)へ進んでください。Codexの準備・認証、Proxyの設定、サービス起動まで案内されています。起動できたら、接続URL・APIキー・作業フォルダー・モデルIDを確認して、ここへ戻ってきてください。すでに動いている場合は、以下の条件を確認して先へ進めます。
-
-用意するものはこちらです。
-
-- Gatewayのファイルを所有し、サービスを実行するUbuntuユーザー。
-- Git、Cビルドツール一式、**1.98以上のRust/Cargo**。記録済みの開発検証はRust 1.98.1で実施しています。未導入なら[Rust公式の導入案内](https://www.rust-lang.org/tools/install)に従ってください。
-- [Control API契約 **1.0**](https://github.com/tanep3/codex-hoshikage-proxy/blob/main/docs/control-api.ja.md) と必須のGateway向け機能に対応した、常駐中の [codex-hoshikage-proxy](https://github.com/tanep3/codex-hoshikage-proxy)。接続URL、APIキー、許可された作業フォルダー、利用可能なProvider付きモデルIDを確認します。一般的なResponses APIだけでは足りません。
-- ホストからDiscordへの外向き通信と、Proxyへの接続。
-- 対象Discordサーバーの所有者、またはアプリを導入・管理できるDiscordアカウント。
-
-初回はGatewayとProxyで同じホスト上の既存作業フォルダーを使ってください。Codexへの接続、作業先の許可、承認方針、ネットワーク利用は事前にProxy側で設定します。Gatewayの設定でProxyの権限を拡張することはできません。
-
-設定例のProxy URLは `http://127.0.0.1:4040` ですが、実際の接続先を確認してください。ループバックはGateway自身のホストを指します。GatewayはDiscordへWebSocketとRESTで接続するため、公開Webサーバー・受信用ポート・Interactions Endpoint URLは不要です。
+[Codex Hoshikage Proxy](https://github.com/tanep3/codex-hoshikage-proxy)のAPI v2対応版が必要です。Codex認証・ワーク管理ルート・保存容量・権限はProxy側で設定します。Gatewayには接続URL、APIキー、利用モデルを設定し、cwdやProjectは登録しません。同居・別ホストともHTTP APIで成果物を取得します。別ホストはHTTPSを使用します。
 
 ## 2. Discordに作業場所を作りましょう
 
 Discordのデスクトップ版またはブラウザー版で、サーバー一覧の **＋** から自分のサーバーを新規作成し、名前を付けて作成を完了します。個人用サーバーで十分です。コミュニティ機能は不要です。[Discord公式のサーバー作成手順](https://support.discord.com/hc/en-us/articles/204849977-How-do-I-create-a-server)を参照してください。
 
-最初のプロジェクト用に、例えば `project-demo` という通常の**テキストチャンネル**を作ります。プロジェクトごとに1チャンネル必要です。このGatewayではフォーラム・ボイスチャンネルをプロジェクト用には使いません。チャンネルの種類と公開範囲は[公式サーバー設定ガイド](https://support.discord.com/hc/en-us/articles/33023827550359-Discord-Server-Setup-Guide)で確認できます。
+通常の**テキストチャンネル**、または**フォーラム**を1つ用意しましょう。フォーラムは投稿ごとに会話を分けたいときに便利です。DiscordではCommunityを有効にしたサーバーで、チャンネル追加の「＋」から「フォーラム」を選んで作成します。詳しくは[公式フォーラムFAQ](https://support.discord.com/hc/en-us/articles/6208479917079-Forum-Channels-FAQ)をご覧ください。
 
-専用サーバーを使うか、プロジェクトチャンネルを本人とBotだけが閲覧できるように制限してください。Gatewayの許可ユーザー設定は操作を制限するもので、ほかの閲覧者から投稿を隠す機能ではありません。通常はそのチャンネル内で会話します。任意の `/new` は公開スレッドを追加します。どちらも本人だけが見える非公開会話ではありません。
+専用サーバーを使うか、利用するチャンネルを本人とBotだけが閲覧できるように制限してください。Gatewayの許可ユーザー設定は操作を制限するもので、ほかの閲覧者から投稿を隠す機能ではありません。通常はそのチャンネル内で会話します。任意の `/new` は公開スレッドを追加します。どちらも本人だけが見える非公開会話ではありません。
 
 ## 3. Botを作って、投稿を読めるようにしましょう
 
@@ -46,11 +30,11 @@ Botページの特権Intent設定で **Message Content Intent** を有効にし�
 
 アプリのインストール設定で、サーバー向けの **Guild Install** を有効にします。User Installは使用しません。Discord提供のインストールリンクを選び、サーバーへのインストール用スコープに `bot` と `applications.commands` を設定して保存します。[公式のアプリ導入説明](https://docs.discord.com/developers/resources/application)を参照してください。
 
-Botには、プロジェクトチャンネルとそのスレッドで次の権限を与えます。
+Botには、利用するチャンネルとそのスレッドで次の権限を与えます。
 
 | 権限（英語UI名） | Gatewayでの用途 |
 | --- | --- |
-| View Channels | プロジェクト・会話の閲覧 |
+| View Channels | チャンネル・会話の閲覧 |
 | Send Messages | Botのメッセージ送信 |
 | Send Messages in Threads | 会話スレッド内での返信 |
 | Create Public Threads | `/new` による会話作成 |
@@ -61,15 +45,14 @@ Botには、プロジェクトチャンネルとそのスレッドで次の権�
 
 インストールリンクを開き、追加先サーバーを選び、要求される権限を確認して承認します。追加するアカウントにはサーバー管理権限が必要です。メンバー一覧にBotが現れれば追加できています。Gatewayを起動するまではオフラインでも構いません。[公式のBot認可フロー](https://docs.discord.com/developers/topics/oauth2#bot-authorization-flow)を参照してください。
 
-## 5. 3つのDiscord IDを控えましょう
+## 5. サーバーと本人のDiscord IDを控えましょう
 
-Discordのユーザー設定の詳細設定で開発者モードを有効にします。自分のユーザー／プロフィールのメニューからユーザーID、サーバーアイコンのメニューからサーバーID、プロジェクトチャンネルのメニューからチャンネルIDをコピーします。[公式のID確認方法](https://support.discord.com/hc/en-us/articles/206346498-Where-can-I-find-my-User-Server-Message-ID)を参照してください。
+Discordのユーザー設定の詳細設定で開発者モードを有効にします。自分のユーザー／プロフィールのメニューからユーザーID、サーバーアイコンのメニューからサーバーIDをコピーします。チャンネルIDは投稿場所から自動取得します。[公式のID確認方法](https://support.discord.com/hc/en-us/articles/206346498-Where-can-I-find-my-User-Server-Message-ID)を参照してください。
 
 | 取得する値 | 設定項目 |
 | --- | --- |
 | サーバーID | `discord.guild_id` |
 | Botではなく、操作する本人のユーザーID | `discord.allowed_user_id` |
-| スレッドではなく、プロジェクト用テキストチャンネルのID | `projects.channel_id` |
 
 TOMLでは引用符で囲んだ文字列として設定します。名前や招待リンクでは代用できません。
 
@@ -112,85 +95,25 @@ chmod 600 "$HOME/.config/codex-hoshikage-gateway/proxy-key"
 
 キーはサービス実行ユーザーが所有する通常ファイルに保存し、グループ・他ユーザーには権限を与えません。シンボリックリンクは拒否されます。Git・Discord投稿・スクリーンショットに含めないでください。Botトークンを変更するときはGatewayを停止し、Portalで再生成し、この非表示入力でファイルを更新して再起動します。再生成後は旧トークンでは接続できません。
 
-## 7. あなたの環境をGatewayに教えましょう
+## 7. Gatewayを設定する
 
-テキストエディターで `$HOME/.config/codex-hoshikage-gateway/config.toml` を編集します。[設定例の全体](../config/config.example.toml)を基準にしてください。
+[設定例](../config/config.example.toml)をconfig.tomlへコピーし、DiscordのGuild ID・本人ID・token_file、ProxyのURL・api_key_file、default_modelを設定します。`proxy.contract_version = "2.0"`を使います。`response_mode`は`all`または`mention`です。
 
-**例の `/home/tane/...` はすべて自分の絶対パスへ変更します。** TOML内では `~` や `$HOME` は展開されません。ホームは `printf '%s\n' "$HOME"`、ユーザーの数値IDは `id -u` で確認できます。
+容量はサンプルの正の標準値から始めます。tempは `~/.config/codex-hoshikage-gateway/temp` を基本とし、実際の絶対パスを設定します。ここは配信用キャッシュで、Codexの実行先ではありません。state_dirとsocket_pathも自分の環境に合わせます。
 
-| 設定項目 | 入力する内容 |
-| --- | --- |
-| `discord.guild_id`、`allowed_user_id` | 手順5のID |
-| `discord.response_mode` | `"all"`：許可本人の全投稿に応答（既定）。`"mention"`：Botへの明示メンション時だけ応答 |
-| `discord.token_file` | `discord-token` の絶対パス |
-| `proxy.base_url` | 常駐Proxyの接続URL |
-| `proxy.api_key_file` | `proxy-key` の絶対パス |
-| `proxy.contract_version` | 現在の実装は `"1.0"` |
-| `storage.state_dir` | Gateway専用の永続状態ディレクトリ |
-| `storage.temp_dir` | 専用の一時ディレクトリ。他アプリと共用しない |
-| `storage.socket_path` | 例: `/run/user/YOUR_UID/codex-hoshikage-gateway/admin.sock`。`YOUR_UID` を本人の数値IDへ変更 |
-| `projects.id` | 固有で変更しないUUID。Ubuntuでは `cat /proc/sys/kernel/random/uuid` で生成可能 |
-| `projects.name` | わかりやすいプロジェクト名 |
-| `projects.channel_id` | プロジェクトのテキストチャンネルID |
-| `projects.cwd` | Proxyが許可した既存作業フォルダーの絶対パス |
-| `projects.default_model` | 実際に利用できるProvider付きモデルID。仮文字列を置換する |
-| `projects.lifecycle` | `"ACTIVE"` |
-
-初回は本人のアカウントで専用保存ディレクトリを権限 `0700` で作ります。設定例と同じ配置を自分のホームで使う場合は次のとおりです。
+## 8. まずターミナルで起動しましょう
 
 ```sh
-install -d -m 700 "$HOME/.local/state/codex-hoshikage-gateway"
-install -d -m 700 "$HOME/.local/state/codex-hoshikage-gateway/temp"
+cargo install --path . --locked
+codex-hoshikage-gateway --config "$HOME/.config/codex-hoshikage-gateway/config.toml" check
+# 新規導入時だけ。既存DBを初期化し直さないでください。
+codex-hoshikage-gateway --config "$HOME/.config/codex-hoshikage-gateway/config.toml" init
+codex-hoshikage-gateway --config "$HOME/.config/codex-hoshikage-gateway/config.toml" run
 ```
 
-プロジェクトを増やす場合は `[[projects]]` ブロックを追加します。IDとチャンネルを重複させず、作業フォルダーの実体が同一・親子関係にならないようにしてください。初期化後はプロジェクトID・チャンネル・フォルダーの対応を維持します。
+Cargoのインストール先設定をそのまま使います。会話場所で挨拶し、モデル変更、停止、保存回答・成果物の再取得を検証します。Ctrl+Cで終了するまで、このターミナルで動作します。この段階では起動用シェルやsystemdの設定は不要です。
 
-### 容量の設定は、まずそのままでOK
-
-設定例には、すぐ試せる標準値を入れてあります。**最初は変更しなくて大丈夫です。** 大きなファイルを扱いたいなど、必要になったときだけ調整しましょう。
-
-| 上限項目 | サンプルの標準値 | 意味 |
-| --- | --- | --- |
-| `attachments` | 4 | 1依頼の添付件数 |
-| `attachment_bytes` | 8 MiB | 入力添付1件の最大バイト数 |
-| `input_bytes` | 16 MiB | 入力合計の最大バイト数。画像をエンコードした入力も収まる必要がある |
-| `text_bytes` | 256 KiB | 本文または個々のテキスト添付のUTF-8最大バイト数 |
-| `image_pixels` | 1,600万画素 | 画像1枚を展開したときの最大画素数 |
-| `artifact_bytes` | 8 MiB | `/get` で返送するファイルの最大バイト数 |
-| `temp_bytes` | 64 MiB | 共有する一時ファイル領域の容量（バイト） |
-| `output_bytes` | 1 MiB | 1依頼の回答を保持する最大バイト数 |
-| `output_total_bytes` | 8 MiB | 回答保持領域全体のバイト数 |
-| `delivery_retention_secs` | 900秒（15分） | 配信用の回答データをメモリに保持できる秒数 |
-| `queue_conversation` | 5 | 1会話の待機依頼上限 |
-| `queue_global` | 20 | 全体の待機依頼上限 |
-| `validation_secs` | 120秒 | 入力検証の予約期限（秒） |
-
-1 MiBは1,048,576バイト、1 KiBは1,024バイトです。サンプルにはバイト数の整数を記載しています。件数・個別容量・合計容量は同時に適用されるので、8 MiBのファイル4件を一度に送れるという意味ではありません。画像のエンコード後のサイズも合計上限に含みます。
-
-調整する場合は正の整数を使ってください。`0` は標準値への切替や無制限を意味せず、設定エラーになります。`temp_bytes` は `input_bytes` と `artifact_bytes` のそれぞれ以上、`output_total_bytes` は `output_bytes` 以上、全体の待機上限は会話単位以上が必要です。同時実行は2固定です。
-
-これらはGateway側の標準値です。Discord・Proxy・モデル側の制限も適用されます。一時領域64 MiBは16 MiBの入力予約2件と8 MiBの成果物を収められる設定ですが、プロセス全体のメモリ上限ではありません。全環境での性能・ファイル受入を保証する値ではないため、困ったときに環境に合わせて調整してください。
-
-## 8. 起動して、ひとこと話しかけてみましょう
-
-```sh
-"$HOME/.cargo/bin/codex-hoshikage-gateway" --config "$HOME/.config/codex-hoshikage-gateway/config.toml" check
-"$HOME/.cargo/bin/codex-hoshikage-gateway" --config "$HOME/.config/codex-hoshikage-gateway/config.toml" init
-"$HOME/.cargo/bin/codex-hoshikage-gateway" --config "$HOME/.config/codex-hoshikage-gateway/config.toml" run
-```
-
-`--config` はサブコマンドより前に置きます。`check` はローカルの設定・キーファイルの検証であり、DiscordやProxyへの接続試験ではありません。`init` は新規導入時に1回だけ実行し、DBと設定ディレクトリ内の識別マーカー `gateway-instance.json` を作ります。`run` には初期化済みの状態が必要です。
-
-許可した本人でDiscordへ入り、登録チャンネルで次を確認します。`/new` は不要です。mentionモードなら通常投稿にBotへのメンションを付けてください。
-
-1. `/status` で準備状態とモデルを確認する。
-2. 「短い挨拶を返してください。ファイルは変更しないでください」と依頼し、受付と回答を確認する。
-3. 続けて投稿し、会話の文脈が継続することを確認する。
-4. 検証用workspaceで、添付、`/get`、`/stop` → `/resume`、モデル選択、該当する場面で承認・Steerを確認する。中断受付だけで実行停止済みとは判断しない。
-
-準備状態が正常にならなければ、Proxy接続・キー・モデル・機能の不一致を解消してから依頼してください。エラー回避のために初期化を繰り返したり、状態領域を削除したりしないでください。
-
-## 9. バックグラウンドで動かしましょう
+## 9. 必要ならバックグラウンドで動かしましょう
 
 手動起動で確認できたらCtrl+Cを押し、Gatewayプロセスの終了を待ちます。リポジトリのディレクトリから次を実行します。
 
@@ -203,7 +126,7 @@ systemctl --user status codex-hoshikage-gateway.service
 journalctl --user -u codex-hoshikage-gateway.service -n 50 --no-pager
 ```
 
-サービス例は上記のバイナリ・設定配置を使用します。変更した場合は有効化前に `ExecStart` を編集してください。同じ状態領域で複数起動しないでください。ログインしていない間もユーザーサービスを継続するには、ホスト管理者によるlinger設定が必要な場合があります。例: `loginctl enable-linger USERNAME`。
+systemdはバイナリを直接起動するので、起動用シェルは不要です。サービス例は上記のバイナリ・設定配置を使用します。変更した場合は有効化前に `ExecStart` を編集してください。同じ状態領域で複数起動しないでください。ログインしていない間もユーザーサービスを継続するには、ホスト管理者によるlinger設定が必要な場合があります。例: `loginctl enable-linger USERNAME`。
 
 停止は `systemctl --user stop codex-hoshikage-gateway.service`、再起動は `systemctl --user restart codex-hoshikage-gateway.service` です。Gatewayサービスを止めることはCodexの停止確認の代わりにはなりません。計画メンテナンス前は `/stop` で依頼の状態を確認してください。
 
@@ -234,3 +157,5 @@ journalctl --user -u codex-hoshikage-gateway.service -n 50 --no-pager
 準備ができたら、[ユーザーマニュアル](user-manual.ja.md)へどうぞ。最初の依頼の仕方と、使えるコマンドをまとめています。
 
 Discordの設定手順は **2026-09-11** にリンク先の公式資料で確認しました。表示名は言語やその後のUI更新で変わる場合があります。
+
+[運用ガイド](operations.ja.md)

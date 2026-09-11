@@ -67,7 +67,83 @@ async fn model_commands_list_inspect_and_change_in_channel() {
         app.store.conversation("4").await.unwrap().selected_model,
         "chatgpt/next"
     );
+
+    // Plain model commands use control handling even without a mention or ready generation gate.
+    app.settings.write().await.cfg.discord.response_mode =
+        codex_hoshikage_gateway::config::ResponseMode::Mention;
+    let (messages, rx) = tokio::sync::mpsc::channel(8);
+    let a = app.clone();
+    let admission = tokio::spawn(async move { a.admit_loop(rx).await });
+    for (id, content, user) in [
+        ("200", "/model chatgpt/test", "2"),
+        ("200", "/model chatgpt/test", "2"),
+        ("201", "/model", "2"),
+        ("202", "/model id:", "2"),
+        ("203", "/stop", "2"),
+        ("204", "/model chatgpt/next", "999"),
+    ] {
+        messages.send(Incoming::Message(json!({"id":id,"channel_id":"4","guild_id":"1","author":{"id":user,"bot":false},"content":content,"attachments":[]}))).await.unwrap();
+        if id != "204" {
+            let target = id.to_owned();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let target = target.clone();
+                    let seen = app
+                        .store
+                        .call(true, move |c| {
+                            Ok(c.query_row(
+                                "SELECT EXISTS(SELECT 1 FROM notices WHERE id=?1)",
+                                [target],
+                                |r| r.get::<_, bool>(0),
+                            )?)
+                        })
+                        .await
+                        .unwrap();
+                    if seen {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+    }
+    assert_eq!(
+        app.store.conversation("4").await.unwrap().selected_model,
+        "chatgpt/test"
+    );
+    app.store
+        .call(true, |c| {
+            assert_eq!(
+                c.query_row("SELECT COUNT(*) FROM requests", [], |r| r.get::<_, i64>(0))?,
+                0
+            );
+            assert_eq!(
+                c.query_row(
+                    "SELECT COUNT(*) FROM operations WHERE interaction_id='200'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )?,
+                1
+            );
+            assert_eq!(
+                c.query_row(
+                    "SELECT COUNT(*) FROM operations WHERE interaction_id='204'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )?,
+                0
+            );
+            let selected: String =
+                c.query_row("SELECT code FROM notices WHERE id='201'", [], |r| r.get(0))?;
+            assert!(selected.contains("chatgpt/test"));
+            Ok(())
+        })
+        .await
+        .unwrap();
     app.cancel.cancel();
     job.await.unwrap().unwrap();
+    admission.await.unwrap().unwrap();
     server.abort();
 }

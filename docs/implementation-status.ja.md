@@ -1,78 +1,62 @@
 # 実装・検証状況
 
-更新日: 2026-09-11  
-実装版: 0.1.0（開発版）  
-基準: 要件0.8、システム設計0.4、Proxy契約1.0  
-著作者: Tane Channel Technology
+更新: 2026-09-11
+基準: 要件2.2、システム設計1.2、Proxy API v2契約案0.2。
 
-## 現在の到達点
+**Gateway側の残実装を反映し、常駐Proxy・実Codex・実Discordによる配信試験を実施しました。** 初回検証時は運用環境を変更していません。後述の受付不具合修正後にバイナリのみインストールしました。
 
-Rustの実行バイナリ、SQLite Store、Proxy/Discord接続、主要コマンド、配信、ファイル処理、管理CLIを実装した。Mock DiscordとMock Proxyを使い、通常投稿の受付から生成ストリーム・成功Responseによる会話継続まで接続できることを確認した。
+## 実装済みの範囲
 
-**初期実装が存在することと、設計全項目の受入完了・本番リリース可能という判断は区別する。** 実Discord/実Codexへの作業送信、常駐サービスの導入・変更は行っていない。既存Proxyのコード・設定・サービスも、この実装作業では変更していない。
+| 対象 | 内容 |
+| --- | --- |
+| 責務境界 | Gatewayにcwd登録を要求せず、Proxyが会話・ワーク・確定回答・成果物の正本を管理 |
+| 会話と実行 | 独立会話作成、会話IDによる継続、元キーによる受理照会、最大1回送信、同一会話・workspaceの排他 |
+| 制御 | 実行枠とは独立した承認・Steer・停止・監視、Turn ID未確定時の停止、停止受付と完了の区別 |
+| 選択UI | モデル・共有ワーク選択、フォーラムからの新規会話、成果物のページ送り・期限付き選択、共有範囲の明示選択 |
+| 回答と成果物 | 固定ID取得、サイズ・SHA-256検証、強いETagとRangeによる中断取得再開、有限リースの取得・延長・解放照会 |
+| 配信復旧 | Discord送信意思の永続化と受領照合、DB再オープン後の確定回答再取得、重複リスク確認付き /retry。AIを再実行して補わない |
+| エラー処理 | 容量・期限・権限・破損の区別、取得のbackoff、未受理が明示されたcapture容量拒否だけ同一キーで再試行 |
+| 表示とtemp | 通常成功時は回答本文を中心に表示、確定回答の余剰投稿整理、所有確認付き孤立キャッシュ回収 |
+| DB・復元 | schema 4、既知schemaのtransaction移行とchecksum確認、旧依頼隔離、Proxy世代変更時の照合票と監査付き明示受入 |
+| UNKNOWN | 自動再実行禁止、Proxy監査解除の照合、旧会話隔離、遅着RUNNING時の占有再取得 |
+| 資料 | 英日README・導入・ユーザーマニュアル・運用手順を更新 |
 
-## 実装した範囲
+v1の実行開始・監視処理は削除しました。モデル一覧と制御に使う既存API、旧DBを安全に移行する互換構造は残しています。
 
-| 領域 | 実装内容 | 主なファイル |
-| --- | --- | --- |
-| 起動・終了 | CLI、明示init、インスタンス照合、critical task監視、キャンセル・期限付き終了、panicの内容非表示 | `src/main.rs` |
-| 状態保存 | SQLite WAL/FULL、初期schema1、checksum/整合性確認、専用worker、要求・操作・配信ID、本文非保存 | `src/storage.rs`、`migrations/001_initial.sql` |
-| 受付・実行 | 許可ユーザー/Guild/Thread照合、検証予約、期限回収、入力再取得、2並列hold、送信最大1回 | `src/application.rs` |
-| 送信許可 | 毎回のready/Capability再確認、要求と設定世代に結び付いた使い切り許可、DBへの根拠保存 | `src/proxy.rs`、`src/storage.rs` |
-| Proxy制御 | 生成SSE、要求/Turn現在照会、イベント監視、Approval/Interrupt/Steer、UNKNOWNの照合 | `src/proxy.rs`、`src/application.rs` |
-| Discord操作 | `/new`、`/status`、`/stop`、停止ボタン、`/resume`、`/model`、`/steer`、承認ボタン、`/get` | `src/commands.rs`、`src/discord.rs` |
-| 回答配信 | 途中表示、分割、既知秘密のストリームマスク、POST/PATCHのpending/confirmed分離、GET照合 | `src/delivery.rs` |
-| 添付・成果物 | 静止画像/UTF-8入力、取得量の制限と一時容量予約、相対パス・descriptorに基づく成果物読取 | `src/files.rs` |
-| 運用 | 本人UID限定Unix socket、status、reload、状態照合、世代付きabandon、整合backup、復元隔離/解除 | `src/admin.rs`、`src/backup.rs` |
-| 配布準備 | MIT、Cargo.lock、設定例、systemd user service例、依存ライセンス一覧 | リポジトリ直下、`config/`、`packaging/` |
+## 実サービスで確認したこと
 
-## 実施済みの検証
+常駐ProxyはAPI v2の必須Capabilityを満たし、成果物登録ツールが有効でした。Gatewayの現在の運用設定はまだ契約1.0です。
 
-```text
-cargo test --locked --tests --quiet              28 passed / 0 failed
-cargo clippy --locked --all-targets -- -D warnings  passed
-cargo fmt --check                                passed
-```
+1. **実Proxy＋実Codex＋模擬Discord**：専用会話を自動作成し、実モデルがテキストファイルを作成、専用ツールで成果物登録、確定回答を保存。Gatewayが一覧から選択し、同じ成果物を取得・検証して配信しました。
+2. **Gateway DB再オープン**：回答のメモリを失った状態から同じResponseの確定回答を取得して配信。新たなAI実行は行っていません。
+3. **実Discord**：許可された投稿先へ「Gateway v2 配信テスト」と上記成果物を送信。Discordで投稿IDと添付サイズを確認しました。運用中Gatewayを置換せず、隔離した試験DBから同じ配信コードを使用しました。
 
-Rust 1.98.1、現在のUbuntu環境で実行。Mock HTTPは一時的なloopbackポート、DBとファイルは一時ディレクトリを使用した。
+これらは tests/live_proxy_v2.rs の明示実行専用テストです。通常のテストでは実サービスへ送信しません。
 
-| 試験ファイル | 件数 | 確認したこと |
-| --- | ---: | --- |
-| `tests/state_store.rs` | 9 | 先行検証予約の追越し禁止、SENDINGの永続化・巻戻し禁止、重複受付防止、stop/resume競合、初回失敗の後続未送信処理、期限切れworker結果の拒否、分割秘密のマスク、未知schemaの書込拒否、backup改変検出、古い停止ボタンの拒否を含む |
-| `tests/proxy_contract.rs` | 6 | 503後の生成POSTが1回、404から自動再送しない、現在照会によるUNKNOWN訂正、Capability喪失、2 hold中のControl到達、UTF-8/SSE境界、要求/設定世代の送信許可照合を含む |
-| `tests/recovery_files.rs` | 3 | 復元した旧待機の永久隔離、backup後に追加されたProjectの復元block、解除後の旧投稿拒否、symlink/hardlink/FIFO/範囲外/容量超過拒否、親子workspace拒否 |
-| `tests/delivery.rs` | 3 | Discord POST/PATCH応答喪失後のGET確定、重複送信なし、完全な429拒否だけの待機・再試行 |
-| `tests/application.rs` | 2 | 通常投稿→入力再取得→送信許可→生成POST→SSE表示内容→現在照会→会話継続。重複Discord投稿でもPOSTは1回 |
-| `tests/cli.rs` | 1 | CLIのローカルcheck/init、再初期化拒否、DB保持、秘密ファイルの権限拒否と非表示 |
-| `tests/admin.rs` | 1 | 私有管理socketのstatus、正式backup作成・検証、同じ出力先の上書き拒否、終了時のsocket回収 |
+## 自動試験
 
-追加試験: `src/discord.rs` 内の2件で応答モードと設定の省略・誤値を確認。`tests/model_commands.rs` の1件で一覧・選択表示・変更・無効IDを確認。applicationには通常チャンネルからの開始、deliveryには本文だけの正常返信を追加した。
+HTTP応答喪失、同一キー照会、世代不一致、初回失敗後の継続、停止競合、リース失効・延長応答喪失、部分ダウンロード、明示再送の重複操作、移行隔離、選択の期限・会話・世代照合、復元の明示受入、余剰表示削除を検証します。
 
-件数はテスト関数単位であり、表の各確認点と1対1ではない。テスト件数をもってT-01〜T-26やV-01〜V-07をすべて完了扱いにしない。
+最終確認結果:
 
-## リリース前に残る検証・補完
+- `cargo test --locked --tests --no-fail-fast --quiet`: 50件成功、失敗0。実サービス用3件は通常実行では除外し、それぞれ明示実行で成功を確認。
+- `cargo clippy --locked --all-targets -- -D warnings`: 成功。
+- `cargo fmt --all -- --check` と `git diff --check`: 成功。
+- 英日資料のローカルリンク: 存在確認済み。
+- `cargo build --locked --release`: 成功。生成バイナリの `--version` 起動を確認。
 
-以下は新しい利用要件ではなく、合意済み設計の実装仕上げ・受入項目である。
+## 配備と追加の環境試験
 
-- 実Discordの権限・Intent・Thread操作、コマンド受付とボタン、モデル切替、画像添付、成果物返送を、許可した試験環境で一連に確認する。
-- 実Codexによる承認待ち、Steer、中断と完了の競合、会話途中のモデル変更、再起動後の継続を確認する。常駐Proxyを障害試験の対象にはしない。
-- Supervisorのpanic/channel断/応答停止、DB容量不足、各commit境界、設定更新中の故障、backup/restore/解除中の強制終了を含む故障注入を拡充する。
-- 設定不正や復元マーカーの読取不能・不一致では現在は安全側に起動拒否する。設計のローカル診断モードについて、不正条件下でも提供できる操作の範囲を補完する。
-- 一部の監視周期・timeout・内部queueサイズはコード内の初期値であり、設計第15節の設定可能項目への展開とreload分類の試験が残る。容量縮小は現在、待機・hold・未配信出力がない場合に限定する。
-- Control/状態/配信の混雑、route/globalのDiscord rate limit、長時間常駐、メモリ上限、保持期限、終了期限を測定する。添付と成果物は一時容量を共有予約するが、ライブラリ内部の受信/JSON/TLSバッファも含めたプロセス実測は未実施。
-- 配布用releaseビルドの動的依存確認、依存ライセンス本文・NOTICEの同梱、systemd user serviceでの運用確認を行う。現時点の依存一覧はライセンス本文の代替ではない。
+公開資料は未リリース製品の初回導入向けです。開発中のDB互換処理は実装上の保護であり、製品のV1→V2移行手順として案内しません。導入は[導入手順](installation.ja.md)、障害時の管理は[運用ガイド](operations.ja.md)を参照してください。
 
-## 運用上の確定事項
+別ホスト・低速実回線での連続運転、最大負荷と容量の実測、ディスク障害の網羅的注入、常駐Gateway更新後のDiscordコマンド操作一式は未実施です。今回の成功を、それらの環境受入まで完了した証拠にはしません。Proxyの復元やUNKNOWN管理解除を本番へ故意に起こす試験も行っていません。
 
-- 生成の到達不明を自動再送しない。Discord送信失敗もCodexの再実行理由にしない。
-- 復元全体の保留解除と、個別UNKNOWN hold・pauseの解除は別操作。隔離した旧依頼の送信資格は戻さない。
-- UNKNOWNのholdを明示解除した後の再確認は、管理者の`admin reconcile`でも行える。確実な実行中状態が判明した場合はholdを再取得する。
-- 回答本文の再取得はProxy契約1.0で非対応。Gatewayのメモリから失われた回答全文を復元できるとは表示しない。
-- 著作者の追加判断により、添付の容量・件数等は設定例に標準値を記載する。初回はそのまま利用でき、必要時に調整する。0を標準値へ変換する処理は追加せず、正数・容量間の整合性検証を維持する。
+コミット・稼働プロセスの再起動は行っていません。
 
-## 会話UIの改定（要件0.8）
+## 通常投稿が継続不可として拒否される不具合の修正
 
-- 登録チャンネルで直接会話。旧スレッドは継続利用し、未登録場所では登録案内だけを返す。
-- response_modeはall/mention。認可対象は本人・設定Guildのまま。通常回答から状態カード・完了定型文を除く。
-- /modelsは一覧、/modelは選択確認、id指定は次のモデル変更。無効IDとProvider変更は専用案内。
-- 上記のMock試験を追加。稼働中Botのバイナリ置換・コマンド再登録・実Discordの改定UI受入試験は未実施。従来の実会話では2件の完了をDBで確認したが、新UIの受入結果には数えない。
+開発中のDB更新で、Proxy会話未作成・過去依頼終了済みの場所まで一律に継続不可となっていた。新しい通常投稿の予約時に安全条件を確認し、同じDiscordの場所で自動初期化する。履歴と重複防止記録は保持し、旧依頼は再送しない。UNKNOWN・既存Proxy会話・明示停止は自動解除しない。
+
+同じ場所への通常投稿だけで回答を取得する結合試験、過去依頼の保持・重複投稿・UNKNOWN・明示停止・既存Proxy会話の回帰試験を追加。通常テスト50件、Clippy、整形・差分チェック成功。
+
+受付不具合の修正版は `cargo install --path . --locked` で `/home/tane/bin/codex-hoshikage-gateway` へインストール済み。既存configでローカルcheck成功。設定と稼働DBの手動変更・プロセスの停止は行っていない。

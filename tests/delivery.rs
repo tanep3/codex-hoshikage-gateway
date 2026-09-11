@@ -16,6 +16,7 @@ use std::sync::{
 struct Mock {
     posts: AtomicUsize,
     patches: AtomicUsize,
+    deletes: AtomicUsize,
     message: Mutex<Value>,
 }
 async fn create(State(s): State<Arc<Mock>>, Json(mut body): Json<Value>) -> Response {
@@ -59,7 +60,12 @@ async fn lost_post_and_patch_receipts_are_reconciled_without_resending() {
             get(
                 |State(s): State<Arc<Mock>>| async move { Json(s.message.lock().unwrap().clone()) },
             )
-            .patch(edit),
+            .patch(edit)
+            .delete(|State(s): State<Arc<Mock>>| async move {
+                s.deletes.fetch_add(1, Ordering::SeqCst);
+                *s.message.lock().unwrap() = json!({});
+                StatusCode::NO_CONTENT
+            }),
         )
         .with_state(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -97,6 +103,11 @@ async fn lost_post_and_patch_receipts_are_reconciled_without_resending() {
             .unwrap()
     );
     assert_eq!(state.patches.load(Ordering::SeqCst), 1);
+    // Final saved output can be shorter than streamed output. Delete only the
+    // persisted, verified bot-owned surplus; repeated cleanup must not delete twice.
+    assert!(delivery.trim_answer("request", "4", 0).await.unwrap());
+    assert!(delivery.trim_answer("request", "4", 0).await.unwrap());
+    assert_eq!(state.deletes.load(Ordering::SeqCst), 1);
     // No prompt or answer content is retained in any SQLite text value.
     delivery
         .store

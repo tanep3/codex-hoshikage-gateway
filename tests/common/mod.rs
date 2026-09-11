@@ -7,6 +7,8 @@ pub fn config(t: &tempfile::TempDir) -> Config {
     let root = t.path();
     std::fs::create_dir_all(root.join("work")).unwrap();
     Config {
+        default_model: None,
+        registration: Registration::default(),
         discord: Discord {
             guild_id: "1".into(),
             allowed_user_id: "2".into(),
@@ -16,7 +18,7 @@ pub fn config(t: &tempfile::TempDir) -> Config {
         proxy: Proxy {
             base_url: "http://127.0.0.1:4040".into(),
             api_key_file: root.join("key"),
-            contract_version: "1.0".into(),
+            contract_version: "2.0".into(),
         },
         storage: Storage {
             state_dir: root.join("state"),
@@ -67,4 +69,7 @@ pub async fn queued(s: &Store, c: &Config, message: &str) -> String {
         .await
         .unwrap();
     id
+}
+pub fn caps_v2() -> serde_json::Value {
+    serde_json::json!({"contract_version":"2.0","instance_id":"pxy_test","recovery_generation":"gen_test","recovery_state":"ready","features":{"managed_conversations":true,"durable_execution":true,"stop_by_request":true,"stop_before_acceptance":true,"workspace_selection":true,"artifact_capture":true,"artifact_registration_tool":true,"artifact_listing":true,"retention_leases":true,"response_output_retrieval":true},"limits":{"auth_scope":"shared_operator","execution_disconnect_interrupts":false}})
 }

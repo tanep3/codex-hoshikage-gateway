@@ -44,6 +44,15 @@ enum Command {
 #[derive(Subcommand)]
 enum Admin {
     Status,
+    ProxyInspect,
+    ProxyAccept {
+        #[arg(long)]
+        review_token: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        accept_risk: bool,
+    },
     Reload,
     Reconcile {
         #[arg(long)]
@@ -112,6 +121,9 @@ async fn run(cli: Cli) -> Result<()> {
     let cfg = Config::read(&config_path)?;
     match cli.command {
         Command::Check => {
+            let cfg = cfg
+                .clone()
+                .with_registered_projects(&storage::db_path(&cfg))?;
             cfg.validate()?;
             secret(&cfg.discord.token_file)?;
             secret(&cfg.proxy.api_key_file)?;
@@ -138,6 +150,16 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Admin { command } => {
             let cmd = match command {
+                Admin::ProxyInspect => admin::Command::ProxyInspect,
+                Admin::ProxyAccept {
+                    review_token,
+                    reason,
+                    accept_risk,
+                } => admin::Command::ProxyAccept {
+                    review_token,
+                    reason,
+                    accept_risk,
+                },
                 Admin::Status => admin::Command::Status,
                 Admin::Reload => admin::Command::Reload,
                 Admin::Reconcile { request_id } => admin::Command::Reconcile { request_id },
@@ -175,6 +197,9 @@ async fn run(cli: Cli) -> Result<()> {
     Ok(())
 }
 async fn daemon(cfg: Config, config_path: PathBuf, force_recovery: bool) -> Result<()> {
+    let cfg = cfg
+        .clone()
+        .with_registered_projects(&storage::db_path(&cfg))?;
     cfg.validate()?;
     let _lock = storage::StateLock::acquire(&cfg.storage.state_dir)?;
     admin::validate_binding(&cfg, &config_path)?;
@@ -218,6 +243,7 @@ async fn daemon(cfg: Config, config_path: PathBuf, force_recovery: bool) -> Resu
     let token = secret(&cfg.discord.token_file)?;
     let proxy = Proxy::new(cfg.proxy.base_url.clone(), secret(&cfg.proxy.api_key_file)?)?;
     let discord = Discord::new(token.clone())?;
+    codex_hoshikage_gateway::resources::clean_orphan_cache(&cfg.storage.temp_dir)?;
     let app = App::new(cfg.clone(), store, discord, proxy)?;
     app.recovery.store(pending, Ordering::SeqCst);
     app.settings.write().await.revision = app
@@ -256,6 +282,10 @@ async fn daemon(cfg: Config, config_path: PathBuf, force_recovery: bool) -> Resu
     task!("events", a.event_loop());
     let a = app.clone();
     task!("delivery", a.delivery_loop());
+    let a = app.clone();
+    task!("resources", a.resource_loop());
+    let a = app.clone();
+    task!("retention", a.retention_loop());
     let a = app.clone();
     task!("admin", admin::serve(a, config_path));
     let a = app.clone();

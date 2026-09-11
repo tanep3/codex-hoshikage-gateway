@@ -3,7 +3,7 @@ use crate::{
     domain::{self, digest},
     storage::Store,
 };
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 #[derive(Clone)]
@@ -37,7 +37,10 @@ impl Delivery {
         let target = target.to_owned();
         let thread = thread.to_owned();
         let kind = kind.to_owned();
-        let fingerprint = digest(&serde_json::to_vec(&(text, &components))?);
+        let fingerprint = digest(&serde_json::to_vec(&(
+            text,
+            canonical_components(&components),
+        ))?);
         let hash = fingerprint.clone();
         let t = thread.clone();
         let record=self.store.call(false,move|c|{
@@ -196,7 +199,25 @@ fn canonical_components(v: &Value) -> Value {
     if let Some(o) = v.as_object() {
         let mut out = serde_json::Map::new();
         for (k, value) in o {
-            if ["type", "style", "label", "custom_id", "components", "url"].contains(&k.as_str())
+            if [
+                "type",
+                "style",
+                "label",
+                "custom_id",
+                "components",
+                "url",
+                "options",
+                "value",
+                "description",
+                "placeholder",
+                "emoji",
+                "name",
+            ]
+            .contains(&k.as_str())
+                || (k == "id" && value.is_string())
+                || (["min_values", "max_values"].contains(&k.as_str()) && value != 1)
+                || (k == "default" && value == true)
+                || (k == "animated" && value == true)
                 || (k == "disabled" && value == true)
             {
                 out.insert(k.clone(), canonical_components(value));
@@ -205,4 +226,74 @@ fn canonical_components(v: &Value) -> Value {
         return Value::Object(out);
     }
     v.clone()
+}
+
+impl Delivery {
+    /// Remove only our persisted surplus parts, after resolving any previous send ambiguity.
+    pub async fn trim_answer(&self, target: &str, thread: &str, keep: usize) -> Result<bool> {
+        let (t, ch) = (target.to_owned(), thread.to_owned());
+        let rows=self.store.call(false,move|c|{
+            let mut st=c.prepare("SELECT id,message_id,state,pending_digest FROM deliveries WHERE target_id=?1 AND thread_id=?2 AND kind='answer' AND part>=?3 AND state!='DELETED'")?;
+            Ok(st.query_map(params![t,ch,keep as i64],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<String>>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?)
+        }).await?;
+        let mut complete = true;
+        for (id, message, state, pending) in rows {
+            if !matches!(state.as_str(), "CONFIRMED" | "DELETE_PENDING") {
+                if !self
+                    .reconcile(&id, thread, message.as_deref(), pending.as_deref())
+                    .await?
+                {
+                    complete = false;
+                    continue;
+                }
+                complete = false;
+                continue;
+            }
+            let mid = message.context("surplus message identity missing")?;
+            let i = id.clone();
+            self.store
+                .call(true, move |c| {
+                    c.execute(
+                        "UPDATE deliveries SET state='DELETE_PENDING' WHERE id=?1",
+                        [i],
+                    )?;
+                    Ok(())
+                })
+                .await?;
+            if !self
+                .discord
+                .remove_own_message(thread, &mid)
+                .await
+                .unwrap_or(false)
+            {
+                complete = false;
+                continue;
+            }
+            self.store
+                .call(true, move |c| {
+                    c.execute("UPDATE deliveries SET state='DELETED' WHERE id=?1", [id])?;
+                    Ok(())
+                })
+                .await?;
+        }
+        Ok(complete)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn menu_receipt_defaults_preserve_identity_and_detect_changed_options() {
+        let sent = json!([{"type":1,"components":[{"type":3,"custom_id":"choose","options":[{"label":"report","value":"artifact-a"}]}]}]);
+        let mut received = sent.clone();
+        received[0]["id"] = json!(1);
+        received[0]["components"][0]["id"] = json!(2);
+        received[0]["components"][0]["min_values"] = json!(1);
+        received[0]["components"][0]["max_values"] = json!(1);
+        received[0]["components"][0]["disabled"] = json!(false);
+        assert_eq!(canonical_components(&sent), canonical_components(&received));
+        received[0]["components"][0]["options"][0]["value"] = json!("artifact-b");
+        assert_ne!(canonical_components(&sent), canonical_components(&received));
+    }
 }

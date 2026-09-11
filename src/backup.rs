@@ -262,56 +262,11 @@ fn hash_file(path: &Path) -> Result<(u64, String)> {
 
 /// Include projects created after the backup before establishing the global restore block.
 pub async fn register_recovery_projects(store: &Store, cfg: &Config) -> Result<()> {
-    let workspaces = cfg.validate()?;
-    let retired: Vec<_> = cfg
-        .projects
-        .iter()
-        .filter(|p| p.lifecycle == "RETIRED")
-        .map(|p| p.id.clone())
-        .collect();
-    store
-        .call(true, move |c| {
-            use rusqlite::OptionalExtension;
-            let tx = c.transaction()?;
-            tx.execute("UPDATE schema_meta SET recovery_pending=1", [])?;
-            for id in retired {
-                tx.execute("UPDATE projects SET lifecycle='RETIRED' WHERE id=?1", [id])?;
-            }
-            for w in workspaces {
-                let old: Option<(String, String, i64, i64)> = tx
-                    .query_row(
-                        "SELECT channel_id,cwd,dev,ino FROM projects WHERE id=?1",
-                        [&w.project.id],
-                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-                    )
-                    .optional()?;
-                if let Some(old) = old {
-                    ensure!(
-                        old == (
-                            w.project.channel_id.clone(),
-                            w.path.to_string_lossy().into_owned(),
-                            w.dev as i64,
-                            w.ino as i64
-                        ),
-                        "restored project identity mismatch"
-                    );
-                } else {
-                    tx.execute(
-                        "INSERT INTO projects VALUES(?1,?2,?3,?4,?5,?6,'ACTIVE',?7)",
-                        params![
-                            w.project.id,
-                            w.project.channel_id,
-                            w.project.name,
-                            w.path.to_string_lossy(),
-                            w.dev as i64,
-                            w.ino as i64,
-                            w.project.default_model
-                        ],
-                    )?;
-                }
-            }
-            tx.commit()?;
-            Ok(())
-        })
-        .await
+    cfg.validate()?;
+    let model = cfg.registration_model().unwrap_or("").to_owned();
+    store.call(true,move|c|{
+        c.execute("INSERT OR IGNORE INTO projects VALUES(?1,'proxy-default','Proxy default','',0,0,'ACTIVE',?2)",params![crate::storage::PROXY_SCOPE,model])?;
+        c.execute("UPDATE schema_meta SET recovery_pending=1",[])?;
+        Ok(())
+    }).await
 }

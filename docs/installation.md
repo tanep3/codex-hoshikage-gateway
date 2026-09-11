@@ -1,34 +1,18 @@
-# Installation guide
+# Installation
 
-[日本語](installation.ja.md) · [Product overview](../README.md) · [User manual](user-manual.md)
+[日本語](installation.ja.md) · [User manual](user-manual.md)
 
-Let's connect your Discord to Codex. We'll prepare the Proxy, add a Bot to your server, and start the Gateway together. Run the commands below in Bash on your Ubuntu host. Once setup is done, the [user manual](user-manual.md) shows you how to use it.
+**Requires Proxy API v2.** Prepare the Proxy first, then follow the steps below.
 
-This is a source installation of development version 0.1.0. Start with a disposable project and complete the checks below before using important workspaces. Live-service acceptance and release packaging verification are still pending.
+## 1. Prepare the Proxy
 
-## 1. Start with the Proxy and your host
-
-**This Gateway needs [Codex Hoshikage Proxy](https://github.com/tanep3/codex-hoshikage-proxy).** It provides the connection to Codex; this Gateway provides the Discord interface. They run as separate services.
-
-If the Proxy is not installed yet, follow its [installation guide](https://github.com/tanep3/codex-hoshikage-proxy/blob/main/docs/installation.md) first. That guide covers Codex setup, authentication, Proxy configuration, and starting its service. Then come back here with your Proxy URL, API key, workspace, and model ID. If you already have it running, check the requirements below and carry on.
-
-Here is what you will need:
-
-- An Ubuntu user account that will own the Gateway files and run the service.
-- Git, a C build toolchain, and Rust/Cargo **1.98 or later**. The recorded development checks used Rust 1.98.1. Follow the [official Rust installation instructions](https://www.rust-lang.org/tools/install) if Rust is not installed.
-- A running [codex-hoshikage-proxy](https://github.com/tanep3/codex-hoshikage-proxy) supporting [Control API contract **1.0**](https://github.com/tanep3/codex-hoshikage-proxy/blob/main/docs/control-api.ja.md), with its required Gateway capabilities enabled. Have its base URL, API key, allowed project folder, and a usable provider-qualified model ID ready. A generic Responses API endpoint alone is insufficient.
-- Outbound connectivity to Discord and connectivity to the Proxy from the Gateway host.
-- A Discord account that owns the target server or can manage/install apps on it.
-
-For the two services to work together, they need to use the same project folder: use the same existing workspace on the host for this initial setup. Configure Codex access, workspace permissions, approval policy, and network access on the Proxy beforehand. Gateway configuration cannot grant permissions that the Proxy denies.
-
-One detail to check before moving on: the sample Proxy URL is `http://127.0.0.1:4040`; verify your actual endpoint. Loopback refers to the Gateway's own host. This Gateway connects to Discord through an outbound WebSocket and REST requests; it does not require a public web server, an inbound port, or an Interactions Endpoint URL.
+An API v2 version of [Codex Hoshikage Proxy](https://github.com/tanep3/codex-hoshikage-proxy) is required. Configure Codex authentication, managed workspaces, storage, and permissions on the Proxy. The Gateway needs its URL, API key, and model; it does not need cwd or Project registration. Artifacts use HTTP on both shared and separate hosts. Use HTTPS for a remote host.
 
 ## 2. Create a Discord server and project channel
 
 In Discord's desktop/browser client, use the **+** in the server sidebar, choose to create your own server, enter a name, and finish creation. A personal server is sufficient; Community features are unnecessary. See Discord's [server creation instructions](https://support.discord.com/hc/en-us/articles/204849977-How-do-I-create-a-server).
 
-Create a regular **text channel**, such as `project-demo`, for your first project. Each project needs its own channel. Forum and voice channels are not the project-channel type used by this Gateway. Discord explains channel types and access controls in its [server setup guide](https://support.discord.com/hc/en-us/articles/33023827550359-Discord-Server-Setup-Guide).
+Create a regular **text channel**, or use a **forum** to keep separate conversations in individual posts. To create a forum, enable Community on your Discord server, press the channel category’s plus button, and choose Forum. See the [official Forum Channels FAQ](https://support.discord.com/hc/en-us/articles/6208479917079-Forum-Channels-FAQ).
 
 Use a dedicated server or restrict the project channel to yourself and the Bot. Gateway's user allowlist controls who can operate it; it does not hide messages from other people who can view the channel. Normal conversations stay in the channel. Optional `/new` creates an additional public thread; neither is private to you alone.
 
@@ -61,15 +45,14 @@ These names correspond to Discord's [permission definitions](https://docs.discor
 
 Open the install link, choose your server, review the requested permissions, and authorize installation. The installing account needs server-management permission. The Bot should appear in the server member list; it can remain offline until the Gateway runs. See Discord's [Bot authorization flow](https://docs.discord.com/developers/topics/oauth2#bot-authorization-flow).
 
-## 5. Copy the three Discord IDs
+## 5. Copy your server and user IDs
 
-Enable Developer Mode in Discord's user settings under Advanced. Copy your own user ID from your user/profile context menu, the server ID from the server icon's context menu, and the project channel ID from the channel's context menu. See Discord's [ID lookup guide](https://support.discord.com/hc/en-us/articles/206346498-Where-can-I-find-my-User-Server-Message-ID).
+Enable Developer Mode in Discord's user settings under Advanced. Copy your own user ID from your user/profile context menu and the server ID from the server icon's context menu. Channel IDs are obtained automatically from the conversation location. See Discord's [ID lookup guide](https://support.discord.com/hc/en-us/articles/206346498-Where-can-I-find-my-User-Server-Message-ID).
 
 | Value | Gateway setting |
 | --- | --- |
 | Server ID | `discord.guild_id` |
 | Your personal user ID, not the Bot's | `discord.allowed_user_id` |
-| Project text channel ID, not a thread ID | `projects.channel_id` |
 
 Keep the IDs as quoted strings in TOML. Names and invite links cannot replace them.
 
@@ -88,7 +71,7 @@ chmod 600 "$HOME/.config/codex-hoshikage-gateway/config.toml"
 
 Install with `cargo install --path .`. The example adds `--locked` to use the dependency versions in Cargo.lock. The usual executable path is `~/.cargo/bin/codex-hoshikage-gateway`. If `~/.cargo/bin` is on your PATH, check it with `codex-hoshikage-gateway --version`. If you customize `CARGO_HOME` or the Cargo install directory, adjust the paths below and the service’s `ExecStart` to match.
 
-The copy is for a **new installation**. Preserve your existing configuration when upgrading. Run these steps as the service user, not root.
+Run these steps as the user who will run the Gateway, not root.
 
 Enter the Bot token at a hidden prompt. Paste only the token, without a `Bot ` prefix. The token itself will not become part of your shell command history:
 
@@ -112,85 +95,25 @@ chmod 600 "$HOME/.config/codex-hoshikage-gateway/proxy-key"
 
 Credential files must be ordinary files owned by the service user, with no group/other access; symlinks are rejected. Keep them out of Git, Discord messages, and screenshots. To replace a Bot token, stop the Gateway, reset the token in the Portal, update this file using the hidden prompt, and restart. The old token no longer authenticates after a reset.
 
-## 7. Tell the Gateway about your setup
+## 7. Configure the Gateway
 
-Edit `$HOME/.config/codex-hoshikage-gateway/config.toml` using a text editor. Start from the [complete configuration example](../config/config.example.toml).
+Copy the [sample](../config/config.example.toml) to config.toml. Set the Discord Guild/user IDs and token_file, the Proxy URL and api_key_file, and default_model. Use `proxy.contract_version = "2.0"`. Choose `response_mode = "all"` or `"mention"`.
 
-**Replace every `/home/tane/...` example path with your own absolute path.** TOML values do not expand `~` or `$HOME`. Run `printf '%s\n' "$HOME"` and `id -u` to find your home directory and numeric user ID.
+Start with the sample's positive resource defaults. Use the absolute equivalent of `~/.config/codex-hoshikage-gateway/temp` for the delivery cache. This is not the Codex working directory. Adapt state_dir and socket_path to your host.
 
-| Setting | What to enter |
-| --- | --- |
-| `discord.guild_id`, `allowed_user_id` | IDs from step 5 |
-| `discord.response_mode` | `"all"`: every authorized post (default); `"mention"`: explicit Bot mentions only |
-| `discord.token_file` | Absolute path to `discord-token` |
-| `proxy.base_url` | Your running Proxy's base URL |
-| `proxy.api_key_file` | Absolute path to `proxy-key` |
-| `proxy.contract_version` | `"1.0"` for the current implementation |
-| `storage.state_dir` | Dedicated persistent directory for Gateway state |
-| `storage.temp_dir` | Dedicated temporary directory; do not share it with another application |
-| `storage.socket_path` | For example `/run/user/YOUR_UID/codex-hoshikage-gateway/admin.sock`, replacing `YOUR_UID` |
-| `projects.id` | A stable, unique UUID; Ubuntu can generate one with `cat /proc/sys/kernel/random/uuid` |
-| `projects.name` | A recognizable project name |
-| `projects.channel_id` | The project's text channel ID |
-| `projects.cwd` | Existing absolute project folder allowed by the Proxy |
-| `projects.default_model` | An actual available provider-qualified model ID; replace the sample placeholder |
-| `projects.lifecycle` | `"ACTIVE"` |
-
-For the first installation, create the dedicated storage directories with mode `0700` under your own account. With the sample layout adapted to your home:
+## 8. Start in your terminal
 
 ```sh
-install -d -m 700 "$HOME/.local/state/codex-hoshikage-gateway"
-install -d -m 700 "$HOME/.local/state/codex-hoshikage-gateway/temp"
+cargo install --path . --locked
+codex-hoshikage-gateway --config "$HOME/.config/codex-hoshikage-gateway/config.toml" check
+# First installation only. Never reinitialize an existing database.
+codex-hoshikage-gateway --config "$HOME/.config/codex-hoshikage-gateway/config.toml" init
+codex-hoshikage-gateway --config "$HOME/.config/codex-hoshikage-gateway/config.toml" run
 ```
 
-Add another `[[projects]]` block for each additional project. IDs and channels must be unique. Workspace folders must not resolve to the same location or contain one another. Keep the project ID/channel/folder mapping stable after initialization.
+Your configured Cargo installation destination is respected. Test conversations, model changes, stopping, and saved output retrieval. The foreground process keeps running until you press Ctrl+C. No startup shell script or systemd setup is needed for this step.
 
-### Start with the included limits
-
-The sample already includes default limits, so **you can leave this section as it is to get started**. Adjust it later if you need larger files or a different resource budget.
-
-| Limit | Sample default | Meaning |
-| --- | --- | --- |
-| `attachments` | 4 | Maximum files in one request |
-| `attachment_bytes` | 8 MiB | Maximum bytes in one input attachment |
-| `input_bytes` | 16 MiB | Maximum combined input size; encoded image input must also fit |
-| `text_bytes` | 256 KiB | Maximum UTF-8 bytes in message text or an individual text attachment |
-| `image_pixels` | 16,000,000 pixels | Maximum decoded pixels per image |
-| `artifact_bytes` | 8 MiB | Maximum bytes in a file returned by `/get` |
-| `temp_bytes` | 64 MiB | Shared temporary-file capacity in bytes |
-| `output_bytes` | 1 MiB | Maximum retained reply bytes per request |
-| `output_total_bytes` | 8 MiB | Total retained reply budget in bytes |
-| `delivery_retention_secs` | 900 seconds (15 minutes) | How long reply data may remain in memory for delivery, in seconds |
-| `queue_conversation` | 5 | Waiting-request limit per conversation |
-| `queue_global` | 20 | Waiting-request limit overall |
-| `validation_secs` | 120 seconds | Input-validation reservation timeout in seconds |
-
-1 MiB is 1,048,576 bytes; 1 KiB is 1,024 bytes. The sample uses integer byte counts. File count, individual size, and total size limits all apply together: four files of 8 MiB each do not fit one request. Encoded image size also counts toward the total.
-
-Use positive integers when adjusting these values. `0` remains a configuration error; it does not select defaults or remove limits. `temp_bytes` must cover both `input_bytes` and `artifact_bytes` individually; `output_total_bytes` must be at least `output_bytes`; the global queue limit must cover the per-conversation limit. Concurrent execution remains fixed at two.
-
-These are Gateway defaults; Discord, Proxy, and model limits also apply. The 64 MiB temporary budget accommodates two 16 MiB input reservations and an 8 MiB artifact, but it is not a whole-process memory cap. These values are starting settings, not a guarantee of performance or file acceptance in every environment. Adjust them if your setup needs it.
-
-## 8. Start it up and say hello
-
-```sh
-"$HOME/.cargo/bin/codex-hoshikage-gateway" --config "$HOME/.config/codex-hoshikage-gateway/config.toml" check
-"$HOME/.cargo/bin/codex-hoshikage-gateway" --config "$HOME/.config/codex-hoshikage-gateway/config.toml" init
-"$HOME/.cargo/bin/codex-hoshikage-gateway" --config "$HOME/.config/codex-hoshikage-gateway/config.toml" run
-```
-
-`--config` must precede the subcommand. `check` validates local configuration and credential files; it does **not** test Discord or Proxy connectivity. `init` runs once for a new installation and creates the database and adjacent configuration-directory `gateway-instance.json` identity marker. `run` requires that initialized state.
-
-In Discord, sign in as the allowed user and open the registered project channel. No `/new` is needed. In mention mode, mention the Bot in ordinary posts:
-
-1. Use `/status` to inspect readiness and the model.
-2. Send a small request such as “Reply with a short greeting. Do not change files.” Confirm receipt and the answer.
-3. Send a follow-up to check conversation continuity.
-4. In a disposable workspace, verify attachment input, `/get`, `/stop` followed by `/resume`, model selection, and approval/steer when applicable. A stop acknowledgement alone is not confirmation that execution has stopped.
-
-If readiness fails, fix the Proxy connection, credentials, model, or capability mismatch before sending work. Do not repeatedly initialize or delete the state directory to bypass errors.
-
-## 9. Keep it running in the background
+## 9. Optional: keep it running in the background
 
 After the foreground checks, press Ctrl+C and wait for that Gateway process to exit. From the repository directory:
 
@@ -203,7 +126,7 @@ systemctl --user status codex-hoshikage-gateway.service
 journalctl --user -u codex-hoshikage-gateway.service -n 50 --no-pager
 ```
 
-The supplied service uses the binary and configuration locations above. If you chose different locations, edit `ExecStart` before enabling it. Run only one instance for a state directory. To keep a user service running without a login session, the host administrator may need to enable lingering for the service account, for example `loginctl enable-linger USERNAME`.
+systemd starts the binary directly; no wrapper shell script is needed. The supplied service uses the binary and configuration locations above. If you chose different locations, edit `ExecStart` before enabling it. Run only one instance for a state directory. To keep a user service running without a login session, the host administrator may need to enable lingering for the service account, for example `loginctl enable-linger USERNAME`.
 
 Stop it with `systemctl --user stop codex-hoshikage-gateway.service`; restart it with `systemctl --user restart codex-hoshikage-gateway.service`. Stopping the Gateway service is not a substitute for confirming that a Codex task has stopped. Use `/stop` and inspect the result before planned maintenance.
 
@@ -234,3 +157,5 @@ Replace the backup path with a new, private destination. Do not copy only a live
 All set? Head to the [user manual](user-manual.md) for your first real conversation and a handy command reference.
 
 Discord-specific setup was checked against the linked official documentation on **2026-09-11**. Portal labels may vary by language or later updates.
+
+See [Operations guide](operations.md).

@@ -1,11 +1,8 @@
-use crate::{
-    domain::{Request, RequestState},
-    storage::Store,
-};
+use crate::{domain::RequestState, storage::Store};
 use anyhow::{Context, Result, ensure};
 use futures_util::StreamExt;
 use reqwest::{Client, Response};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::{
     sync::{
         Arc,
@@ -16,12 +13,13 @@ use std::{
 
 #[derive(Clone)]
 pub struct Proxy {
-    base: String,
-    key: Arc<String>,
-    stream: Client,
-    control: Client,
-    monitor: Client,
+    pub(crate) base: String,
+    pub(crate) key: Arc<String>,
+    pub(crate) stream: Client,
+    pub(crate) control: Client,
+    pub(crate) monitor: Client,
     pub gate: Arc<Gate>,
+    pub(crate) v2: Arc<crate::proxy_v2::V2State>,
 }
 pub struct Gate {
     pub ready: AtomicBool,
@@ -73,6 +71,7 @@ impl Proxy {
                 .no_proxy()
         };
         Ok(Self {
+            v2: Arc::new(crate::proxy_v2::V2State::default()),
             base: base.trim_end_matches('/').into(),
             key: Arc::new(key),
             stream: builder().build()?,
@@ -89,12 +88,13 @@ impl Proxy {
         (*self.key).clone()
     }
     async fn get_with(&self, client: &Client, path: &str) -> Result<Value> {
-        let result = client
+        let mut request = client
             .get(format!("{}{}", self.base, path))
-            .bearer_auth(self.key.as_str())
-            .send()
-            .await
-            .context("Proxy GET transport error");
+            .bearer_auth(self.key.as_str());
+        if path.starts_with("/v1/codex/") && self.v2.binding.read().unwrap().is_some() {
+            request = self.bound(request)?;
+        }
+        let result = request.send().await.context("Proxy GET transport error");
         let r = match result {
             Ok(r) => r,
             Err(e) => {
@@ -129,8 +129,9 @@ impl Proxy {
                 self.get("/readyz").await?["status"] == "ready",
                 "Proxy not ready"
             );
-            let caps = self.get("/v1/codex/capabilities").await?;
-            validate_capabilities(&caps)?;
+            let caps = self.get("/v2/codex/capabilities").await?;
+            crate::proxy_v2::validate(&caps)?;
+            self.bind_v2(&caps).await?;
             ensure!(
                 epoch == self.gate.epoch.load(Ordering::SeqCst),
                 "stale capability check"
@@ -166,43 +167,6 @@ impl Proxy {
             && ticket.epoch == self.gate.epoch.load(Ordering::SeqCst)
             && ticket.created.elapsed() < Duration::from_secs(5)
     }
-    pub async fn start(&self, r: &Request, input: Value, cwd: &str) -> Result<Response> {
-        let mut body = json!({"model":r.model,"input":input,"stream":true,"metadata":{"codex.cwd":cwd,"codex.approval_capability":"interactive","codex.auto_approve_workspace":"false"}});
-        if let Some(prev) = &r.previous_response_id {
-            body["previous_response_id"] = json!(prev);
-        }
-        // The caller MUST durably commit SENDING before entering this function. No retry loop.
-        let send = self
-            .stream
-            .post(format!("{}/v1/responses", self.base))
-            .bearer_auth(self.key.as_str())
-            .header(
-                "Idempotency-Key",
-                r.client_request_id
-                    .as_deref()
-                    .context("missing request identity")?,
-            )
-            .json(&body)
-            .send();
-        let response = tokio::time::timeout(Duration::from_secs(30), send)
-            .await
-            .context("Proxy start headers timed out; result unknown")?
-            .context("Proxy start transport result unknown")?;
-        ensure!(
-            response.status().is_success(),
-            "Proxy start rejected: {}",
-            response.status().as_u16()
-        );
-        ensure!(
-            response
-                .headers()
-                .get("content-type")
-                .and_then(|h| h.to_str().ok())
-                .is_some_and(|s| s.starts_with("text/event-stream")),
-            "Proxy start did not return SSE; lookup required"
-        );
-        Ok(response)
-    }
     pub async fn control(&self, path: &str, body: Option<Value>) -> Result<Value> {
         let mut req = self
             .control
@@ -211,95 +175,19 @@ impl Proxy {
         if let Some(v) = body {
             req = req.json(&v);
         }
+        if self.v2.binding.read().unwrap().is_some() {
+            req = self.bound(req)?;
+        }
         let response = req.send().await.context("control delivery unknown")?;
         let status = response.status();
         ensure!(status.is_success(), "control rejected: {}", status.as_u16());
         response.json().await.context("control response invalid")
     }
-    pub async fn monitor(&self, turn: &str) -> Result<Response> {
-        let r = self
-            .monitor
-            .get(format!(
-                "{}/v1/codex/turns/{}/events/stream",
-                self.base,
-                path_id(turn)?
-            ))
-            .bearer_auth(self.key.as_str())
-            .send()
-            .await?;
-        ensure!(r.status().is_success(), "monitor unavailable");
-        Ok(r)
-    }
     pub async fn reconcile(&self, store: &Store, id: &str) -> Result<RequestState> {
-        let mut r = store.request(id).await?;
-        if r.state.terminal() && r.state != RequestState::Completed {
-            return Ok(r.state);
-        }
-        let resolved = async {
-            let key = r
-                .client_request_id
-                .as_deref()
-                .context("request identity unavailable")?;
-            let record = self
-                .get(&format!("/v1/codex/requests/{}", path_id(key)?))
-                .await?;
-            ensure!(
-                record["client_request_id"].as_str() == Some(key),
-                "request lookup identity mismatch"
-            );
-            if record["phase"] == "rejected" {
-                return Ok((RequestState::Failed, false));
-            }
-            let response = field(&record, "response_id")?;
-            let thread = field(&record, "thread_id")?;
-            let turn = field(&record, "turn_id")?;
-            store
-                .identify(id.into(), response.clone(), thread.clone(), turn.clone())
-                .await?;
-            r = store.request(id).await?;
-            let status = self
-                .get(&format!("/v1/codex/turns/{}/status", path_id(&turn)?))
-                .await?;
-            ensure!(
-                status["turn_id"] == turn
-                    && status["thread_id"] == thread
-                    && status["response_id"] == response,
-                "turn lookup identity mismatch"
-            );
-            let state = match status["status"].as_str() {
-                Some("inProgress") => {
-                    if status["pending_approvals"]
-                        .as_array()
-                        .is_some_and(|a| !a.is_empty())
-                    {
-                        RequestState::ApprovalRequired
-                    } else {
-                        RequestState::Running
-                    }
-                }
-                Some("completed") => RequestState::Completed,
-                Some("failed") => RequestState::Failed,
-                Some("interrupted") => RequestState::Cancelled,
-                _ => RequestState::Unknown,
-            };
-            let can = if state == RequestState::Completed {
-                self.get(&format!("/v1/codex/responses/{}", path_id(&response)?))
-                    .await
-                    .ok()
-                    .is_some_and(|v| v["continuable"] == true)
-            } else {
-                false
-            };
-            Ok::<_, anyhow::Error>((state, can))
-        }
-        .await;
-        let (state, can) = resolved.unwrap_or((RequestState::Unknown, false));
-        store
-            .observe(id.into(), state, "current_query", can)
-            .await?;
-        Ok(state)
+        self.reconcile_v2(store, id).await
     }
 }
+
 pub fn path_id(id: &str) -> Result<&str> {
     ensure!(
         !id.is_empty()
@@ -317,44 +205,6 @@ pub fn field(v: &Value, name: &str) -> Result<String> {
         .context("missing Proxy identity field")?
         .into())
 }
-pub fn validate_capabilities(c: &Value) -> Result<()> {
-    ensure!(
-        c["contract_version"] == "1.0",
-        "incompatible Proxy contract"
-    );
-    for flag in [
-        "responses",
-        "streaming",
-        "conversation_resume",
-        "conversation_model_change",
-        "identity_on_start",
-        "request_lookup",
-        "persistent_turn_status",
-        "turn_status",
-        "turn_events",
-        "turn_interrupt",
-        "turn_steer",
-        "interactive_approval",
-        "auto_approval_suppression",
-        "event_reconnect",
-    ] {
-        ensure!(c[flag] == true, "required Proxy capability missing: {flag}");
-    }
-    for (k, v) in [
-        ("auth_scope", json!("shared_operator")),
-        ("continuation", json!("successful_response_only")),
-        ("disconnect_interrupts", json!(true)),
-        ("event_history_replay", json!(false)),
-        ("event_reconnect", json!("snapshot_only")),
-        ("steer_idempotency", json!(false)),
-        ("model_change_scope", json!("same_provider")),
-    ] {
-        ensure!(c["limits"][k] == v, "unsupported Proxy limit: {k}");
-    }
-    ensure!(c["output_retrieval"] == false, "unverified output contract");
-    Ok(())
-}
-
 #[derive(Debug)]
 pub struct SseEvent {
     pub event: String,

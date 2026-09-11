@@ -1,58 +1,23 @@
 # Codex Hoshikage Gateway
 
-[English — main documentation](README.md)
+[English](README.md)
 
-**自分のサーバーと作業フォルダーを使い、DiscordからCodexへ仕事を依頼できます。**
+**DiscordからCodexに話しかけて、作業を頼み、成果物を受け取ろう。**
 
-「このコードを調べて」「こんな資料を作って」。そんなときは、DiscordからCodexに話しかけてみましょう。**Codex Hoshikage Gatewayは、[Codex Hoshikage Proxy](https://github.com/tanep3/codex-hoshikage-proxy)を使って、DiscordとCodexをつなぎます。** パソコンでもスマートフォンでも、依頼から回答の確認、操作の承認、成果物の受け取りまで、いつものDiscordで進められます。
+[Codex Hoshikage Proxy](https://github.com/tanep3/codex-hoshikage-proxy)と組み合わせて使うDiscord Botです。ターミナルを開かずに、質問、作業依頼、モデル変更、承認や停止をDiscordから操作できます。
 
-## こんなときに使えます
+チャンネルやフォーラム投稿ごとに会話を続けられます。作業フォルダーの登録は不要。Proxyが会話のワークを用意します。応答は「全投稿」か「メンション時だけ」を設定できます。初版は、指定したDiscordサーバーの許可ユーザー1人用です。
 
-- 依頼のたびにターミナルを開かず、コード調査・修正・文書作成などをCodexへ頼めます。
-- 1つのDiscordテキストチャンネルを1プロジェクトに対応させ、チャンネルごとに会話の文脈を保てます。普段の会話にスレッド作成は不要です。
-- 実行中に追加指示を送り、必要なら中断を要求して待機中の依頼も一時停止できます。
-- 次の依頼で使うモデルを選び、画像やテキストを添付し、指定した成果物ファイルを取得できます。
-- Gatewayの再起動後も既存の会話に戻れます。実行結果が不明な依頼は確認待ちにし、自動で再実行しません。
+API v2では、Proxyが成果物と確定回答の保存版を管理します。Gatewayは受け取るファイルの選択とDiscordへの配信を担当します。配信トラブルを理由にAIの作業を自動でやり直すことはありません。
 
-初版は、**設定した1つのDiscordサーバーで、許可した本人だけが操作する用途**に対応します。Gatewayは自分でホストし、Codexへの接続と実行権限はProxyが担当します。GatewayはProxyの導入・サービス管理を行いません。依頼と回答はDiscordを経由するため、チャンネルの閲覧権限も管理してください。
+- [導入手順](docs/installation.ja.md)：Discordサーバー・Botの用意、キーの設定、インストール。
+- [ユーザーマニュアル](docs/user-manual.ja.md)：会話・モデル・停止・ファイルの使い方。
+- [実装・検証状況](docs/implementation-status.ja.md)：今使える経路と残作業。
 
-## GatewayとProxy、2つで動きます
+**Proxy API v2が必要です。** 検証済みの範囲は[実装・検証状況](docs/implementation-status.ja.md)に記載しています。
 
-実行ファイル名は `codex-hoshikage-gateway` です。リポジトリのディレクトリで `cargo install --path . --locked` を実行するとインストールできます。`cargo install --path .` だけでも使えます。
+Rustで実装し、`cargo install --path . --locked`でインストールできます。既存のCargoインストール先設定を使用します。Botの表示言語は現在日本語です。
 
-使うのは、このGatewayと [Codex Hoshikage Proxy](https://github.com/tanep3/codex-hoshikage-proxy) の2つです。ProxyはCodexをOpenAI互換APIから使えるようにするソフトウェア。Gatewayはそこに、Discordのチャンネル・会話スレッド・コマンド・返信の仕組みを加えます。
+[MIT License](LICENSE) — Copyright (c) 2026 Tane Channel Technology
 
-```text
-Discordのあなた ↔ Gateway ↔ Codex Hoshikage Proxy ↔ Codex
-```
-
-**Proxyは必須で、別途導入が必要です。** まずは[Proxyの導入手順](https://github.com/tanep3/codex-hoshikage-proxy/blob/main/docs/installation.ja.md)、続いて[Gatewayの導入手順](docs/installation.ja.md)へ進んでください。対応するProxyがすでに動いていれば、それを利用できます。
-
-## まずは、こんな会話から
-
-1. 登録したプロジェクトチャンネルに「こんにちは」と投稿します。
-2. 同じチャンネルで「テストが失敗する原因を調べ、編集する前に説明して」と続けます。
-3. 作成を依頼したファイルは `/get path:output/report.txt` で取得できます。
-
-`response_mode = "all"` なら許可本人の全投稿に、`"mention"` ならBotへのメンション時だけ応答します。通常の返信は回答本文だけです。未登録の場所では作業先の登録方法を案内します。
-
-## 使ってみましょう
-
-| 資料 | English | 日本語 |
-| --- | --- | --- |
-| サーバー・Bot・キー・設定・起動 | [Installation guide](docs/installation.md) | [導入手順書](docs/installation.ja.md) |
-| 会話・コマンド・添付・復旧時の使い方 | [User manual](docs/user-manual.md) | [ユーザーマニュアル](docs/user-manual.ja.md) |
-
-Ubuntuのホスト、対応する常駐Proxy、Botを追加できるDiscordアカウント、ソースからビルドするためのRustが必要です。導入手順書ではDiscord側の準備から説明しています。
-
-## この版について、先にひとこと
-
-**初期開発版（0.1.0）です。** DiscordとProxyを模した自動試験は通過していますが、実Discord・実Codexの受入試験と長時間の常駐確認は残っています。まずは検証用プロジェクトで試してみてください。本番での動作確認はこれからです。Botのコマンド説明・応答は現在日本語です。英語資料の提供はBot画面の英語対応を意味しません。
-
-現在のProxy契約では、Gatewayのメモリから失われた回答本文を再取得できません。Codexの作業が完了していても、Discordへの回答が欠ける場合があります。欠けた回答を補うために作業を再実行することはありません。復旧時の扱いは[ユーザーマニュアル](docs/user-manual.ja.md)を参照してください。
-
-開発者向けに[実装・検証状況](docs/implementation-status.ja.md)、[要件定義](docs/requirements.ja.md)、[システム設計](docs/system-design.ja.md)を用意しています。
-
-## ライセンス
-
-Copyright © 2026 **Tane Channel Technology**。[MIT License](LICENSE)で配布します。依存ソフトウェアのライセンスも適用されます。[依存ライセンス情報](packaging/dependencies.md)を参照してください。
+[運用ガイド](docs/operations.ja.md)

@@ -43,13 +43,51 @@ impl App {
                                 let _=tokio::time::timeout(Duration::from_millis(2500),app.discord.acknowledge(id,token)).await;
                                 let result=tokio::time::timeout(Duration::from_secs(45),app.command(&v,stop)).await;
                                 let text=match result{Ok(Ok(text))=>text,_=>"操作を完了確認できませんでした。/status で確認してください。実行要求の自動再送はしません。".into()};
-                                let _=app.discord.reply(application,token,&text).await;
+                                let components=app.project_menu(&v).await.unwrap_or(json!([]));
+                                let _=app.discord.reply_components(application,token,&text,components).await;
                             });
                         },_=>{}
                     }
                 }
             }
         }
+    }
+    pub(crate) async fn text_control_command(&self, v: &Value) -> Result<String> {
+        let id = v["id"].as_str().context("message ID missing")?;
+        ensure!(
+            self.store.admissible_event(id.into()).await?,
+            "old command message"
+        );
+        let parts = v["content"]
+            .as_str()
+            .unwrap_or("")
+            .split_whitespace()
+            .collect::<Vec<_>>();
+        let name = parts.first().copied().unwrap_or("");
+        if name == "/project" {
+            return Ok("作業先の登録は不要になりました。Proxyが会話ごとのワークを自動で用意します。そのまま話しかけてください。".into());
+        }
+        if !matches!(name, "/model" | "/models") {
+            return Ok("この操作はDiscordのコマンド選択から実行してください。AIへの作業依頼としては送っていません。".into());
+        }
+        if v["attachments"].as_array().is_some_and(|a| !a.is_empty()) {
+            return Ok(
+                "モデル操作にはファイルを添付せず、/model モデルID と送ってください。".into(),
+            );
+        }
+        let argument=match parts.as_slice() {
+            [_]=>None,
+            ["/model",value]=>Some(value.strip_prefix("id:").unwrap_or(value).trim()),
+            ["/model","id:",value]=>Some(*value),
+            _=>return Ok("一覧は /models、確認は /model、変更は /model chatgpt/gpt-5.6-terra の形式で送ってください。".into()),
+        };
+        if argument.is_some_and(str::is_empty) {
+            return Ok("変更先のモデルIDを指定してください。/models で一覧を確認できます。".into());
+        }
+        let options = argument
+            .map(|value| json!([{"name":"id","value":value}]))
+            .unwrap_or(json!([]));
+        self.command(&json!({"id":id,"channel_id":v["channel_id"],"data":{"name":name.trim_start_matches('/'),"options":options}}),false).await
     }
     async fn command(&self, v: &Value, stopped: bool) -> Result<String> {
         let s = self.settings().await;
@@ -62,21 +100,58 @@ impl App {
                 "recovery or reload pending"
             );
         }
+        if v["data"]["custom_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("model-"))
+        {
+            return self.project_selection(v).await;
+        }
+        if name == "project" {
+            return Ok(
+                "作業先の登録は不要になりました。Proxyが会話ごとのワークを自動で用意します。"
+                    .into(),
+            );
+        }
+        if name == "models" {
+            return self.choose_model(iid, thread, None).await;
+        }
         if name == "new" {
             return self
                 .new_conversation(iid, thread, option(v, "title").context("title required")?)
                 .await;
         }
         if !self.ensure_channel_conversation(thread).await? {
-            return Ok("このチャンネルの作業フォルダーは未登録です。projects の設定と再読み込みが必要です。".into());
+            return Ok(
+                "この場所では会話できません。Botの閲覧権限とチャンネルの種類を確認してください。"
+                    .into(),
+            );
         }
         let cv = self.authorized_thread(thread).await?;
+        if name == "model" && option(v, "id").is_none() && cv.selected_model.is_empty() {
+            return self.start_model_menu(iid, thread).await;
+        }
         if stopped {
             if let Some(r) = self.store.active(thread).await? {
                 self.interrupt(&r).await?;
                 return Ok("待機列を一時停止しました。実行中の依頼へ中断を要求しています。停止完了は /status で確認してください。".into());
             }
             return Ok("待機列を一時停止しました。/resume で再開できます。".into());
+        }
+        if let Some(custom) = v["data"]["custom_id"]
+            .as_str()
+            .filter(|s| s.starts_with("pick:") || s.starts_with("page:"))
+        {
+            return self
+                .selection_action(iid, thread, custom, v["data"]["values"][0].as_str())
+                .await;
+        }
+        if let Some(custom) = v["data"]["custom_id"]
+            .as_str()
+            .filter(|x| x.starts_with("retry:") || x.starts_with("resend:"))
+        {
+            return self
+                .retry_action(iid, thread, custom, v["data"]["values"][0].as_str())
+                .await;
         }
         if let Some(custom) = v["data"]["custom_id"].as_str() {
             let mut parts = custom.split(':');
@@ -93,8 +168,41 @@ impl App {
                     .as_ref()
                     .map(|r| r.state.as_str())
                     .unwrap_or("実行中なし");
+                let location = thread.to_owned();
+                let latest=self.store.call(false,move|c|{use rusqlite::OptionalExtension;Ok(c.query_row("SELECT state,error_code FROM requests WHERE thread_id=?1 ORDER BY sequence DESC LIMIT 1",[location],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?))).optional()?)}).await?;
+                let rejection = latest
+                    .filter(|(state, code)| {
+                        state == "FAILED"
+                            && code.as_deref().is_some_and(|c| c.starts_with("proxy_"))
+                    })
+                    .map(|(_, code)| {
+                        format!(
+                            "直前の依頼: {}\n",
+                            crate::application::failure_message(code.as_deref())
+                        )
+                    })
+                    .unwrap_or_default();
+                let t = thread.to_owned();
+                let deliveries:Vec<(String,i64)>=self.store.call(false,move|c|{let mut st=c.prepare("SELECT state,count(*) FROM resource_deliveries WHERE thread_id=?1 AND state NOT IN ('DELIVERED','SUPERSEDED') GROUP BY state")?;Ok(st.query_map([t],|r|Ok((r.get(0)?,r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?)}).await?;
+                let delivery_status = if deliveries.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "\n配信: {}\n再送が必要なら /retry（同じ保存版を送ります）。",
+                        deliveries
+                            .iter()
+                            .map(|(s, n)| format!("{s}: {n}"))
+                            .collect::<Vec<_>>()
+                            .join(" / ")
+                    )
+                };
+                let recovery_help = if cv.continuation == "NEW_CONVERSATION_REQUIRED" {
+                    "\n会話の接続状態を確認する必要があります。実行中・結果不明の依頼がある場合は、その確認が終わるまで新しい実行を保留します。"
+                } else {
+                    ""
+                };
                 let text = format!(
-                    "状態: {state}\n待機列: {}\n会話継続: {}\n選択モデル: {}\n実行モデル: {}\nProxy: {}\n回答本文はGatewayに保存しません。再起動・配信失敗後は全文を取り戻せない場合があります。",
+                    "{rejection}状態: {state}\n待機列: {}\n会話継続: {}\n選択モデル: {}\n実行モデル: {}\nProxy: {}\n確定回答と成果物はProxyの保存期限内に再取得します。{delivery_status}{recovery_help}",
                     if cv.paused {
                         "停止中"
                     } else {
@@ -134,10 +242,19 @@ impl App {
                 self.steer(iid, thread, option(v, "text").context("text required")?)
                     .await
             }
-            "get" => {
-                self.get_artifact(iid, thread, option(v, "path").context("path required")?)
+            "workspace" => {
+                self.selection_page(iid, thread, "workspace", "selectable", None)
                     .await
             }
+            "retry" => self.retry_menu(iid, thread).await,
+            "get" if option(v, "scope") == Some("shared") => {
+                ensure!(
+                    option(v, "path").is_none(),
+                    "shared listing does not take path"
+                );
+                self.shared_artifact_menu(iid, thread).await
+            }
+            "get" => self.artifact_command(iid, thread, option(v, "path")).await,
             _ => anyhow::bail!("unknown command"),
         }
     }
@@ -147,21 +264,31 @@ impl App {
             title.chars().count() >= 1 && title.chars().count() <= 100,
             "invalid thread title"
         );
-        let p = s
-            .cfg
-            .projects
-            .iter()
-            .find(|p| p.channel_id == channel && p.lifecycle == "ACTIVE")
-            .context("use project channel")?;
-        let ch = self
+        let mut ch = self
             .discord
             .get(&format!("/channels/{}", snowflake(channel)?))
             .await?;
         ensure!(
-            ch["guild_id"] == s.cfg.discord.guild_id && ch["type"] == 0,
-            "project channel mismatch"
+            ch["guild_id"] == s.cfg.discord.guild_id,
+            "channel guild mismatch"
         );
-        let (id, project) = (iid.to_owned(), p.id.clone());
+        if matches!(ch["type"].as_u64(), Some(11 | 12)) {
+            let parent = ch["parent_id"].as_str().context("parent missing")?;
+            ch = self
+                .discord
+                .get(&format!("/channels/{}", snowflake(parent)?))
+                .await?;
+        }
+        ensure!(
+            ch["guild_id"] == s.cfg.discord.guild_id && matches!(ch["type"].as_u64(), Some(0 | 15)),
+            "unsupported conversation parent"
+        );
+        let channel = ch["id"].as_str().context("channel identity missing")?;
+        if ch["type"] == 15 && ch["flags"].as_u64().unwrap_or(0) & 16 != 0 {
+            return Ok("このフォーラムはタグの指定が必要です。Discordの「投稿を作成」からタグを選んで会話を作ってください。作成した投稿ではそのままBotと話せます。".into());
+        }
+        let body = new_thread_body(&ch, title)?;
+        let (id, project) = (iid.to_owned(), crate::storage::PROXY_SCOPE.to_owned());
         let send=self.store.call(true,move|c|{Ok(c.execute("INSERT OR IGNORE INTO conversation_creations(interaction_id,project_id,state) VALUES(?1,?2,'SENDING')",params![id,project])?==1)}).await?;
         ensure!(send, "thread creation already attempted");
         let v = self
@@ -169,7 +296,7 @@ impl App {
             .api(
                 reqwest::Method::POST,
                 &format!("/channels/{channel}/threads"),
-                Some(json!({"name":title,"type":11,"auto_archive_duration":1440})),
+                Some(body),
             )
             .await?;
         let thread = v["id"].as_str().context("thread receipt missing")?;
@@ -177,13 +304,22 @@ impl App {
             v["parent_id"] == channel && v["guild_id"] == s.cfg.discord.guild_id,
             "thread receipt mismatch"
         );
-        let (id, project, t) = (iid.to_owned(), p.id.clone(), thread.to_owned());
+        let (id, project, t) = (
+            iid.to_owned(),
+            crate::storage::PROXY_SCOPE.to_owned(),
+            thread.to_owned(),
+        );
         self.store.call(true,move|c|{let tx=c.transaction()?;tx.execute("INSERT INTO conversations(thread_id,project_id,selected_model) SELECT ?1,id,default_model FROM projects WHERE id=?2 AND lifecycle='ACTIVE'",params![t,project])?;tx.execute("UPDATE conversation_creations SET state='CONFIRMED',thread_id=?2 WHERE interaction_id=?1",params![id,t])?;tx.commit()?;Ok(())}).await?;
         Ok(format!(
             "会話を作成しました: <#{thread}>\nこのスレッドへの通常投稿が作業依頼になります。"
         ))
     }
-    async fn choose_model(&self, iid: &str, thread: &str, desired: Option<&str>) -> Result<String> {
+    pub(crate) async fn choose_model(
+        &self,
+        iid: &str,
+        thread: &str,
+        desired: Option<&str>,
+    ) -> Result<String> {
         let s = self.settings().await;
         if desired.is_none() {
             let models = s.proxy.get("/v1/models").await?;
@@ -327,43 +463,6 @@ impl App {
         result?;
         Ok("承認への回答を受け付けました。実行結果は別途確認します。".into())
     }
-    async fn get_artifact(&self, iid: &str, thread: &str, relative: &str) -> Result<String> {
-        let s = self.settings().await;
-        let cv = self.store.conversation(thread).await?;
-        let w = s
-            .workspaces
-            .iter()
-            .find(|w| w.project.id == cv.project_id)
-            .context("workspace inactive")?
-            .clone();
-        let path = relative.to_owned();
-        let limit = s.cfg.limits.artifact_bytes;
-        let _reservation = self
-            .files
-            .reserve(limit as u64, s.cfg.limits.temp_bytes)
-            .await?;
-        let bytes =
-            tokio::task::spawn_blocking(move || crate::files::artifact(&w, &path, limit)).await??;
-        let filename = std::path::Path::new(relative)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .context("file name invalid")?
-            .to_owned();
-        ensure!(!filename.contains(['\r', '\n']), "invalid filename");
-        let (i, t, hash) = (iid.to_owned(), thread.to_owned(), domain::digest(&bytes));
-        self.store.call(true,move|c|{c.execute("INSERT INTO deliveries(id,target_id,thread_id,kind,part,state,pending_digest,pending_revision,created_at) VALUES(?1,?1,?2,'artifact',0,'POST_PENDING',?3,1,?4)",params![i,t,hash,domain::now_ms()])?;Ok(())}).await?;
-        let v = self
-            .discord
-            .upload(thread, filename, bytes, &crate::delivery::nonce(iid))
-            .await?;
-        let mid = v["id"]
-            .as_str()
-            .context("artifact receipt unknown")?
-            .to_owned();
-        let i = iid.to_owned();
-        self.store.call(true,move|c|{c.execute("UPDATE deliveries SET state='CONFIRMED',message_id=?2,confirmed_digest=pending_digest,confirmed_revision=1,pending_digest=NULL,pending_revision=NULL WHERE id=?1",params![i,mid])?;Ok(())}).await?;
-        Ok("指定された成果物を返送しました。".into())
-    }
 }
 fn option<'a>(v: &'a Value, name: &str) -> Option<&'a str> {
     v["data"]["options"]
@@ -371,4 +470,39 @@ fn option<'a>(v: &'a Value, name: &str) -> Option<&'a str> {
         .iter()
         .find(|o| o["name"] == name)?["value"]
         .as_str()
+}
+
+/// Only exact Gateway command tokens are intercepted; ordinary prose and paths are untouched.
+pub(crate) fn is_text_control(text: &str) -> bool {
+    matches!(
+        text.split_whitespace().next(),
+        Some(
+            "/project"
+                | "/model"
+                | "/models"
+                | "/new"
+                | "/status"
+                | "/stop"
+                | "/resume"
+                | "/steer"
+                | "/get"
+                | "/workspace"
+                | "/retry"
+        )
+    )
+}
+
+/// Forum threads require an initial message; regular text threads do not.
+pub fn new_thread_body(channel: &Value, title: &str) -> Result<Value> {
+    ensure!(
+        !title.trim().is_empty() && title.chars().count() <= 100,
+        "invalid title"
+    );
+    match channel["type"].as_u64() {
+        Some(0) => Ok(json!({"name":title,"type":11,"auto_archive_duration":1440})),
+        Some(15) => Ok(
+            json!({"name":title,"auto_archive_duration":1440,"message":{"content":"ここで新しい会話を始められます。Botに話しかけてください。","allowed_mentions":{"parse":[]}}}),
+        ),
+        _ => anyhow::bail!("unsupported thread parent"),
+    }
 }

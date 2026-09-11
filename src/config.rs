@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
@@ -13,7 +13,20 @@ pub struct Config {
     pub proxy: Proxy,
     pub storage: Storage,
     pub limits: Limits,
+    #[serde(default)]
     pub projects: Vec<Project>,
+    #[serde(default)]
+    pub default_model: Option<String>,
+    #[serde(default)]
+    pub registration: Registration,
+}
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Registration {
+    // Read old configurations without requiring users to remove the obsolete key.
+    #[serde(skip_serializing)]
+    pub allowed_roots: Vec<PathBuf>,
+    pub default_model: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -80,6 +93,7 @@ pub struct Project {
     pub id: String,
     pub name: String,
     pub channel_id: String,
+    #[serde(default, skip_serializing)]
     pub cwd: PathBuf,
     pub default_model: String,
     #[serde(default = "active")]
@@ -107,9 +121,33 @@ impl Workspace {
     }
 }
 impl Config {
+    /// Prefer the registration default, then the unambiguous active project default.
+    pub fn registration_model(&self) -> Option<&str> {
+        if let Some(model) = self
+            .default_model
+            .as_deref()
+            .or(self.registration.default_model.as_deref())
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+        {
+            return Some(model);
+        }
+        let mut models = self
+            .projects
+            .iter()
+            .filter(|p| p.lifecycle == "ACTIVE")
+            .map(|p| p.default_model.trim())
+            .filter(|m| !m.is_empty());
+        let first = models.next()?;
+        models.all(|m| m == first).then_some(first)
+    }
+
     pub fn read(path: &Path) -> Result<Self> {
         let s = std::fs::read_to_string(path).context("configuration unavailable")?;
         toml::from_str(&s).context("invalid configuration")
+    }
+    pub fn with_registered_projects(self, _path: &Path) -> Result<Self> {
+        Ok(self)
     }
     pub fn validate(&self) -> Result<Vec<Workspace>> {
         for id in [&self.discord.guild_id, &self.discord.allowed_user_id] {
@@ -119,7 +157,7 @@ impl Config {
             );
         }
         ensure!(
-            self.proxy.contract_version == "1.0",
+            self.proxy.contract_version == "2.0",
             "unsupported control contract"
         );
         let url = reqwest::Url::parse(&self.proxy.base_url)?;
@@ -193,21 +231,11 @@ impl Config {
                 channels.insert(&p.channel_id),
                 "duplicate active project channel"
             );
-            ensure!(p.cwd.is_absolute(), "cwd must be absolute");
-            let path = p.cwd.canonicalize().context("workspace unavailable")?;
-            let md = path.metadata()?;
-            ensure!(md.is_dir(), "workspace must be directory");
-            for w in &workspaces {
-                ensure!(
-                    !path.starts_with(&w.path) && !w.path.starts_with(&path),
-                    "overlapping workspaces"
-                );
-            }
             workspaces.push(Workspace {
                 project: p.clone(),
-                path,
-                dev: md.dev(),
-                ino: md.ino(),
+                path: PathBuf::new(),
+                dev: 0,
+                ino: 0,
             });
         }
         Ok(workspaces)
@@ -226,12 +254,6 @@ impl Config {
     }
     pub fn check_reload(&self, next: &Self) -> Result<()> {
         ensure!(
-            self.projects
-                .iter()
-                .all(|old| next.projects.iter().any(|new| new.id == old.id)),
-            "project removal requires explicit RETIRED entry"
-        );
-        ensure!(
             self.fixed_digest() == next.fixed_digest(),
             "immutable setting changed"
         );
@@ -239,14 +261,6 @@ impl Config {
             self.discord.token_file == next.discord.token_file && self.storage == next.storage,
             "restart required"
         );
-        if self.projects.iter().any(|p| {
-            next.projects
-                .iter()
-                .find(|n| n.id == p.id)
-                .is_some_and(|n| n.cwd != p.cwd || n.channel_id != p.channel_id)
-        }) {
-            bail!("project identity is immutable");
-        }
         Ok(())
     }
 }
@@ -265,4 +279,13 @@ pub fn secret(path: &Path) -> Result<String> {
         "invalid credential length"
     );
     Ok(s)
+}
+
+impl Registration {
+    pub fn check_path(&self, path: &Path) -> Result<PathBuf> {
+        ensure!(path.is_absolute(), "registration cwd must be absolute");
+        let path = path.canonicalize()?;
+        ensure!(path.is_dir(), "registration cwd must be directory");
+        Ok(path)
+    }
 }
