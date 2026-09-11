@@ -2,23 +2,27 @@
 
 [日本語](installation.ja.md) · [Product overview](../README.md) · [User manual](user-manual.md)
 
-This guide takes you from a Discord account to a running personal Gateway. Commands below run in Bash on the Ubuntu machine that will host it. Daily Discord operations are covered separately in the user manual.
+Let's connect your Discord to Codex. We'll prepare the Proxy, add a Bot to your server, and start the Gateway together. Run the commands below in Bash on your Ubuntu host. Once setup is done, the [user manual](user-manual.md) shows you how to use it.
 
 This is a source installation of development version 0.1.0. Start with a disposable project and complete the checks below before using important workspaces. Live-service acceptance and release packaging verification are still pending.
 
-## 1. Prepare the host and Proxy
+## 1. Start with the Proxy and your host
 
-You need:
+**This Gateway needs [Codex Hoshikage Proxy](https://github.com/tanep3/codex-hoshikage-proxy).** It provides the connection to Codex; this Gateway provides the Discord interface. They run as separate services.
+
+If the Proxy is not installed yet, follow its [installation guide](https://github.com/tanep3/codex-hoshikage-proxy/blob/main/docs/installation.md) first. That guide covers Codex setup, authentication, Proxy configuration, and starting its service. Then come back here with your Proxy URL, API key, workspace, and model ID. If you already have it running, check the requirements below and carry on.
+
+Here is what you will need:
 
 - An Ubuntu user account that will own the Gateway files and run the service.
 - Git, a C build toolchain, and Rust/Cargo **1.98 or later**. The recorded development checks used Rust 1.98.1. Follow the [official Rust installation instructions](https://www.rust-lang.org/tools/install) if Rust is not installed.
-- A running `codex-hoshikage-proxy` supporting Control API contract **1.0**, with its required Gateway capabilities enabled. Have its base URL, API key, allowed project folder, and a usable provider-qualified model ID ready. A generic Responses API endpoint alone is insufficient.
+- A running [codex-hoshikage-proxy](https://github.com/tanep3/codex-hoshikage-proxy) supporting [Control API contract **1.0**](https://github.com/tanep3/codex-hoshikage-proxy/blob/main/docs/control-api.ja.md), with its required Gateway capabilities enabled. Have its base URL, API key, allowed project folder, and a usable provider-qualified model ID ready. A generic Responses API endpoint alone is insufficient.
 - Outbound connectivity to Discord and connectivity to the Proxy from the Gateway host.
 - A Discord account that owns the target server or can manage/install apps on it.
 
-The Gateway and Proxy must agree on the project folder: use the same existing workspace on the host for this initial setup. Configure Codex access, workspace permissions, approval policy, and network access on the Proxy beforehand. Gateway configuration cannot grant permissions that the Proxy denies.
+For the two services to work together, they need to use the same project folder: use the same existing workspace on the host for this initial setup. Configure Codex access, workspace permissions, approval policy, and network access on the Proxy beforehand. Gateway configuration cannot grant permissions that the Proxy denies.
 
-The sample Proxy URL is `http://127.0.0.1:4040`; verify your actual endpoint. Loopback refers to the Gateway's own host. This Gateway connects to Discord through an outbound WebSocket and REST requests; it does not require a public web server, an inbound port, or an Interactions Endpoint URL.
+One detail to check before moving on: the sample Proxy URL is `http://127.0.0.1:4040`; verify your actual endpoint. Loopback refers to the Gateway's own host. This Gateway connects to Discord through an outbound WebSocket and REST requests; it does not require a public web server, an inbound port, or an Interactions Endpoint URL.
 
 ## 2. Create a Discord server and project channel
 
@@ -96,7 +100,7 @@ unset gateway_bot_token
 chmod 600 "$HOME/.config/codex-hoshikage-gateway/discord-token"
 ```
 
-Store the **Proxy API key** in a different file:
+Next, save the **Proxy API key** in its own file. This is the key for connecting to your Proxy, not an OpenAI API key. Configure a non-empty key on the Proxy even for this loopback setup, because the Gateway requires a key file:
 
 ```bash
 read -r -s -p 'Proxy API key: ' gateway_proxy_key
@@ -108,7 +112,7 @@ chmod 600 "$HOME/.config/codex-hoshikage-gateway/proxy-key"
 
 Credential files must be ordinary files owned by the service user, with no group/other access; symlinks are rejected. Keep them out of Git, Discord messages, and screenshots. To replace a Bot token, stop the Gateway, reset the token in the Portal, update this file using the hidden prompt, and restart. The old token no longer authenticates after a reset.
 
-## 7. Fill in the configuration
+## 7. Tell the Gateway about your setup
 
 Edit `$HOME/.config/codex-hoshikage-gateway/config.toml` using a text editor. Start from the [complete configuration example](../config/config.example.toml).
 
@@ -162,7 +166,7 @@ The sample's zero values mean **required, not configured**; they do not mean unl
 
 Use byte counts, not strings such as `"10MB"`. Allow for image encoding overhead and two active requests. `temp_bytes` must be at least both `input_bytes` and `artifact_bytes`; `output_total_bytes` must be at least `output_bytes`. The global queue limit must be at least the per-conversation limit. Two concurrent executions is a fixed limit in this version. Discord's own file limit still applies even when the configured limit is larger.
 
-## 8. Check, initialize, and try it
+## 8. Start it up and say hello
 
 ```sh
 "$HOME/.local/bin/gateway" --config "$HOME/.config/codex-hoshikage-gateway/config.toml" check
@@ -181,7 +185,7 @@ In Discord, sign in as the allowed user, open the registered project channel, an
 
 If readiness fails, fix the Proxy connection, credentials, model, or capability mismatch before sending work. Do not repeatedly initialize or delete the state directory to bypass errors.
 
-## 9. Run as a user service
+## 9. Keep it running in the background
 
 After the foreground checks, press Ctrl+C and wait for that Gateway process to exit. From the repository directory:
 
@@ -198,7 +202,7 @@ The supplied service uses the binary and configuration locations above. If you c
 
 Stop it with `systemctl --user stop codex-hoshikage-gateway.service`; restart it with `systemctl --user restart codex-hoshikage-gateway.service`. Stopping the Gateway service is not a substitute for confirming that a Codex task has stopped. Use `/stop` and inspect the result before planned maintenance.
 
-## 10. Maintenance and troubleshooting
+## 10. Looking after your Gateway
 
 Keep your configuration, state, and `gateway-instance.json` marker. Initial identity settings cannot be changed simply by pointing an existing database at a different user, server, Proxy URL, or state directory. Do not repair startup problems by editing SQLite or removing identity files.
 
@@ -222,6 +226,6 @@ Replace the backup path with a new, private destination. Do not copy only a live
 | File rejected | Supported input type, configured limits, actual file content, and Discord's upload limit |
 | Request is `UNKNOWN` | Inspect status and reconcile with the Proxy; do not resubmit it to force progress |
 
-For daily operation and the meaning of these states, continue to the [user manual](user-manual.md).
+All set? Head to the [user manual](user-manual.md) for your first real conversation and a handy command reference.
 
 Discord-specific setup was checked against the linked official documentation on **2026-09-11**. Portal labels may vary by language or later updates.

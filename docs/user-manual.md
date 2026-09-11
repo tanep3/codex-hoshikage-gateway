@@ -2,11 +2,13 @@
 
 [日本語](user-manual.ja.md) · [Product overview](../README.md) · [Installation guide](installation.md)
 
-Use Codex Hoshikage Gateway to ask Codex for work from Discord and keep related requests together. This manual assumes the Bot is installed and your account and project channel are registered. For installation or Bot credentials, use the separate installation guide.
+Ready to ask Codex for a hand? This guide walks you through a conversation, from your first message to picking up a finished file. Your Bot, account, and project channel should already be set up; if they are not, start with the [installation guide](installation.md).
+
+Behind the scenes, [Codex Hoshikage Proxy](https://github.com/tanep3/codex-hoshikage-proxy) connects to Codex, while this Gateway handles your Discord conversations. You can do your day-to-day work right here in Discord.
 
 The current version is for one authorized user. Bot command descriptions, buttons, and replies currently use Japanese; commands themselves use the names shown below. Live-service acceptance testing is still pending for development version 0.1.0.
 
-## Start a conversation
+## Start with a message
 
 Open your project's text channel and select `/new` from Discord's command picker. Fill in its `title` option, for example:
 
@@ -24,7 +26,7 @@ The project channel represents a folder on the server. Each Gateway-created thre
 
 Threads created by the Bot are public within the parent channel's access boundary. Anyone who can view that conversation may see its content, even if they cannot operate the Bot.
 
-## Know whether you are queuing or steering
+## Another task, or a change to the current one?
 
 While Codex is working, an ordinary post is **another queued request**. It does not immediately change the running task. Requests run in order within a conversation. The Gateway allows up to two executions overall, with one at a time for a workspace. Other conversations in the same project may therefore wait.
 
@@ -102,7 +104,7 @@ This example retrieves a file already present on the **server**, not a file on y
 
 Absolute paths, paths outside the project, symbolic links, hard links, special files, and files that fail the safe-read checks are rejected. A file may also exceed the configured return limit or Discord's limit. In that case, ask for a smaller suitable output and explicitly retrieve it.
 
-## Read the status
+## What is happening with my request?
 
 Use `/status` in a conversation to inspect its pause state, model selection, current held request, and Proxy readiness. Common request states mean:
 
@@ -120,7 +122,7 @@ Use `/status` in a conversation to inspect its pause state, model selection, cur
 
 There may also be an input-validation step before a request is queued. A rejected input was not accepted for execution. A full queue can prevent acceptance of another request.
 
-## Return after a restart or connection failure
+## Coming back after a restart or connection problem
 
 Return to the same Discord thread. Previously posted Discord messages remain there. The Gateway preserves conversation identity and queue pause state, and can recover eligible unsent requests by reading their original Discord messages again. Deleted, edited, or inaccessible input will not be executed automatically.
 

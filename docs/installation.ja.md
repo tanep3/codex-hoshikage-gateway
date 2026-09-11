@@ -2,17 +2,21 @@
 
 [English](installation.md) · [製品概要](../README.ja.md) · [ユーザーマニュアル](user-manual.ja.md)
 
-Discordアカウントの準備から、個人用Gatewayの起動までを説明します。コマンドはGatewayを置くUbuntuホストのBashで実行してください。日常のDiscord操作は別冊のユーザーマニュアルで説明します。
+DiscordからCodexへ話しかけられるように、順番に準備していきましょう。Proxyを用意し、サーバーにBotを追加して、Gatewayを起動するところまで案内します。コマンドはGatewayを置くUbuntuホストのBashで実行してください。準備ができたら、日常の使い方は[ユーザーマニュアル](user-manual.ja.md)へどうぞ。
 
 対象は開発版0.1.0のソース導入です。まず検証用プロジェクトで以下の確認を行ってください。実サービスの受入試験とリリース用パッケージの検証は未完了です。
 
-## 1. ホストとProxyの準備
+## 1. まずはProxyとホストを用意しましょう
 
-次を用意します。
+**このGatewayには [Codex Hoshikage Proxy](https://github.com/tanep3/codex-hoshikage-proxy) が必要です。** Codexへの接続をProxyが、Discordでの操作をGatewayが担当し、それぞれ別のサービスとして動きます。
+
+まだProxyを導入していなければ、先に[Proxyの導入手順書](https://github.com/tanep3/codex-hoshikage-proxy/blob/main/docs/installation.ja.md)へ進んでください。Codexの準備・認証、Proxyの設定、サービス起動まで案内されています。起動できたら、接続URL・APIキー・作業フォルダー・モデルIDを確認して、ここへ戻ってきてください。すでに動いている場合は、以下の条件を確認して先へ進めます。
+
+用意するものはこちらです。
 
 - Gatewayのファイルを所有し、サービスを実行するUbuntuユーザー。
 - Git、Cビルドツール一式、**1.98以上のRust/Cargo**。記録済みの開発検証はRust 1.98.1で実施しています。未導入なら[Rust公式の導入案内](https://www.rust-lang.org/tools/install)に従ってください。
-- Control API契約 **1.0** と必須のGateway向け機能に対応した、常駐中の `codex-hoshikage-proxy`。接続URL、APIキー、許可された作業フォルダー、利用可能なProvider付きモデルIDを確認します。一般的なResponses APIだけでは足りません。
+- [Control API契約 **1.0**](https://github.com/tanep3/codex-hoshikage-proxy/blob/main/docs/control-api.ja.md) と必須のGateway向け機能に対応した、常駐中の [codex-hoshikage-proxy](https://github.com/tanep3/codex-hoshikage-proxy)。接続URL、APIキー、許可された作業フォルダー、利用可能なProvider付きモデルIDを確認します。一般的なResponses APIだけでは足りません。
 - ホストからDiscordへの外向き通信と、Proxyへの接続。
 - 対象Discordサーバーの所有者、またはアプリを導入・管理できるDiscordアカウント。
 
@@ -20,7 +24,7 @@ Discordアカウントの準備から、個人用Gatewayの起動までを説明
 
 設定例のProxy URLは `http://127.0.0.1:4040` ですが、実際の接続先を確認してください。ループバックはGateway自身のホストを指します。GatewayはDiscordへWebSocketとRESTで接続するため、公開Webサーバー・受信用ポート・Interactions Endpoint URLは不要です。
 
-## 2. Discordサーバーとプロジェクトチャンネルを作る
+## 2. Discordに作業場所を作りましょう
 
 Discordのデスクトップ版またはブラウザー版で、サーバー一覧の **＋** から自分のサーバーを新規作成し、名前を付けて作成を完了します。個人用サーバーで十分です。コミュニティ機能は不要です。[Discord公式のサーバー作成手順](https://support.discord.com/hc/en-us/articles/204849977-How-do-I-create-a-server)を参照してください。
 
@@ -28,7 +32,7 @@ Discordのデスクトップ版またはブラウザー版で、サーバー一�
 
 専用サーバーを使うか、プロジェクトチャンネルを本人とBotだけが閲覧できるように制限してください。Gatewayの許可ユーザー設定は操作を制限するもので、ほかの閲覧者から投稿を隠す機能ではありません。`/new` はチャンネル内に公開スレッドを作成します。本人だけが見える非公開会話ではありません。
 
-## 3. Botを作り、メッセージへのアクセスを有効にする
+## 3. Botを作って、投稿を読めるようにしましょう
 
 [Discord Developer Portal](https://discord.com/developers/applications)で専用アプリケーションを新規作成し、名前を付けます。現在は新規アプリにBotユーザーが含まれています。**Bot** ページでトークンを再生成して取得し、手順6で保存します。[公式アプリ作成ガイド](https://docs.discord.com/developers/quick-start/getting-started)を参照してください。
 
@@ -38,7 +42,7 @@ Botページの特権Intent設定で **Message Content Intent** を有効にし�
 
 このGateway用アプリのInteractions Endpoint URLは未設定のままにします。Webhook URLや、一般的なBot入門記事にあるHTTPサーバーの構築は不要です。
 
-## 4. Botをサーバーへ追加する
+## 4. Botをサーバーへ招待しましょう
 
 アプリのインストール設定で、サーバー向けの **Guild Install** を有効にします。User Installは使用しません。Discord提供のインストールリンクを選び、サーバーへのインストール用スコープに `bot` と `applications.commands` を設定して保存します。[公式のアプリ導入説明](https://docs.discord.com/developers/resources/application)を参照してください。
 
@@ -57,7 +61,7 @@ Botには、プロジェクトチャンネルとそのスレッドで次の権�
 
 インストールリンクを開き、追加先サーバーを選び、要求される権限を確認して承認します。追加するアカウントにはサーバー管理権限が必要です。メンバー一覧にBotが現れれば追加できています。Gatewayを起動するまではオフラインでも構いません。[公式のBot認可フロー](https://docs.discord.com/developers/topics/oauth2#bot-authorization-flow)を参照してください。
 
-## 5. 3つのDiscord IDを取得する
+## 5. 3つのDiscord IDを控えましょう
 
 Discordのユーザー設定の詳細設定で開発者モードを有効にします。自分のユーザー／プロフィールのメニューからユーザーID、サーバーアイコンのメニューからサーバーID、プロジェクトチャンネルのメニューからチャンネルIDをコピーします。[公式のID確認方法](https://support.discord.com/hc/en-us/articles/206346498-Where-can-I-find-my-User-Server-Message-ID)を参照してください。
 
@@ -69,7 +73,7 @@ Discordのユーザー設定の詳細設定で開発者モードを有効にし�
 
 TOMLでは引用符で囲んだ文字列として設定します。名前や招待リンクでは代用できません。
 
-## 6. ビルドし、キーを保存する
+## 6. Gatewayをビルドして、キーを保存しましょう
 
 ソースを置くディレクトリから実行します。
 
@@ -96,7 +100,7 @@ unset gateway_bot_token
 chmod 600 "$HOME/.config/codex-hoshikage-gateway/discord-token"
 ```
 
-**Proxy APIキー**は別ファイルへ保存します。
+続いて、**Proxy APIキー**を専用ファイルへ保存しましょう。これは自分のProxyへ接続するためのキーで、OpenAIのAPIキーではありません。Gatewayにはキーファイルが必要なので、今回のループバック接続でもProxy側に空でないAPIキーを設定しておいてください。
 
 ```bash
 read -r -s -p 'Proxy API key: ' gateway_proxy_key
@@ -108,7 +112,7 @@ chmod 600 "$HOME/.config/codex-hoshikage-gateway/proxy-key"
 
 キーはサービス実行ユーザーが所有する通常ファイルに保存し、グループ・他ユーザーには権限を与えません。シンボリックリンクは拒否されます。Git・Discord投稿・スクリーンショットに含めないでください。Botトークンを変更するときはGatewayを停止し、Portalで再生成し、この非表示入力でファイルを更新して再起動します。再生成後は旧トークンでは接続できません。
 
-## 7. 設定ファイルを埋める
+## 7. あなたの環境をGatewayに教えましょう
 
 テキストエディターで `$HOME/.config/codex-hoshikage-gateway/config.toml` を編集します。[設定例の全体](../config/config.example.toml)を基準にしてください。
 
@@ -162,7 +166,7 @@ install -d -m 700 "$HOME/.local/state/codex-hoshikage-gateway/temp"
 
 `"10MB"` などの文字列ではなくバイト数を設定します。画像エンコードによる増加と同時2実行を考慮してください。`temp_bytes` は `input_bytes` と `artifact_bytes` のそれぞれ以上、`output_total_bytes` は `output_bytes` 以上が必要です。全体の待機上限は会話単位の上限以上にします。この版の同時実行上限は2固定です。設定を大きくしてもDiscord側のファイル上限は適用されます。
 
-## 8. 設定確認・初期化・試運転
+## 8. 起動して、ひとこと話しかけてみましょう
 
 ```sh
 "$HOME/.local/bin/gateway" --config "$HOME/.config/codex-hoshikage-gateway/config.toml" check
@@ -181,7 +185,7 @@ install -d -m 700 "$HOME/.local/state/codex-hoshikage-gateway/temp"
 
 準備状態が正常にならなければ、Proxy接続・キー・モデル・機能の不一致を解消してから依頼してください。エラー回避のために初期化を繰り返したり、状態領域を削除したりしないでください。
 
-## 9. ユーザーサービスとして常駐させる
+## 9. バックグラウンドで動かしましょう
 
 手動起動で確認できたらCtrl+Cを押し、Gatewayプロセスの終了を待ちます。リポジトリのディレクトリから次を実行します。
 
@@ -198,7 +202,7 @@ journalctl --user -u codex-hoshikage-gateway.service -n 50 --no-pager
 
 停止は `systemctl --user stop codex-hoshikage-gateway.service`、再起動は `systemctl --user restart codex-hoshikage-gateway.service` です。Gatewayサービスを止めることはCodexの停止確認の代わりにはなりません。計画メンテナンス前は `/stop` で依頼の状態を確認してください。
 
-## 10. 保守と困ったときの確認
+## 10. 運用中に困ったら
 
 設定、状態領域、`gateway-instance.json` を保持してください。初期化時の識別設定があるため、既存DBを別ユーザー・別サーバー・別Proxy URL・別状態領域へ単純に向け直すことはできません。起動エラーをSQLiteの直接編集や識別ファイルの削除で回避しないでください。
 
@@ -222,6 +226,6 @@ journalctl --user -u codex-hoshikage-gateway.service -n 50 --no-pager
 | 添付が拒否される | 対応形式、設定上限、実際のファイル内容、Discordのアップロード上限 |
 | 依頼が `UNKNOWN` | 状態確認とProxyとの照合。同じ依頼を再投稿して進めようとしない |
 
-日常操作と状態の意味は[ユーザーマニュアル](user-manual.ja.md)へ進んでください。
+準備ができたら、[ユーザーマニュアル](user-manual.ja.md)へどうぞ。最初の依頼の仕方と、使えるコマンドをまとめています。
 
 Discordの設定手順は **2026-09-11** にリンク先の公式資料で確認しました。表示名は言語やその後のUI更新で変わる場合があります。

@@ -4,9 +4,9 @@
 
 **Work with Codex from Discord, using your own server and project folders.**
 
-Codex Hoshikage Gateway connects a Discord Bot to your running `codex-hoshikage-proxy`. Send a request from Discord on your computer or phone, follow the reply, respond to approval requests, and retrieve files from your project—all in the same conversation.
+Have a task for Codex? Open Discord and send it a message. **Codex Hoshikage Gateway uses [Codex Hoshikage Proxy](https://github.com/tanep3/codex-hoshikage-proxy)** to bring Codex into your Discord conversations. You can follow replies, approve actions, and pick up finished files from your computer or phone.
 
-## What you can do
+## What can it help you with?
 
 - Ask Codex to investigate code, make changes, or prepare a document without opening a terminal for each request.
 - Keep work organized: one Discord text channel represents a project; each thread is a separate conversation with its own context.
@@ -16,7 +16,17 @@ Codex Hoshikage Gateway connects a Discord Bot to your running `codex-hoshikage-
 
 The first version is for **one authorized user in one configured Discord server**. You host the Gateway; the Proxy supplies Codex access and controls its execution permissions. The Gateway does not install or manage the Proxy. Requests and replies pass through Discord, so access to the project channels matters.
 
-## A typical session
+## Meet the two parts
+
+You will run two services: this Gateway and [Codex Hoshikage Proxy](https://github.com/tanep3/codex-hoshikage-proxy). The Proxy connects clients to Codex through an OpenAI-compatible API. The Gateway adds the Discord experience: project channels, conversation threads, commands, and replies.
+
+```text
+You in Discord ↔ Gateway ↔ Codex Hoshikage Proxy ↔ Codex
+```
+
+**The Proxy is required and is installed separately.** Start with its [installation guide](https://github.com/tanep3/codex-hoshikage-proxy/blob/main/docs/installation.md), then follow our [Gateway installation guide](docs/installation.md). Already running a compatible Proxy? You can use it here too.
+
+## Try a first conversation
 
 1. In your configured project channel, run `/new title:Investigate a bug`.
 2. In the thread it creates, post: “Investigate why the tests fail and explain the cause before editing.”
@@ -24,7 +34,7 @@ The first version is for **one authorized user in one configured Discord server*
 
 A normal message in the project channel does not start Codex. Work is accepted inside Gateway-created conversation threads.
 
-## Get started
+## Ready to give it a try?
 
 | Document | English | 日本語 |
 | --- | --- | --- |
@@ -33,9 +43,9 @@ A normal message in the project channel does not start Codex. Work is accepted i
 
 You need an Ubuntu host, a compatible running Proxy, a Discord account with permission to install a Bot, and Rust to build this version from source. The installation guide walks through Discord setup from the beginning.
 
-## Current status
+## A quick note about this version
 
-This is an **early development version (0.1.0)**. Automated tests using simulated Discord and Proxy services have passed; live Discord/Codex acceptance tests and long-running service verification remain. It is ready for controlled evaluation, not a verified production release. Bot command descriptions and replies currently use Japanese; the English documentation does not imply an English Bot interface.
+This is an **early development version (0.1.0)**. Automated tests using simulated Discord and Proxy services have passed; live Discord/Codex acceptance tests and long-running service verification remain. Please try it with a test project first; we have not yet verified it for production use. Bot command descriptions and replies currently use Japanese; the English documentation does not imply an English Bot interface.
 
 With the current Proxy contract, lost answer text cannot be fetched again after it leaves Gateway memory. A completed Codex task can therefore have an incomplete Discord reply. The Gateway does not rerun the task to replace missing text. See the [user manual](docs/user-manual.md) for recovery behavior.
 
