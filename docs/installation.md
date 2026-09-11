@@ -30,7 +30,7 @@ In Discord's desktop/browser client, use the **+** in the server sidebar, choose
 
 Create a regular **text channel**, such as `project-demo`, for your first project. Each project needs its own channel. Forum and voice channels are not the project-channel type used by this Gateway. Discord explains channel types and access controls in its [server setup guide](https://support.discord.com/hc/en-us/articles/33023827550359-Discord-Server-Setup-Guide).
 
-Use a dedicated server or restrict the project channel to yourself and the Bot. Gateway's user allowlist controls who can operate it; it does not hide messages from other people who can view the channel. `/new` creates a public thread within that channel, not a private conversation visible only to you.
+Use a dedicated server or restrict the project channel to yourself and the Bot. Gateway's user allowlist controls who can operate it; it does not hide messages from other people who can view the channel. Normal conversations stay in the channel. Optional `/new` creates an additional public thread; neither is private to you alone.
 
 ## 3. Create the Bot and enable message access
 
@@ -121,6 +121,7 @@ Edit `$HOME/.config/codex-hoshikage-gateway/config.toml` using a text editor. St
 | Setting | What to enter |
 | --- | --- |
 | `discord.guild_id`, `allowed_user_id` | IDs from step 5 |
+| `discord.response_mode` | `"all"`: every authorized post (default); `"mention"`: explicit Bot mentions only |
 | `discord.token_file` | Absolute path to `discord-token` |
 | `proxy.base_url` | Your running Proxy's base URL |
 | `proxy.api_key_file` | Absolute path to `proxy-key` |
@@ -144,27 +145,31 @@ install -d -m 700 "$HOME/.local/state/codex-hoshikage-gateway/temp"
 
 Add another `[[projects]]` block for each additional project. IDs and channels must be unique. Workspace folders must not resolve to the same location or contain one another. Keep the project ID/channel/folder mapping stable after initialization.
 
-### Choose resource limits
+### Start with the included limits
 
-The sample's zero values mean **required, not configured**; they do not mean unlimited or disabled. Set positive integers according to your host's memory/disk budget, actual files, and the Proxy/Discord limits. This guide deliberately does not assign unmeasured production limits.
+The sample already includes default limits, so **you can leave this section as it is to get started**. Adjust it later if you need larger files or a different resource budget.
 
-| Limit | Unit and meaning |
-| --- | --- |
-| `attachments` | Maximum files in one request |
-| `attachment_bytes` | Maximum bytes in one input attachment |
-| `input_bytes` | Maximum combined input size; encoded image input must also fit |
-| `text_bytes` | Maximum UTF-8 bytes in message text or an individual text attachment |
-| `image_pixels` | Maximum decoded pixels per image |
-| `artifact_bytes` | Maximum bytes in a file returned by `/get` |
-| `temp_bytes` | Shared temporary-file capacity in bytes |
-| `output_bytes` | Maximum retained reply bytes per request |
-| `output_total_bytes` | Total retained reply budget in bytes |
-| `delivery_retention_secs` | How long reply data may remain in memory for delivery, in seconds |
-| `queue_conversation` | Waiting-request limit per conversation; sample: 5 |
-| `queue_global` | Waiting-request limit overall; sample: 20 |
-| `validation_secs` | Input-validation reservation timeout in seconds; sample: 120 |
+| Limit | Sample default | Meaning |
+| --- | --- | --- |
+| `attachments` | 4 | Maximum files in one request |
+| `attachment_bytes` | 8 MiB | Maximum bytes in one input attachment |
+| `input_bytes` | 16 MiB | Maximum combined input size; encoded image input must also fit |
+| `text_bytes` | 256 KiB | Maximum UTF-8 bytes in message text or an individual text attachment |
+| `image_pixels` | 16,000,000 pixels | Maximum decoded pixels per image |
+| `artifact_bytes` | 8 MiB | Maximum bytes in a file returned by `/get` |
+| `temp_bytes` | 64 MiB | Shared temporary-file capacity in bytes |
+| `output_bytes` | 1 MiB | Maximum retained reply bytes per request |
+| `output_total_bytes` | 8 MiB | Total retained reply budget in bytes |
+| `delivery_retention_secs` | 900 seconds (15 minutes) | How long reply data may remain in memory for delivery, in seconds |
+| `queue_conversation` | 5 | Waiting-request limit per conversation |
+| `queue_global` | 20 | Waiting-request limit overall |
+| `validation_secs` | 120 seconds | Input-validation reservation timeout in seconds |
 
-Use byte counts, not strings such as `"10MB"`. Allow for image encoding overhead and two active requests. `temp_bytes` must be at least both `input_bytes` and `artifact_bytes`; `output_total_bytes` must be at least `output_bytes`. The global queue limit must be at least the per-conversation limit. Two concurrent executions is a fixed limit in this version. Discord's own file limit still applies even when the configured limit is larger.
+1 MiB is 1,048,576 bytes; 1 KiB is 1,024 bytes. The sample uses integer byte counts. File count, individual size, and total size limits all apply together: four files of 8 MiB each do not fit one request. Encoded image size also counts toward the total.
+
+Use positive integers when adjusting these values. `0` remains a configuration error; it does not select defaults or remove limits. `temp_bytes` must cover both `input_bytes` and `artifact_bytes` individually; `output_total_bytes` must be at least `output_bytes`; the global queue limit must cover the per-conversation limit. Concurrent execution remains fixed at two.
+
+These are Gateway defaults; Discord, Proxy, and model limits also apply. The 64 MiB temporary budget accommodates two 16 MiB input reservations and an 8 MiB artifact, but it is not a whole-process memory cap. These values are starting settings, not a guarantee of performance or file acceptance in every environment. Adjust them if your setup needs it.
 
 ## 8. Start it up and say hello
 
@@ -176,7 +181,7 @@ Use byte counts, not strings such as `"10MB"`. Allow for image encoding overhead
 
 `--config` must precede the subcommand. `check` validates local configuration and credential files; it does **not** test Discord or Proxy connectivity. `init` runs once for a new installation and creates the database and adjacent configuration-directory `gateway-instance.json` identity marker. `run` requires that initialized state.
 
-In Discord, sign in as the allowed user, open the registered project channel, and run `/new title:First check`. Inside the new thread:
+In Discord, sign in as the allowed user and open the registered project channel. No `/new` is needed. In mention mode, mention the Bot in ordinary posts:
 
 1. Use `/status` to inspect readiness and the model.
 2. Send a small request such as “Reply with a short greeting. Do not change files.” Confirm receipt and the answer.
@@ -217,10 +222,10 @@ Replace the backup path with a new, private destination. Do not copy only a live
 
 | Symptom | Check |
 | --- | --- |
-| `check` fails | Replace all placeholders/zero limits; use absolute paths and owner-only credential files |
+| `check` fails | Check ID/path/model placeholders and any limits you changed; use absolute paths and owner-only credential files |
 | Bot stays offline | Service logs, token validity, outbound connectivity, intent configuration |
 | Slash commands are missing | Correct application/server installation, command scope, your command permissions, successful Gateway startup |
-| Ordinary posts do nothing | Allowed user, registered thread created by `/new`, Message Content Intent |
+| Ordinary posts do nothing | Allowed user, registered channel, response mode and Bot mention, Message Content Intent |
 | Bot cannot create/reply in threads | Channel/category overrides and all six permissions in step 4 |
 | Proxy is not ready | Running Proxy, API key, required capabilities and matching contract; `check` alone cannot establish this |
 | File rejected | Supported input type, configured limits, actual file content, and Discord's upload limit |

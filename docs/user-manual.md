@@ -10,21 +10,20 @@ The current version is for one authorized user. Bot command descriptions, button
 
 ## Start with a message
 
-Open your project's text channel and select `/new` from Discord's command picker. Fill in its `title` option, for example:
+Say hello in a registered project channel. Continue there to keep that channel's context; use another project channel for another project. Normal replies contain the answer only, without request IDs, COMPLETED cards, or delivery-complete notices. Use `/status` for details.
 
-```text
-/new title:Review the test failure
+Choose a response mode under `[discord]`:
+
+```toml
+response_mode = "all" # Every authorized post (default)
+# response_mode = "mention" # Explicit Bot mentions only
 ```
 
-Open the thread the Bot creates and post an ordinary message:
+In mention mode, mention the Bot itself. Mentions of other people and replies without a Bot mention do not trigger work. Slash commands work in both modes. The operator applies configuration changes with `admin reload`.
 
-> Investigate the failing tests. Explain the cause and your proposed fix before changing files.
+In an unregistered location, the Bot explains workspace registration without starting Codex. DMs, other servers, and unauthorized users remain out of scope. Anyone who can view the channel can also see the replies.
 
-No Bot mention is needed. Your message becomes a work request. The Bot reports progress and displays reply text as it arrives. Reply in the same thread to continue with the same conversation context; create another thread with `/new` for a separate topic.
-
-The project channel represents a folder on the server. Each Gateway-created thread represents a Codex conversation. Normal posts in the parent channel, DMs, and unrelated or manually created threads do not start work.
-
-Threads created by the Bot are public within the parent channel's access boundary. Anyone who can view that conversation may see its content, even if they cannot operate the Bot.
+Use `/new title:NAME` in the parent channel only when you want an additional independent thread. Existing registered conversation threads continue to work.
 
 ## Another task, or a change to the current one?
 
@@ -46,7 +45,7 @@ Avoid editing or deleting a queued original message or its attachments. The Gate
 /stop
 ```
 
-This immediately pauses the conversation's queue, then requests interruption if there is an active task. You can also use the stop button attached to a request.
+This immediately pauses the conversation's queue, then requests interruption if there is an active task. New replies do not include a stop button; stop buttons on older posts remain supported.
 
 - If only waiting requests exist, the queue is paused without an active task to interrupt.
 - If a request is still being sent and its execution identity is not known, the pause takes effect, but stopping cannot yet be confirmed.
@@ -77,13 +76,13 @@ Not every task produces a prompt: approval behavior depends on the Proxy's polic
 
 ## Choose a model
 
-Inside a conversation, `/model` shows available models (up to 25 in the current list). Select a provider-qualified ID from the available models:
+Inside a conversation, `/models` shows available models (up to 25 in the current list). Select a provider-qualified ID from the available models:
 
 ```text
 /model id:PROVIDER/MODEL_ID
 ```
 
-Replace the placeholder with an actual model ID. The selection applies to the **next task**, preserving the conversation context; it does not replace the model already running. Use `/status` to distinguish the selected model from the active task's model. A change to a different provider requires a new conversation.
+Replace the placeholder with an actual model ID. Select `/model` in Discord and fill its `id` option rather than posting command-like text as a normal message. Without an option, `/model` shows the selected model. The selection applies to the **next task**, preserving the conversation context; it does not replace the model already running. Use `/status` to distinguish the selected model from the active task's model. A change to a different provider requires a new conversation.
 
 ## Attach input and retrieve output
 
@@ -92,7 +91,7 @@ Attach files to your ordinary request message using Discord's attachment control
 - Still PNG, JPEG, or WebP images.
 - UTF-8 text files.
 
-Animated images, PDF/document parsing, and archive extraction are not supported input features. Both the operator's configured limits and Discord's own upload limits apply. Ask the operator for allowed file counts/sizes; this version has no universal size promised by the manual. Files and prompts pass through Discord and the Proxy; include only what you intend those services to receive.
+Animated images, PDF/document parsing, and archive extraction are not supported input features. Both the operator's configured limits and Discord's own upload limits apply. The sample allows up to four attachments, 8 MiB each, within a combined 16 MiB input budget including encoding; text has a separate 256 KiB limit. Your operator can change these values. See the [installation guide](installation.md) for all defaults. Files and prompts pass through Discord and the Proxy; include only what you intend those services to receive.
 
 To receive an output file, explicitly name it relative to the project folder:
 
@@ -124,7 +123,7 @@ There may also be an input-validation step before a request is queued. A rejecte
 
 ## Coming back after a restart or connection problem
 
-Return to the same Discord thread. Previously posted Discord messages remain there. The Gateway preserves conversation identity and queue pause state, and can recover eligible unsent requests by reading their original Discord messages again. Deleted, edited, or inaccessible input will not be executed automatically.
+Return to the same Discord channel (or the thread for an older conversation). Previously posted Discord messages remain there. The Gateway preserves conversation identity and queue pause state, and can recover eligible unsent requests by reading their original Discord messages again. Deleted, edited, or inaccessible input will not be executed automatically.
 
 An uncertain request is not automatically submitted again. `UNKNOWN` can hold up later work in its workspace, and `/resume` does not override it. Ask the host operator to compare Gateway and Proxy status. If you are also the operator, begin with local `admin status` and the recovery instructions linked from the [installation guide](installation.md).
 
@@ -139,13 +138,14 @@ The `name:value` notation below represents Discord command options. Choose the c
 | Command | Where | Purpose |
 | --- | --- | --- |
 | `/new title:NAME` | Registered project channel | Create a conversation |
-| Ordinary message, optionally with attachments | Registered conversation thread | Submit the next work request |
-| `/status` | Conversation thread | Inspect status and models |
-| `/stop` | Conversation thread | Pause the queue and request interruption |
-| `/resume` | Conversation thread | Resume automatic start of waiting requests |
-| `/steer text:INSTRUCTION` | Conversation thread | Instruct the active task |
-| `/model` | Conversation thread | Show models |
-| `/model id:PROVIDER/MODEL_ID` | Conversation thread | Choose the next task's model |
-| `/get path:RELATIVE_PATH` | Conversation thread | Retrieve a specified output file |
+| Ordinary message, optionally with attachments | Registered project channel / existing thread | Submit the next work request |
+| `/status` | Project channel / existing thread | Inspect status and models |
+| `/stop` | Project channel / existing thread | Pause the queue and request interruption |
+| `/resume` | Project channel / existing thread | Resume automatic start of waiting requests |
+| `/steer text:INSTRUCTION` | Project channel / existing thread | Instruct the active task |
+| `/models` | Project channel / existing thread | Show models |
+| `/model` | Project channel / existing thread | Show the selected model |
+| `/model id:PROVIDER/MODEL_ID` | Project channel / existing thread | Choose the next task's model |
+| `/get path:RELATIVE_PATH` | Project channel / existing thread | Retrieve a specified output file |
 
 If the Bot is offline, commands are missing, or all requests are rejected, see [installation troubleshooting](installation.md). If one request is uncertain, check it before posting the same work again.

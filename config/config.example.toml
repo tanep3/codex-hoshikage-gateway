@@ -1,6 +1,8 @@
-# 未設定のID、workspace、モデル、容量を埋めるまで check/init は成功しません。
-# 0 は仮の運用値ではなく「設定必須」を示します。秘密値は別ファイルへ保存します。
+# Replace the IDs, paths and model for your environment before check/init.
+# Resource limits below are ready-to-use defaults. Store secrets in separate files.
 [discord]
+# all: respond to every authorized post; mention: only when the Bot is mentioned.
+response_mode = "all"
 guild_id = "REPLACE_WITH_GUILD_ID"
 allowed_user_id = "REPLACE_WITH_USER_ID"
 token_file = "/home/tane/.config/codex-hoshikage-gateway/discord-token"
@@ -16,18 +18,18 @@ temp_dir = "/home/tane/.local/state/codex-hoshikage-gateway/temp"
 socket_path = "/run/user/1000/codex-hoshikage-gateway/admin.sock"
 
 [limits]
-# 添付件数、各種byte数、最大画素数、回答保持秒数を導入時に指定します。
-attachments = 0
-attachment_bytes = 0
-input_bytes = 0
-text_bytes = 0
-image_pixels = 0
-artifact_bytes = 0
-temp_bytes = 0
-output_bytes = 0
-output_total_bytes = 0
-delivery_retention_secs = 0
-# 合意済みの設計初期値。全体実行上限2は設定から拡張できません。
+# Start with these defaults; adjust only when needed. Zero is invalid, not unlimited.
+attachments = 4 # files
+attachment_bytes = 8388608 # 8 MiB per attachment
+input_bytes = 16777216 # 16 MiB including encoded input
+text_bytes = 262144 # 256 KiB UTF-8 text
+image_pixels = 16000000 # 16 megapixels per image
+artifact_bytes = 8388608 # 8 MiB per returned file
+temp_bytes = 67108864 # 64 MiB shared temporary budget
+output_bytes = 1048576 # 1 MiB per reply
+output_total_bytes = 8388608 # 8 MiB total reply budget
+delivery_retention_secs = 900 # 15 minutes
+# Maximum concurrent executions remains fixed at 2.
 queue_conversation = 5
 queue_global = 20
 validation_secs = 120

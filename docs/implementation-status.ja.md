@@ -2,7 +2,7 @@
 
 更新日: 2026-09-11  
 実装版: 0.1.0（開発版）  
-基準: 要件0.7、システム設計0.3、Proxy契約1.0  
+基準: 要件0.8、システム設計0.4、Proxy契約1.0  
 著作者: Tane Channel Technology
 
 ## 現在の到達点
@@ -29,7 +29,7 @@ Rustの実行バイナリ、SQLite Store、Proxy/Discord接続、主要コマン
 ## 実施済みの検証
 
 ```text
-cargo test --locked --tests --quiet              23 passed / 0 failed
+cargo test --locked --tests --quiet              28 passed / 0 failed
 cargo clippy --locked --all-targets -- -D warnings  passed
 cargo fmt --check                                passed
 ```
@@ -41,10 +41,12 @@ Rust 1.98.1、現在のUbuntu環境で実行。Mock HTTPは一時的なloopback�
 | `tests/state_store.rs` | 9 | 先行検証予約の追越し禁止、SENDINGの永続化・巻戻し禁止、重複受付防止、stop/resume競合、初回失敗の後続未送信処理、期限切れworker結果の拒否、分割秘密のマスク、未知schemaの書込拒否、backup改変検出、古い停止ボタンの拒否を含む |
 | `tests/proxy_contract.rs` | 6 | 503後の生成POSTが1回、404から自動再送しない、現在照会によるUNKNOWN訂正、Capability喪失、2 hold中のControl到達、UTF-8/SSE境界、要求/設定世代の送信許可照合を含む |
 | `tests/recovery_files.rs` | 3 | 復元した旧待機の永久隔離、backup後に追加されたProjectの復元block、解除後の旧投稿拒否、symlink/hardlink/FIFO/範囲外/容量超過拒否、親子workspace拒否 |
-| `tests/delivery.rs` | 2 | Discord POST/PATCH応答喪失後のGET確定、重複送信なし、完全な429拒否だけの待機・再試行 |
-| `tests/application.rs` | 1 | 通常投稿→入力再取得→送信許可→生成POST→SSE表示内容→現在照会→会話継続。重複Discord投稿でもPOSTは1回 |
+| `tests/delivery.rs` | 3 | Discord POST/PATCH応答喪失後のGET確定、重複送信なし、完全な429拒否だけの待機・再試行 |
+| `tests/application.rs` | 2 | 通常投稿→入力再取得→送信許可→生成POST→SSE表示内容→現在照会→会話継続。重複Discord投稿でもPOSTは1回 |
 | `tests/cli.rs` | 1 | CLIのローカルcheck/init、再初期化拒否、DB保持、秘密ファイルの権限拒否と非表示 |
 | `tests/admin.rs` | 1 | 私有管理socketのstatus、正式backup作成・検証、同じ出力先の上書き拒否、終了時のsocket回収 |
+
+追加試験: `src/discord.rs` 内の2件で応答モードと設定の省略・誤値を確認。`tests/model_commands.rs` の1件で一覧・選択表示・変更・無効IDを確認。applicationには通常チャンネルからの開始、deliveryには本文だけの正常返信を追加した。
 
 件数はテスト関数単位であり、表の各確認点と1対1ではない。テスト件数をもってT-01〜T-26やV-01〜V-07をすべて完了扱いにしない。
 
@@ -66,4 +68,11 @@ Rust 1.98.1、現在のUbuntu環境で実行。Mock HTTPは一時的なloopback�
 - 復元全体の保留解除と、個別UNKNOWN hold・pauseの解除は別操作。隔離した旧依頼の送信資格は戻さない。
 - UNKNOWNのholdを明示解除した後の再確認は、管理者の`admin reconcile`でも行える。確実な実行中状態が判明した場合はholdを再取得する。
 - 回答本文の再取得はProxy契約1.0で非対応。Gatewayのメモリから失われた回答全文を復元できるとは表示しない。
-- 添付の容量・件数等は設定例の未設定値を埋める必要がある。ここで試験用に使った数値を本番設定として確定していない。
+- 著作者の追加判断により、添付の容量・件数等は設定例に標準値を記載する。初回はそのまま利用でき、必要時に調整する。0を標準値へ変換する処理は追加せず、正数・容量間の整合性検証を維持する。
+
+## 会話UIの改定（要件0.8）
+
+- 登録チャンネルで直接会話。旧スレッドは継続利用し、未登録場所では登録案内だけを返す。
+- response_modeはall/mention。認可対象は本人・設定Guildのまま。通常回答から状態カード・完了定型文を除く。
+- /modelsは一覧、/modelは選択確認、id指定は次のモデル変更。無効IDとProvider変更は専用案内。
+- 上記のMock試験を追加。稼働中Botのバイナリ置換・コマンド再登録・実Discordの改定UI受入試験は未実施。従来の実会話では2件の完了をDBで確認したが、新UIの受入結果には数えない。

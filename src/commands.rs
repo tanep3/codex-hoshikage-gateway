@@ -67,6 +67,9 @@ impl App {
                 .new_conversation(iid, thread, option(v, "title").context("title required")?)
                 .await;
         }
+        if !self.ensure_channel_conversation(thread).await? {
+            return Ok("このチャンネルの作業フォルダーは未登録です。projects の設定と再読み込みが必要です。".into());
+        }
         let cv = self.authorized_thread(thread).await?;
         if stopped {
             if let Some(r) = self.store.active(thread).await? {
@@ -116,7 +119,17 @@ impl App {
                 let changed = self.store.apply_resume(op).await?;
                 Ok(if changed{"待機列の自動開始を再開しました。UNKNOWNや権限・接続の問題は別途解消が必要です。"}else{"後続の停止操作などにより再開しませんでした。"}.into())
             }
-            "model" => self.choose_model(iid, thread, option(v, "id")).await,
+            "models" => self.choose_model(iid, thread, None).await,
+            "model" => match option(v, "id") {
+                Some(id) => self.choose_model(iid, thread, Some(id.trim())).await,
+                None => Ok(self.redact(
+                    &s,
+                    &format!(
+                        "選択中のモデル: {}\n/models で一覧、/model の id 欄で変更できます。",
+                        cv.selected_model
+                    ),
+                )),
+            },
             "steer" => {
                 self.steer(iid, thread, option(v, "text").context("text required")?)
                     .await
@@ -204,7 +217,12 @@ impl App {
             let(t,o,d)=(thread.to_owned(),op.clone(),desired.clone());
             self.store.call(true,move|c|{let tx=c.transaction()?;let n=tx.execute("UPDATE conversations SET selected_model=?2,selection_revision=selection_revision+1 WHERE thread_id=?1 AND latest_model_sequence=?3 AND EXISTS(SELECT 1 FROM operations WHERE id=?4 AND state='VALIDATING')",params![t,d,sequence,o])?;tx.execute("UPDATE operations SET state=?2 WHERE id=?1",params![o,if n==1{"APPLIED"}else{"SUPERSEDED"}])?;tx.commit()?;Ok(n==1)}).await
         }.await;
-        match result{Ok(true)=>Ok(self.redact(&s,&format!("次に開始する依頼のモデルを {desired} にしました。実行中のTurnには適用しません。"))),Ok(false)=>Ok("より新しいモデル選択があるため、この操作は適用しませんでした。".into()),Err(e)=>{self.store.call(true,move|c|{c.execute("UPDATE operations SET state='FAILED' WHERE id=?1 AND state='VALIDATING'",[op])?;Ok(())}).await?;Err(e)}}
+        match result{Ok(true)=>Ok(self.redact(&s,&format!("次に開始する依頼のモデルを {desired} にしました。実行中のTurnには適用しません。"))),Ok(false)=>Ok("より新しいモデル選択があるため、この操作は適用しませんでした。".into()),Err(e)=>{self.store.call(true,move|c|{c.execute("UPDATE operations SET state='FAILED' WHERE id=?1 AND state='VALIDATING'",[op])?;Ok(())}).await?;
+            let message=match e.to_string().as_str() {
+                "model unavailable"=>"そのモデルIDは利用できません。/models の一覧から id 欄に入力してください。",
+                "provider change requires new conversation"=>"別Providerへの変更には /new で新しい会話を作成してください。",
+                _=>"モデルを変更できませんでした。Proxyの接続と /models を確認してください。",
+            };Ok(message.into())}}
     }
     async fn reserve_control(
         &self,

@@ -11,6 +11,7 @@ pub fn config(t: &tempfile::TempDir) -> Config {
             guild_id: "1".into(),
             allowed_user_id: "2".into(),
             token_file: root.join("token"),
+            response_mode: ResponseMode::All,
         },
         proxy: Proxy {
             base_url: "http://127.0.0.1:4040".into(),

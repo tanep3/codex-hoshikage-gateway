@@ -34,16 +34,37 @@ async fn generate(
 }
 #[tokio::test]
 async fn discord_admission_through_scheduler_stream_and_proxy_reconciliation() {
+    run_conversation(false).await;
+}
+
+#[tokio::test]
+async fn registered_channel_starts_without_new_or_preexisting_conversation() {
+    run_conversation(true).await;
+}
+
+async fn run_conversation(channel: bool) {
     let count = Arc::new(AtomicUsize::new(0));
     let caps = json!({"contract_version":"1.0","responses":true,"streaming":true,"conversation_resume":true,"conversation_model_change":true,"identity_on_start":true,"request_lookup":true,"persistent_turn_status":true,"turn_status":true,"turn_events":true,"turn_interrupt":true,"turn_steer":true,"interactive_approval":true,"auto_approval_suppression":true,"event_reconnect":true,"output_retrieval":false,"limits":{"auth_scope":"shared_operator","continuation":"successful_response_only","disconnect_interrupts":true,"event_history_replay":false,"event_reconnect":"snapshot_only","steer_idempotency":false,"model_change_scope":"same_provider"}});
-    let router=Router::new().route("/readyz",get(||async{Json(json!({"status":"ready"}))})).route("/v1/codex/capabilities",get(move||{let c=caps.clone();async{Json(c)}})).route("/channels/4",get(||async{Json(json!({"id":"4","guild_id":"1","parent_id":"3","type":11,"thread_metadata":{"archived":false,"locked":false}}))})).route("/channels/4/messages/10",get(||async{Json(message())})).route("/v1/responses",post(generate)).route("/v1/codex/requests/{key}",get(|axum::extract::Path(key):axum::extract::Path<String>,State(n):State<Arc<AtomicUsize>>|async move{if n.load(Ordering::SeqCst)==0{return StatusCode::NOT_FOUND.into_response()}Json(json!({"client_request_id":key,"phase":"started","response_id":"resp_test","thread_id":"thread_test","turn_id":"turn_test"})).into_response()})).route("/v1/codex/turns/turn_test/status",get(||async{Json(json!({"response_id":"resp_test","thread_id":"thread_test","turn_id":"turn_test","status":"completed","pending_approvals":[]}))})).route("/v1/codex/responses/resp_test",get(||async{Json(json!({"response_id":"resp_test","thread_id":"thread_test","turn_id":"turn_test","continuable":true}))})).with_state(count.clone());
+    let router=Router::new().route("/readyz",get(||async{Json(json!({"status":"ready"}))})).route("/v1/codex/capabilities",get(move||{let c=caps.clone();async{Json(c)}})).route("/channels/4",get(move||async move{Json(if channel {json!({"id":"4","guild_id":"1","type":0})} else {json!({"id":"4","guild_id":"1","parent_id":"3","type":11,"thread_metadata":{"archived":false,"locked":false}})})})).route("/channels/4/messages/10",get(||async{Json(message())})).route("/v1/responses",post(generate)).route("/v1/codex/requests/{key}",get(|axum::extract::Path(key):axum::extract::Path<String>,State(n):State<Arc<AtomicUsize>>|async move{if n.load(Ordering::SeqCst)==0{return StatusCode::NOT_FOUND.into_response()}Json(json!({"client_request_id":key,"phase":"started","response_id":"resp_test","thread_id":"thread_test","turn_id":"turn_test"})).into_response()})).route("/v1/codex/turns/turn_test/status",get(||async{Json(json!({"response_id":"resp_test","thread_id":"thread_test","turn_id":"turn_test","status":"completed","pending_approvals":[]}))})).route("/v1/codex/responses/resp_test",get(||async{Json(json!({"response_id":"resp_test","thread_id":"thread_test","turn_id":"turn_test","continuable":true}))})).with_state(count.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let t = tempfile::tempdir().unwrap();
     let mut cfg = common::config(&t);
     cfg.proxy.base_url = endpoint.clone();
+    if channel {
+        cfg.projects[0].channel_id = "4".into();
+    }
     let (store, _lock) = common::store(&cfg).await;
+    if channel {
+        store
+            .call(true, |c| {
+                c.execute("DELETE FROM conversations", [])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
     let proxy = Proxy::new(endpoint.clone(), "test-key".into()).unwrap();
     proxy.check().await.unwrap();
     let app = App::new(

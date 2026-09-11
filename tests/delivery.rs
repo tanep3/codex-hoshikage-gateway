@@ -162,3 +162,93 @@ async fn only_explicit_rate_limit_rejection_allows_transport_retry() {
     s.abort();
     s.await.ok();
 }
+
+#[tokio::test]
+async fn successful_answer_has_no_status_or_completion_posts() {
+    use codex_hoshikage_gateway::{
+        application::{App, Output},
+        proxy::Proxy,
+    };
+    use std::time::{Duration, Instant};
+    let received = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let r = received.clone();
+    let router = Router::new().route(
+        "/channels/4/messages",
+        post(move |Json(mut body): Json<Value>| {
+            let r = r.clone();
+            async move {
+                r.lock().unwrap().push(body.clone());
+                body["id"] = json!("100");
+                body["channel_id"] = json!("4");
+                Json(body)
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let t = tempfile::tempdir().unwrap();
+    let cfg = common::config(&t);
+    let (store, _lock) = common::store(&cfg).await;
+    let id = common::queued(&store, &cfg, "123").await;
+    let rid = id.clone();
+    store
+        .call(true, move |c| {
+            c.execute("UPDATE requests SET state='COMPLETED' WHERE id=?1", [&rid])?;
+            c.execute("INSERT INTO output_state VALUES(?1,'VOLATILE')", [rid])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = App::new(
+        cfg,
+        store,
+        Discord::with_endpoint("test".into(), endpoint.clone()).unwrap(),
+        Proxy::new(endpoint, "test".into()).unwrap(),
+    )
+    .unwrap();
+    app.connected.store(true, Ordering::SeqCst);
+    app.output.lock().await.insert(
+        id.clone(),
+        Output {
+            thread: "4".into(),
+            text: "こんにちは☺️".into(),
+            done: true,
+            lost: false,
+            created: Instant::now(),
+            last_progress: Instant::now(),
+            retention: Duration::from_secs(60),
+        },
+    );
+    let a = app.clone();
+    let task = tokio::spawn(async move { a.delivery_loop().await });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let rid = id.clone();
+            let done = app
+                .store
+                .call(true, move |c| {
+                    Ok(c.query_row(
+                        "SELECT state='DELIVERED' FROM output_state WHERE request_id=?1",
+                        [rid],
+                        |r| r.get::<_, bool>(0),
+                    )?)
+                })
+                .await
+                .unwrap();
+            if done {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    app.cancel.cancel();
+    task.await.unwrap().unwrap();
+    let messages = received.lock().unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["content"], "こんにちは☺️");
+    assert_eq!(messages[0]["components"], json!([]));
+    server.abort();
+}

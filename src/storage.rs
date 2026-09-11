@@ -238,7 +238,7 @@ impl Store {
             .context("store worker terminated")?
     }
     pub async fn add_conversation(&self, thread: String, project: String) -> Result<()> {
-        self.call(false,move|c|{c.execute("INSERT INTO conversations(thread_id,project_id,selected_model) SELECT ?1,id,default_model FROM projects WHERE id=?2 AND lifecycle='ACTIVE'",params![thread,project])?;Ok(())}).await
+        self.call(false,move|c|{c.execute("INSERT OR IGNORE INTO conversations(thread_id,project_id,selected_model) SELECT ?1,id,default_model FROM projects WHERE id=?2 AND lifecycle='ACTIVE'",params![thread,project])?;Ok(())}).await
     }
     pub async fn conversation(&self, thread: &str) -> Result<Conversation> {
         let thread = thread.to_owned();

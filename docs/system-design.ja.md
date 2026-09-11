@@ -1,7 +1,7 @@
 # Codex Hoshikage Gateway システム設計書
 
 作成日: 2026-09-11  
-版: 0.3（要件0.7・Proxy制御API契約1.0／最終レビュー5件の補完反映）  
+版: 0.4（要件0.8・チャンネル会話と表示方針反映）  
 著作者・著作権者: Tane Channel Technology  
 配布ライセンス: MIT
 
@@ -11,7 +11,7 @@
 
 Gatewayは単一Rustプロセスとして動作し、Discord接続、受付・認可、会話と依頼の管理、待ち行列、Proxy制御、回答配信を担当する。SQLiteを状態の正本とし、本文・回答を永続保存しない。App ServerはProxyが所有する。Proxy内部crateへの依存、App Serverへの直接接続、GatewayによるProxyサービスの起動・停止は行わない。
 
-本書の処理規則は実装方針であり、動作検証済みの実装を示すものではない。数値は「確定要件」「設計初期値」「導入時の必須設定」を区別する。特に添付容量・件数・保存期間へ仮の数値を既定値として埋め込まない。残る検証項目は第17節に集約し、合意済みの利用方針を再質問しない。
+本書の処理規則は実装方針であり、動作検証済みの実装を示すものではない。数値は「確定要件」「設計初期値」「導入時の必須設定」を区別する。著作者の追加判断により、添付容量・件数・回答保持時間の標準値を設定例に記載し、初回の数値入力を不要にする。実測済み性能の保証とは区別する。残る検証項目は第17節に集約し、合意済みの利用方針を再質問しない。
 
 [設計レビュー](system-design-review.ja.md)のR-01〜R-08を反映した。対策は本書の状態・データ・操作・試験へ組み込み、Proxy契約の追加拡張は前提にしない。設計反映済みと実装検証済みを区別する。さらに最終指摘FNL-01〜FNL-05（タスク監視、migration、正式バックアップ、reload分類、検証予約回収）を反映し、設計レビューを完了とする。実装・結合試験の未実施項目は受入試験へ引き継ぐ。
 
@@ -150,18 +150,19 @@ Proxyの物理接続を1本の永続セッションとみなさず、Capability 
 
 | 操作 | 場所・入力 | 処理・表示 |
 | --- | --- | --- |
-| `/new name:<表示名>` | 登録Project Channel | 会話Threadを作成・対応保存。本文の作業依頼はThreadへの通常投稿から開始。 |
-| 通常投稿 | 登録Conversation Thread | 本文または採用添付を受理。実行中・pause中はQUEUED。 |
+| `/new title:<表示名>` | 登録Project Channel | 任意の独立会話Threadを作成。通常のチャンネル会話には不要。 |
+| 通常投稿 | 登録Project Channel／既存Conversation Thread | 本文または採用添付を受理。実行中・pause中はQUEUED。 |
 | `/status` | Project Channel / Conversation Thread | プロジェクト/会話の状態、待機数、選択モデル、実行状態、配信欠落を表示。 |
-| `/model [id]` | Conversation Thread | 省略時は候補と選択/実行中モデルを表示。指定時は次回送信モデルを変更。 |
-| `/steer input:<指示>` | Conversation Thread | その時点で特定したTurnへ1回だけ送る。対象不明なら拒否。 |
-| `/stop` | Conversation Thread | pause・停止意思を保存して対象Turnを中断。 |
-| 停止ボタン | 依頼の状態メッセージ | ボタンに対応する依頼を再検証。古い依頼のボタンで後続Turnを止めない。 |
-| `/resume` | Conversation Thread | pauseのみ解除。他の送信条件が成立した待機依頼を順に開始。 |
+| `/models` | Project Channel／既存Conversation Thread | 利用可能なモデルを一覧表示。 |
+| `/model [id]` | Project Channel／既存Conversation Thread | 省略時は選択モデルを確認、指定時は次回モデルを変更。 |
+| `/steer text:<指示>` | Project Channel／既存Conversation Thread | その時点で特定したTurnへ1回だけ送る。対象不明なら拒否。 |
+| `/stop` | Project Channel／既存Conversation Thread | pause・停止意思を保存して対象Turnを中断。 |
+| 停止ボタン（旧投稿互換） | 既存の状態メッセージ | ボタンに対応する依頼を再検証。古い依頼のボタンで後続Turnを止めない。 |
+| `/resume` | Project Channel／既存Conversation Thread | pauseのみ解除。他の送信条件が成立した待機依頼を順に開始。 |
 | 承認/拒否ボタン | 承認メッセージ | Proxyの現在の許可判断と対象に照合して送信。 |
-| `/get path:<相対パス>` | Conversation Thread | 登録workspace内の本人指定ファイルを検証して返送。 |
+| `/get path:<相対パス>` | Project Channel／既存Conversation Thread | 登録workspace内の本人指定ファイルを検証して返送。 |
 
-コマンドは専用Guildに登録し、DMでは使わない。通常投稿は本人User ID、Guild ID、親Project Channel、登録Threadを毎回照合し、bot/webhook投稿を除外する。未登録Threadを会話として自動採用しない。メッセージ編集イベントは新規実行を作らない。
+コマンドは専用Guildに登録し、DMでは使わない。通常投稿は本人User ID、Guild IDを照合してbot/webhookを除外し、response_modeで対象を判定する。登録Project Channelは会話を遅延作成して直接受付する。既存の登録Threadは親Projectを照合して互換利用し、未登録の場所には登録案内のみを返す。メッセージ編集イベントは新規実行を作らない。
 
 `/new`のInteraction IDを保存し、作成結果Thread IDとの対応を永続化する。作成HTTPの結果不明時は新規Threadを自動再作成しない。確実に対応が取れたThreadだけを実行可能とし、照合不能なら作成未確認を案内する。Gateway未保存のThreadへ通常投稿されても生成しない。
 
@@ -180,7 +181,7 @@ Interactionは3秒以内の初期応答が必要なため、時間のかかる�
 | 対象 | 主キー・対応 |
 | --- | --- |
 | Project | Gateway UUID、Guild ID、Channel ID、canonical cwd、filesystem identity |
-| Conversation | Gateway UUID、Discord Thread ID、Project、Proxy Thread ID、最後の継続可能Response ID |
+| Conversation | Gateway UUID、Discord会話Channel ID（旧会話はThread ID）、Project、Proxy Thread ID、最後の継続可能Response ID |
 | Request | Gateway UUID、**UNIQUE Discord Message ID**、会話内sequence、`req-<UUID>`のProxy要求ID |
 | Execution | Requestに対応するResponse/Thread/Turn ID、送信モデルと設定世代 |
 | ControlOperation | UUID、**UNIQUE Discord Interaction ID**、種類、固定対象、送信状態 |
@@ -595,7 +596,7 @@ Projectの履歴と有効登録を分ける（R-06）。設定に安定したpro
 
 廃止は、未終了実行・未送信Request・VALIDATING予約・有効hold・未解決UNKNOWN（管理解除済みも含む）・復元保留・進行中ファイル操作・未完了配信処理がない場合に限る。判定とRETIRED更新を同じtransactionで行い、新しい受付/配信workerの予約と競合させない。UNAVAILABLEとして処理を終えた配信履歴や終了済み会話の存在だけでは廃止を拒否しない。
 
-RETIREDは読取専用とし、旧Threadの/statusと既配信履歴の参照だけを許可する。通常投稿、resume、model、get、新規生成を拒否する。cwd/Channelを旧Projectで書換えず、新しいproject_idで登録する。同じChannelの再利用はACTIVEのみの部分UNIQUEで許可するが、旧Threadは元のproject_idとの対応を維持し、新Projectへ自動所属させない。/newだけが新Projectの会話を作る。RETIREDからの再有効化は初版対象外とする。cwd移動は先に廃止してから行い、起動時の存在・権限検証はACTIVEの登録を対象にする。旧Projectのパスは履歴情報として保持する。
+RETIREDは読取専用とし、旧Threadの/statusと既配信履歴の参照だけを許可する。通常投稿、resume、model、get、新規生成を拒否する。cwd/Channelを旧Projectで書換えず、新しいproject_idで登録する。同じChannelの再利用はACTIVEのみの部分UNIQUEで許可するが、旧Threadは元のproject_idとの対応を維持し、新Projectへ自動所属させない。新Projectの会話は初回の対象投稿・操作または任意の/newで作る。ただし旧会話に使用済みのChannel IDを新Projectへ付け替える場合は旧対応を自動移送せず拒否する。RETIREDからの再有効化は初版対象外とする。cwd移動は先に廃止してから行い、起動時の存在・権限検証はACTIVEの登録を対象にする。旧Projectのパスは履歴情報として保持する。
 
 登録追加はACTIVE workspaceとの包含検証とProxy許可範囲の導入確認が必要。過去Projectに後日未終了実行の証拠が出た場合はパスと履歴IDを基に現行Projectも保留し、廃止状態を安全確認の代替にしない。認可IDやネットワーク先の変更は明示した設定更新で扱う。
 
@@ -680,11 +681,11 @@ bundleにはBot token、Proxy API key、元設定ファイル、DB外のイン�
 | `limits.artifacts` | 1返送bytes、snapshot総量 |
 | `retention` | 一時ファイルの残骸掃除条件、未配信メモリ保持期限、診断ログ保持方針 |
 
-添付関連上限は無制限を許さず、**初版の添付機能を有効にする導入設定として必須**にする。未設定なら設定不足としてReadyにしない。値は実運用Discord上限、モデル画像入力、サーバー余力、試験データから第17節V-03で決める。保持期間も確定値を創作しない。処理終了時の即時削除は数値設定によらず行う。
+添付関連上限は無制限を許さず、設定例に正の標準値を記載する。利用者は初回に容量等を決め直す必要はなく、必要時に調整する。標準値の正本は `config/config.example.toml`、説明は[導入手順書](installation.ja.md)とする。0の自動補完はせず、既存の必須項目・正数・上限間の整合性検証を維持する。実環境との適合は第17節V-03で確認し、処理終了時の即時削除は数値設定によらず行う。
 
 ### 15.2 実装・負荷試験の設計初期値
 
-次は著作者の確定要件ではなく、設定可能な実装初期値。試験結果で調整し、変更根拠を記録する。添付の未確定数値とは区別する。
+次は著作者の確定要件ではなく、設定可能な実装初期値。試験結果で調整し、変更根拠を記録する。設定例の容量標準値も実測済みの性能保証とは区別する。
 
 | パラメーター | 初期値 | 理由 |
 | --- | --- | --- |
@@ -734,7 +735,7 @@ bundleにはBot token、Proxy API key、元設定ファイル、DB外のイン�
 
 | 試験 | 要件ID | 検証内容 |
 | --- | --- | --- |
-| T-01 基本会話 | A-01/A-02/A-14 | Channelでは実行なし、Thread内の依頼・継続・新規会話分離。 |
+| T-01 基本会話 | A-01/A-02/A-14 | Channelから直接依頼・継続、別Channelの文脈分離、既存Thread互換。 |
 | T-02 認可 | A-03/A-10 | User/Guild/Thread/parent偽装、bot/webhook、空設定、秘密を含むエラーの表示/logマスク。 |
 | T-03 承認 | A-04/A-17/A-19 | 2Turnが承認待ちでも制御到達。期限・二重クリック・旧UUID・上流応答喪失。 |
 | T-04 停止 | A-05/A-17/A-22/A-29 | 空/待機/SENDING/UNKNOWN、stopと送信commitの前後、resume競合、再起動pause維持、終端競合。 |
@@ -761,7 +762,7 @@ bundleにはBot token、Proxy API key、元設定ファイル、DB外のイン�
 | --- | --- | --- |
 | V-01 | ライブラリfeature、依存固定、Rust基準版、aarch64ビルド、各依存ライセンス | 実装の骨組み作成時。必要なら同責務の互換版へ調整し理由を記録。 |
 | V-02 | 実登録cwd、Proxy許可範囲、Gateway成果物アクセス、credential領域の読取境界 | 実環境で実行する前。現在確認済みProxy許可ルート外へ自動拡張しない。 |
-| V-03 | 画像形式・モデル受入、Discord/Proxyの要求上限、添付件数/bytes/画素、一時領域と保持・ログ方針 | 添付を有効化する導入設定の作成前。実測根拠を示して設定化し、仮値のまま初版仕様を確定しない。 |
+| V-03 | 画像形式・モデル受入、Discord/Proxyの要求上限、添付件数/bytes/画素、一時領域と保持・ログ方針 | 初版の受入試験時。設定例の標準値とDiscord/Proxy/モデルの実制約を照合し、必要な調整と実測根拠を記録する。 |
 | V-04 | 対応外待機を監視event/statusから識別できるか | 制御結合試験。識別不能なら120秒等の無進捗検出で「進行待ち・理由未確認」と通知し、/status・/stopを提供。Steerを追加質問への回答とみなさない。 |
 | V-05 | Discord Intents/権限、Thread作成・アーカイブ、長時間ボタン、3秒応答、未知結果の投稿照合 | Discord結合試験前。権限不足をReady判定と診断へ反映。 |
 | V-06 | SSE終了・現在状態・continuable、再起動時の相関、制御経路の分離 | Proxy結合試験。出力取得不能の既知契約を理由にProxyへ新機能を再要求しない。 |
@@ -804,3 +805,11 @@ FNL-05はT-15を拡張して検証する。FNL-01〜FNL-05の設計補完をも�
 | 2026-09-11 | 0.1 | 要件0.7とProxy制御API1.0を基に、Rust構成、独立制御枠、SQLiteモデル、最大1回送信、復旧、Discord UI、添付、配信欠落、管理解除、試験対応を具体化。アプリ実装・サービス設定変更は未実施。 |
 | 2026-09-11 | 0.2 | R-01〜R-08へ対応。検証前予約、会話操作世代、送信許可票、公開前マスク、継続不能queue終結、Project廃止、編集revision、DB外マーカーによる復元保留を具体化。追加試験T-15〜T-22を定義。 |
 | 2026-09-11 | 0.3 | 最終レビューFNL-01〜FNL-05を反映。Supervisor、forward migration、manifest付きbackup、reload分類、独立Sweeperを具体化。T-15拡張、T-23〜T-26追加。設計レビュー完了、実装試験へ引継ぎ。 |
+
+## 19. 要件0.8の実装対応
+
+- `discord.response_mode` は列挙型all/mention、省略時all。再読込時に以後の投稿へ反映。Bot自身のIDとmentions配列を照合し、本文文字列の偽装メンションは採用しない。
+- 通常会話は登録Channel IDをキーに初回受付時に作成。既存SQLiteの `thread_id` 列はDiscord会話場所IDとして継続使用し、既存の対応・履歴を削除しない。未登録の場所は案内のみで作業先を自動選択しない。
+- 回答配信のdigest・POST/PATCH照合・欠落検出は維持し、正常時の状態カード・完了定型文を送信しない。本文の配信確認後に内部の配信状態を確定する。旧Discord投稿は削除しない。
+- `/models` は一覧、`/model` は選択確認、id指定は既存の順序付け・Provider照合付き変更処理へ送る。
+- 正常系・応答モード・チャンネル隔離・旧スレッド互換・モデル操作をMockで検証し、実Botへの反映とDiscord受入確認は別に記録する。

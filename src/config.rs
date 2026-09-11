@@ -21,6 +21,15 @@ pub struct Discord {
     pub guild_id: String,
     pub allowed_user_id: String,
     pub token_file: PathBuf,
+    #[serde(default)]
+    pub response_mode: ResponseMode,
+}
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseMode {
+    #[default]
+    All,
+    Mention,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]

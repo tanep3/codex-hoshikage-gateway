@@ -9,7 +9,7 @@ Have a task for Codex? Open Discord and send it a message. **Codex Hoshikage Gat
 ## What can it help you with?
 
 - Ask Codex to investigate code, make changes, or prepare a document without opening a terminal for each request.
-- Keep work organized: one Discord text channel represents a project; each thread is a separate conversation with its own context.
+- Keep work organized: one Discord text channel represents a project; each channel keeps its own conversation context, with no thread creation required.
 - Guide work while it is running with additional instructions, or request a stop and pause queued requests.
 - Choose the model for the next request, attach images or text files, and explicitly download an output file.
 - Return to an existing conversation after a Gateway restart. Uncertain requests are held for inspection instead of automatically running again.
@@ -30,11 +30,11 @@ You in Discord ↔ Gateway ↔ Codex Hoshikage Proxy ↔ Codex
 
 ## Try a first conversation
 
-1. In your configured project channel, run `/new title:Investigate a bug`.
-2. In the thread it creates, post: “Investigate why the tests fail and explain the cause before editing.”
-3. Read the reply, continue the conversation, or use `/get path:output/report.txt` to retrieve a file you requested.
+1. Say hello in your configured project channel.
+2. Continue in that channel: “Investigate why the tests fail and explain the cause before editing.”
+3. Retrieve a file with `/get path:output/report.txt`.
 
-A normal message in the project channel does not start Codex. Work is accepted inside Gateway-created conversation threads.
+Set `response_mode = "all"` to answer every authorized post, or `"mention"` to answer only when the Bot is mentioned. Normal replies contain just the answer. In an unregistered location, the Bot explains how to register a workspace.
 
 ## Ready to give it a try?
 

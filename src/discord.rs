@@ -43,6 +43,18 @@ impl Discord {
             .as_deref()
             .is_some_and(|id| v["author"]["id"].as_str() == Some(id))
     }
+    pub fn should_respond(&self, message: &Value, mode: crate::config::ResponseMode) -> bool {
+        if mode == crate::config::ResponseMode::All {
+            return true;
+        }
+        let bot = self.bot_id.read().unwrap();
+        let Some(bot) = bot.as_deref() else {
+            return false;
+        };
+        message["mentions"]
+            .as_array()
+            .is_some_and(|mentions| mentions.iter().any(|user| user["id"].as_str() == Some(bot)))
+    }
     pub fn secret(&self) -> String {
         (*self.token).clone()
     }
@@ -163,7 +175,8 @@ impl Discord {
             {"name":"status","description":"実行・配信・会話の状態を表示"},
             {"name":"stop","description":"待ち行列を停止し、実行中の依頼へ中断を要求"},
             {"name":"resume","description":"一時停止した待ち行列の自動開始を再開"},
-            {"name":"model","description":"次の依頼のモデルを選択／一覧表示","options":[opt("id","ProxyのモデルID",false)]},
+            {"name":"models","description":"利用可能なモデルを一覧表示"},
+            {"name":"model","description":"選択中モデルの確認／次の依頼のモデル変更","options":[opt("id","ProxyのモデルID",false)]},
             {"name":"steer","description":"現在のTurnへ追加指示","options":[opt("text","追加指示",true)]},
             {"name":"get","description":"指定した成果物を返送","options":[opt("path","プロジェクト相対パス",true)]}
         ]);
@@ -314,5 +327,44 @@ impl serenity::client::EventHandler for Health {
             self.connected
                 .store(false, std::sync::atomic::Ordering::SeqCst);
         }
+    }
+}
+
+#[cfg(test)]
+mod response_mode_tests {
+    use super::*;
+    use crate::config::ResponseMode;
+
+    #[test]
+    fn mention_mode_uses_bot_identity_and_structured_mentions() {
+        let discord = Discord::new("test-only".into()).unwrap();
+        assert!(discord.should_respond(&json!({}), ResponseMode::All));
+        assert!(!discord.should_respond(&json!({"mentions":[{"id":"42"}]}), ResponseMode::Mention));
+        *discord.bot_id.write().unwrap() = Some("42".into());
+        assert!(discord.should_respond(&json!({"mentions":[{"id":"42"}]}), ResponseMode::Mention));
+        assert!(!discord.should_respond(
+            &json!({"content":"<@42>","mentions":[{"id":"99"}]}),
+            ResponseMode::Mention
+        ));
+        assert!(!discord.should_respond(&json!({"mentions":[]}), ResponseMode::Mention));
+    }
+
+    #[test]
+    fn response_mode_defaults_and_rejects_typos() {
+        let base = r#"guild_id = "1"
+allowed_user_id = "2"
+token_file = "/tmp/unused"
+"#;
+        let config: crate::config::Discord = toml::from_str(base).unwrap();
+        assert_eq!(config.response_mode, ResponseMode::All);
+        let config: crate::config::Discord =
+            toml::from_str(&format!("{base}response_mode = \"mention\"\n")).unwrap();
+        assert_eq!(config.response_mode, ResponseMode::Mention);
+        assert!(
+            toml::from_str::<crate::config::Discord>(&format!(
+                "{base}response_mode = \"mentions\"\n"
+            ))
+            .is_err()
+        );
     }
 }

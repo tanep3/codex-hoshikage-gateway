@@ -96,13 +96,29 @@ impl App {
         ensure!(
             v["id"] == thread
                 && v["guild_id"] == s.cfg.discord.guild_id
-                && v["parent_id"] == p.channel_id
-                && matches!(v["type"].as_u64(), Some(11 | 12))
+                && ((v["id"] == p.channel_id && v["type"] == 0)
+                    || (v["parent_id"] == p.channel_id
+                        && matches!(v["type"].as_u64(), Some(11 | 12))))
                 && v["thread_metadata"]["archived"] != true
                 && v["thread_metadata"]["locked"] != true,
             "conversation unavailable or identity changed"
         );
         Ok(cv)
+    }
+    pub async fn ensure_channel_conversation(&self, channel: &str) -> Result<bool> {
+        let s = self.settings().await;
+        if let Some(p) = s
+            .cfg
+            .projects
+            .iter()
+            .find(|p| p.channel_id == channel && p.lifecycle == "ACTIVE")
+        {
+            self.store
+                .add_conversation(channel.into(), p.id.clone())
+                .await?;
+            return Ok(true);
+        }
+        Ok(self.store.conversation(channel).await.is_ok())
     }
     pub async fn admit_loop(&self, mut rx: mpsc::Receiver<Incoming>) -> Result<()> {
         let mut workers = JoinSet::new();
@@ -114,13 +130,26 @@ impl App {
                     let Some(Incoming::Message(v))=event else{ensure!(!rx.is_closed(),"Discord admission channel closed");continue};
                     let s=self.settings().await;
                     if v["guild_id"]!=s.cfg.discord.guild_id||v["author"]["id"]!=s.cfg.discord.allowed_user_id||v["author"]["bot"]==true||!v["webhook_id"].is_null(){continue;}
+                    if !self.discord.should_respond(&v,s.cfg.discord.response_mode){continue;}
+                    let (Some(channel),Some(message))=(v["channel_id"].as_str(),v["id"].as_str()) else {continue};
+                    if !self.ensure_channel_conversation(channel).await? {
+                        self.notice(message.into(),channel.into(),"このチャンネルの作業フォルダーは未登録です。設定の projects に channel_id と cwd を登録し、設定を再読み込みしてください。").await?;
+                        continue;
+                    }
                     if self.reloading.load(Ordering::SeqCst)||self.recovery.load(Ordering::SeqCst)||!s.proxy.gate.is_ready()||!self.connected.load(Ordering::SeqCst){if let (Some(t),Some(id))=(v["channel_id"].as_str(),v["id"].as_str()) && self.store.conversation(t).await.is_ok(){self.notice(id.into(),t.into(),"受付停止中です。/status で状態を確認してください。").await?;}continue;}
                     let m=match input_message(&v,&s.cfg.discord.guild_id){Ok(m)=>m,Err(_)=>continue};
                     if workers.len()>=s.cfg.limits.queue_global{continue;}
                     // The Store transaction is the acceptance ordering boundary, before network validation.
-                    let id=match self.store.reserve(m.id.clone(),m.thread_id.clone(),m.metadata_digest(),s.cfg.limits.clone()).await{Ok(Some(id))=>id,Ok(None)=>continue,Err(_)=>{if self.store.conversation(&m.thread_id).await.is_ok(){self.notice(m.id.clone(),m.thread_id.clone(),"受付できませんでした。/status で待機数・会話状態を確認してください。").await?;}continue}};
+                    let id=match self.store.reserve(m.id.clone(),m.thread_id.clone(),m.metadata_digest(),s.cfg.limits.clone()).await{Ok(Some(id))=>id,Ok(None)=>continue,Err(_)=>{if self.store.conversation(&m.thread_id).await.is_ok(){self.notice(m.id.clone(),m.thread_id.clone(),"受付できませんでした。会話が継続不可の場合は /new で新しい会話を作成してください。詳しくは /status で確認できます。").await?;}continue}};
                     let app=self.clone();workers.spawn(async move{
-                        let result=async{app.authorized_thread(&m.thread_id).await?;let prepared=app.files.prepare(&m,&s.cfg.limits).await?;app.store.finalize(id.clone(),prepared.metadata_digest,prepared.digest,prepared.attachments).await}.await;
+                        let result=async{
+                            let cv=app.authorized_thread(&m.thread_id).await?;
+                            let prepared=app.files.prepare(&m,&s.cfg.limits).await?;
+                            let waiting=cv.paused || app.store.active(&m.thread_id).await?.is_some();
+                            app.store.finalize(id.clone(),prepared.metadata_digest,prepared.digest,prepared.attachments).await?;
+                            if waiting {app.notice(format!("queued-{id}"),m.thread_id.clone(),if cv.paused {"受け付けました。一時停止中のため待機します。/resume で再開できます。"}else{"受け付けました。先の作業が終わるまで待機します。"}).await?;}
+                            Ok::<(),anyhow::Error>(())
+                        }.await;
                         if result.is_err(){let _=app.store.reject_admission(id,"input_validation_failed").await;}
                     });
                 }
@@ -417,16 +446,25 @@ impl App {
                 for(id,thread,text,done,lost)in snapshots{
                     let mut confirmed=true;
                     for(i,part)in chunks(&text).iter().enumerate(){if !self.delivery.text(&id,&thread,"answer",i as i64,part,json!([])).await?{confirmed=false;break;}}
-                    if done&&confirmed{let status=if lost{"回答表示に欠落があります。再実行はしていません。"}else{"回答の表示を完了しました。"};if self.delivery.text(&id,&thread,"delivery",0,status,json!([])).await?{self.output.lock().await.remove(&id);let rid=id.clone();self.store.call(false,move|c|{c.execute("UPDATE output_state SET state='DELIVERED' WHERE request_id=?1",[rid])?;Ok(())}).await?;}}
+                    if done&&confirmed&& (!lost || self.delivery.text(&id,&thread,"delivery",0,"回答表示に欠落があります。再実行はしていません。",json!([])).await?){self.output.lock().await.remove(&id);let rid=id.clone();self.store.call(false,move|c|{c.execute("UPDATE output_state SET state='DELIVERED' WHERE request_id=?1",[rid])?;Ok(())}).await?;}
                 }
                 // State cards remain recoverable without retaining answer text.
                 let rows=self.store.call(false,|c|{let mut st=c.prepare("SELECT id,thread_id,state FROM requests ORDER BY updated_at DESC LIMIT 20")?;Ok(st.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?)}).await?;
-                for(id,thread,state)in rows{let message=format!("依頼 {}\n状態: {}\n停止は /stop、待機再開は /resume。",&id[..8],state);let components=if matches!(state.as_str(),"SENDING"|"RUNNING"|"APPROVAL_REQUIRED"|"CANCEL_REQUESTED"|"UNKNOWN"){json!([{"type":1,"components":[{"type":2,"style":4,"label":"この依頼を停止","custom_id":format!("stop:{id}")}]}])}else{json!([])};let _=self.delivery.text(&id,&thread,"status",0,&message,components).await?;}
+                for(id,thread,state)in rows {
+                    let message=match state.as_str(){
+                        "FAILED"=>"作業を完了できませんでした。/status で確認してください。",
+                        "CANCELLED"=>"作業を中断しました。",
+                        "CANCEL_REQUESTED"=>"中断を要求しました。停止の確認を待っています。",
+                        "UNKNOWN"=>"作業の状態を確認できません。再実行せず保留しています。/status で確認してください。",
+                        _=>continue,
+                    };
+                    let _=self.delivery.text(&id,&thread,"status",0,message,json!([])).await?;
+                }
                 let expired:Vec<_>=self.output.lock().await.iter().filter(|(_,o)|o.done&&o.created.elapsed()>=o.retention).map(|(id,_)|id.clone()).collect();
                 for id in expired{self.output.lock().await.remove(&id);self.store.call(false,move|c|{c.execute("UPDATE output_state SET state='UNAVAILABLE' WHERE request_id=?1",[id])?;Ok(())}).await?;}
                 let lost=self.store.call(false,|c|{let mut st=c.prepare("SELECT o.request_id,r.thread_id FROM output_state o JOIN requests r ON r.id=o.request_id WHERE o.state='UNAVAILABLE' ORDER BY r.updated_at DESC LIMIT 20")?;Ok(st.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?)}).await?;
                 for(id,t)in lost{let _=self.delivery.text(&id,&t,"output_unavailable",0,"再起動または配信失敗により、回答全文を再取得できません。実行状態は別途確認します。自動再実行はしません。",json!([])).await?;}
-                let notices=self.store.call(false,|c|{let mut st=c.prepare("SELECT id,thread_id,code FROM notices UNION ALL SELECT request_id,thread_id,CASE WHEN status='REJECTED' THEN '依頼は入力検証・取得に失敗したため実行していません。' ELSE '依頼の入力を検証しています。' END FROM admissions WHERE status IN ('REJECTED','VALIDATING') LIMIT 50")?;Ok(st.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?)}).await?;
+                let notices=self.store.call(false,|c|{let mut st=c.prepare("SELECT id,thread_id,code FROM notices UNION ALL SELECT request_id,thread_id,'入力を確認できなかったため、実行していません。' FROM admissions WHERE status='REJECTED' LIMIT 50")?;Ok(st.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?)}).await?;
                 for(id,t,text)in notices{let _=self.delivery.text(&id,&t,"notice",0,&text,json!([])).await?;}
                 self.delivery.recover().await?;
             }}
