@@ -21,7 +21,6 @@ yarn-error.log*
 
 # Rust
 /target/
-/Cargo.lock
 pkg/
 
 # 共通

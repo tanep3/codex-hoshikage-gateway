@@ -1,0 +1,41 @@
+# 未設定のID、workspace、モデル、容量を埋めるまで check/init は成功しません。
+# 0 は仮の運用値ではなく「設定必須」を示します。秘密値は別ファイルへ保存します。
+[discord]
+guild_id = "REPLACE_WITH_GUILD_ID"
+allowed_user_id = "REPLACE_WITH_USER_ID"
+token_file = "/home/tane/.config/codex-hoshikage-gateway/discord-token"
+
+[proxy]
+base_url = "http://127.0.0.1:4040"
+api_key_file = "/home/tane/.config/codex-hoshikage-gateway/proxy-key"
+contract_version = "1.0"
+
+[storage]
+state_dir = "/home/tane/.local/state/codex-hoshikage-gateway"
+temp_dir = "/home/tane/.local/state/codex-hoshikage-gateway/temp"
+socket_path = "/run/user/1000/codex-hoshikage-gateway/admin.sock"
+
+[limits]
+# 添付件数、各種byte数、最大画素数、回答保持秒数を導入時に指定します。
+attachments = 0
+attachment_bytes = 0
+input_bytes = 0
+text_bytes = 0
+image_pixels = 0
+artifact_bytes = 0
+temp_bytes = 0
+output_bytes = 0
+output_total_bytes = 0
+delivery_retention_secs = 0
+# 合意済みの設計初期値。全体実行上限2は設定から拡張できません。
+queue_conversation = 5
+queue_global = 20
+validation_secs = 120
+
+[[projects]]
+id = "00000000-0000-4000-8000-000000000001"
+name = "プロジェクト名"
+channel_id = "REPLACE_WITH_CHANNEL_ID"
+cwd = "/ABSOLUTE/WORKSPACE"
+default_model = "chatgpt/REPLACE_WITH_MODEL_ID"
+lifecycle = "ACTIVE"
