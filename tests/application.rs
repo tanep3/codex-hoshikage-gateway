@@ -54,6 +54,7 @@ async fn accept_and_recover(stale_local_conversation: bool) {
         .route("/v2/codex/conversations/conv_test/responses",post(move|h:HeaderMap,Json(v):Json<Value>|{let counter=counter.clone();async move{
             assert!(h.contains_key("Idempotency-Key"));assert_eq!(v["model"],"chatgpt/test");assert!(v.get("stream").is_none());assert!(v["metadata"].get("codex.cwd").is_none());assert_eq!(v["input"][0]["content"][0]["text"],"星影のテストです");
             counter.fetch_add(1,Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
             (StatusCode::ACCEPTED,reply(json!({"operation_id":"op_r","state":"accepted","resource":{"type":"response","id":"resp_test"}})))
         }}))
         .route("/v2/codex/responses/resp_test",get(move||{let meta=output_meta.clone();async move{reply(json!({"response_id":"resp_test","conversation_id":"conv_test","workspace_id":"ws_test","phase":"finished","execution_status":"completed","output":meta}))}}))
@@ -93,6 +94,8 @@ async fn accept_and_recover(stale_local_conversation: bool) {
     let a = app.clone();
     jobs.spawn(async move { a.scheduler_loop().await });
     let a = app.clone();
+    jobs.spawn(async move { a.monitor_loop().await });
+    let a = app.clone();
     jobs.spawn(async move { a.resource_loop().await });
     tx.send(Incoming::Message(message())).await.unwrap();
     tx.send(Incoming::Message(message())).await.unwrap();
@@ -113,6 +116,20 @@ async fn accept_and_recover(stale_local_conversation: bool) {
     .await
     .unwrap();
     assert_eq!(count.load(Ordering::SeqCst), 1);
+    app.store
+        .call(false, |c| {
+            assert_eq!(
+                c.query_row(
+                    "SELECT count(*) FROM request_events WHERE new_state='UNKNOWN'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )?,
+                0
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
     assert_eq!(
         app.store.conversation("4").await.unwrap().continuation,
         "READY"

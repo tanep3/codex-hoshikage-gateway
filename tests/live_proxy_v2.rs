@@ -392,3 +392,161 @@ async fn gateway_real_discord_delivery() {
         .unwrap();
     assert_eq!(receipt["attachments"][0]["size"], CONTENT.len());
 }
+
+#[tokio::test]
+#[ignore = "sends exactly one real generated PNG to the explicitly authorized Discord destination"]
+async fn gateway_real_generated_image_delivery() {
+    use codex_hoshikage_gateway::{domain, storage};
+    let cfg_path = std::env::var("HOSHIKAGE_LIVE_CONFIG").unwrap();
+    let record_path = std::env::var("HOSHIKAGE_LIVE_IMAGE_JSON").unwrap();
+    let channel = std::env::var("HOSHIKAGE_LIVE_CHANNEL").unwrap();
+    let guild = std::env::var("HOSHIKAGE_LIVE_GUILD").unwrap();
+    let record: Value = serde_json::from_slice(&std::fs::read(record_path).unwrap()).unwrap();
+    let response = record["response_id"].as_str().unwrap().to_owned();
+    let conversation = record["conversation_id"].as_str().unwrap().to_owned();
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = Config::read(std::path::Path::new(&cfg_path)).unwrap();
+    assert_eq!(cfg.discord.guild_id, guild);
+    cfg.storage.state_dir = tmp.path().join("state");
+    cfg.storage.temp_dir = tmp.path().join("temp");
+    cfg.storage.socket_path = tmp.path().join("admin.sock");
+    cfg.projects.clear();
+    cfg.default_model = Some("chatgpt/gpt-5.6-luna".into());
+    let proxy = Proxy::new(
+        cfg.proxy.base_url.clone(),
+        secret(&cfg.proxy.api_key_file).unwrap(),
+    )
+    .unwrap();
+    proxy.check().await.unwrap();
+    let snapshot = proxy
+        .v2_json(
+            reqwest::Method::GET,
+            &format!("/v2/codex/responses/{response}/generated-images"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(snapshot["state"], "complete");
+    assert_eq!(snapshot["items"].as_array().unwrap().len(), 1);
+    assert_eq!(snapshot["items"][0]["state"], "ready");
+    let workspace = snapshot["workspace_id"].as_str().unwrap().to_owned();
+    let discord = Discord::new(secret(&cfg.discord.token_file).unwrap()).unwrap();
+    discord.identify_bot().await.unwrap();
+    let location = discord.get(&format!("/channels/{channel}")).await.unwrap();
+    assert_eq!(location["guild_id"], guild);
+    let messages = discord
+        .get(&format!("/channels/{channel}/messages?limit=30"))
+        .await
+        .unwrap();
+    let message = messages
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["author"]["id"] == cfg.discord.allowed_user_id)
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    storage::initialize(&cfg).unwrap();
+    let (store, _) = storage::Store::open(&cfg).unwrap();
+    store
+        .add_conversation(channel.clone(), storage::PROXY_SCOPE.into())
+        .await
+        .unwrap();
+    let id = store
+        .reserve(
+            message,
+            channel.clone(),
+            "live-image".into(),
+            cfg.limits.clone(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .finalize(
+            id.clone(),
+            "live-image".into(),
+            "no-execution".into(),
+            vec![],
+        )
+        .await
+        .unwrap();
+    store.begin_send(id.clone()).await.unwrap();
+    store
+        .observe(
+            id.clone(),
+            domain::RequestState::Completed,
+            "live_image_fixture",
+            true,
+        )
+        .await
+        .unwrap();
+    let (i, c, r, t) = (
+        id.clone(),
+        conversation.clone(),
+        response.clone(),
+        channel.clone(),
+    );
+    store.call(true,move|db|{db.execute("UPDATE requests SET response_id=?2 WHERE id=?1",rusqlite::params![i,r])?;db.execute("INSERT INTO proxy_conversations(thread_id,request_key,request_json,conversation_id,workspace_id,state) VALUES(?1,?2,'{}',?3,?4,'READY')",rusqlite::params![t,domain::id(),c,workspace])?;Ok(())}).await.unwrap();
+    let app = App::new(cfg, store, discord, proxy).unwrap();
+    app.settings().await.proxy.check().await.unwrap();
+    app.connected.store(true, Ordering::SeqCst);
+    let a = app.clone();
+    let discovery = tokio::spawn(async move { a.generated_images_loop().await });
+    let a = app.clone();
+    let delivery = tokio::spawn(async move { a.resource_loop().await });
+    let result=tokio::time::timeout(Duration::from_secs(90),async{loop{
+        let receipt:Option<(String,String)>=app.store.call(false,|c|{use rusqlite::OptionalExtension;Ok(c.query_row("SELECT message_id,sha256 FROM resource_deliveries WHERE image_request_id IS NOT NULL AND message_id IS NOT NULL",[],|r|Ok((r.get(0)?,r.get(1)?))).optional()?)}).await.unwrap();
+        if let Some(r)=receipt{break r;}tokio::time::sleep(Duration::from_millis(200)).await;
+    }}).await;
+    app.cancel.cancel();
+    discovery.abort();
+    delivery.abort();
+    discovery.await.ok();
+    delivery.await.ok();
+    let (message_id, hash) =
+        result.expect("real image delivery unresolved: inspect before retrying");
+    let message = app
+        .discord
+        .get(&format!("/channels/{channel}/messages/{message_id}"))
+        .await
+        .unwrap();
+    let a = &message["attachments"][0];
+    assert_eq!(a["content_type"], "image/png");
+    let url = a["url"].as_str().unwrap();
+    let parsed = reqwest::Url::parse(url).unwrap();
+    assert_eq!(parsed.scheme(), "https");
+    assert_eq!(parsed.host_str(), Some("cdn.discordapp.com"));
+    let bytes = reqwest::get(url)
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    assert_eq!(domain::digest(&bytes), hash);
+    codex_hoshikage_gateway::generated_images::validate_png(&bytes, 16_000_000).unwrap();
+    std::fs::write("/tmp/hoshikage-discord-generated-image.png", &bytes).unwrap();
+    eprintln!(
+        "Discord generated image verified: https://discord.com/channels/{guild}/{channel}/{message_id}; {} bytes",
+        bytes.len()
+    );
+}
+
+#[tokio::test]
+#[ignore = "read-only check of the real Bot's effective attachment permissions"]
+async fn gateway_live_image_permission_check() {
+    let cfg = Config::read(std::path::Path::new(
+        &std::env::var("HOSHIKAGE_LIVE_CONFIG").unwrap(),
+    ))
+    .unwrap();
+    let channel = std::env::var("HOSHIKAGE_LIVE_CHANNEL").unwrap();
+    let d = Discord::new(secret(&cfg.discord.token_file).unwrap()).unwrap();
+    d.identify_bot().await.unwrap();
+    d.check_attachment_permissions(&channel, &cfg.discord.guild_id)
+        .await
+        .unwrap();
+}

@@ -78,8 +78,27 @@ impl App {
             meta["artifact_id"] == id && meta["conversation_id"] == cv && meta["state"] == "ready",
             "artifact selection unavailable"
         );
-        self.queue_resource(iid, thread, "artifact", id).await?;
-        Ok("選んだ保存版をこの会話へ届けます。".into())
+        let delivery = self.queue_resource(iid, thread, "artifact", id).await?;
+        self.artifact_delivery_status(&delivery).await
+    }
+    pub(crate) async fn artifact_delivery_status(&self, delivery: &str) -> Result<String> {
+        let d = delivery.to_owned();
+        let state: String = self
+            .store
+            .call(false, move |c| {
+                Ok(c.query_row(
+                    "SELECT state FROM resource_deliveries WHERE id=?1",
+                    [d],
+                    |r| r.get(0),
+                )?)
+            })
+            .await?;
+        Ok(match state.as_str() {
+            "DELIVERED"|"RELEASE_PENDING"=>"この保存版は配信済みです。もう一度添付する場合は /retry で確認して再送できます。",
+            "WAITING"|"CACHED"=>"この保存版は配信待ちです。準備できたら、この会話へ届けます。",
+            "POST_PENDING"=>"この保存版は送信結果を確認中です。重複を避けるため、別の添付は行いません。再送する場合は /retry で確認してください。",
+            _=>"この保存版の配信は完了していません。/status で確認できます。再送は /retry から行えますが、期限切れや権限・容量の制限は再送だけでは解消しません。"
+        }.into())
     }
     pub(crate) async fn queue_resource(
         &self,
@@ -87,7 +106,16 @@ impl App {
         thread: &str,
         kind: &str,
         resource: &str,
-    ) -> Result<()> {
+    ) -> Result<String> {
+        let binding = self
+            .settings()
+            .await
+            .proxy
+            .v2
+            .binding
+            .read()
+            .unwrap()
+            .clone();
         let (id, t, k, r) = (
             id.to_owned(),
             thread.to_owned(),
@@ -97,8 +125,13 @@ impl App {
         self.store.call(true,move|c|{
             let tx=c.transaction()?;
             let old:Option<(String,String,String)>=tx.query_row("SELECT thread_id,resource_type,resource_id FROM resource_deliveries WHERE id=?1",[&id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
-            if let Some(old)=old {ensure!(old==(t,k,r),"delivery identity conflict");return Ok(());}
-            tx.execute("INSERT INTO resource_deliveries(id,thread_id,resource_type,resource_id,request_key,created_at) VALUES(?1,?2,?3,?4,?5,?6)",params![id,t,k,r,format!("lease-{id}"),domain::now_ms()])?;tx.commit()?;Ok(())
+            if let Some(old)=old {ensure!(old==(t.clone(),k.clone(),r.clone()),"delivery identity conflict");return Ok(id);}
+            if k=="artifact" {
+                let b=binding.context("Proxy binding missing")?;
+                let (delivery,_)=crate::generated_images::claim_artifact(&tx,&b,&id,&t,&r)?;
+                tx.commit()?;return Ok(delivery);
+            }
+            tx.execute("INSERT INTO resource_deliveries(id,thread_id,resource_type,resource_id,request_key,created_at) VALUES(?1,?2,?3,?4,?5,?6)",params![id,t,k,r,format!("lease-{id}"),domain::now_ms()])?;tx.commit()?;Ok(id)
         }).await
     }
     pub async fn resource_loop(&self) -> Result<()> {
@@ -166,9 +199,13 @@ impl App {
                         "resource_expired" | "content_expired" | "lease_expired" => Some("EXPIRED"),
                         "resource_corrupt" | "content_corrupt" | "resource_failed"
                         | "output_unavailable" => Some("FAILED"),
-                        "workspace_access_revoked" | "access_revoked" => Some("BLOCKED"),
+                        "workspace_access_revoked" | "access_revoked" | "discord_permission_denied" => Some("BLOCKED"),
+                        "delivery_size_limit" | "generated_image_invalid" => Some("FAILED"),
                         _ => None,
                     };
+                    if matches!(code.as_str(),"discord_attachment_too_large"|"discord_attachment_rejected"|"discord_permission_denied") {
+                        let i=id.clone();let c=code.clone();self.store.call(true,move|db|{db.execute("UPDATE resource_deliveries SET state='FAILED',error_code=?2 WHERE id=?1 AND state='POST_PENDING'",params![i,c])?;Ok(())}).await?;
+                    }
                     let (i, code2) = (id.clone(), code.clone());
                     self.store
                         .call(false, move |c| {
@@ -179,11 +216,15 @@ impl App {
                             Ok(())
                         })
                         .await?;
-                    let message = resource_error_message(&code);
-                    self.notice(format!("resource-error-{id}"), t, message)
-                        .await?;
+                    let i=id.clone();
+                    let image_request:Option<String>=self.store.call(false,move|c|Ok(c.query_row("SELECT image_request_id FROM resource_deliveries WHERE id=?1",[i],|r|r.get(0))?)).await?;
+                    if let Some(request)=image_request {self.image_progress(&request).await?;} else {
+                        let message = resource_error_message(&code);
+                        self.notice(format!("resource-error-{id}"), t, message).await?;
+                    }
                 } else {
-                    self.store.call(false,move|c|{c.execute("UPDATE resource_deliveries SET next_attempt_at=?2,attempts=0 WHERE id=?1",params![id,domain::now_ms()+2000])?;Ok(())}).await?;
+                    let request:Option<String>=self.store.call(false,move|c|{c.execute("UPDATE resource_deliveries SET next_attempt_at=?2,attempts=0 WHERE id=?1",params![id,domain::now_ms()+2000])?;Ok(c.query_row("SELECT image_request_id FROM resource_deliveries WHERE id=?1",[id],|r|r.get(0))?)}).await?;
+                    if let Some(request)=request {self.image_progress(&request).await?;}
                 }
                 Ok::<_,anyhow::Error>(())
             }).buffer_unordered(4).try_collect::<Vec<_>>().await?;
@@ -308,6 +349,19 @@ impl App {
             format!("/v2/codex/responses/{}", path_id(resource)?)
         };
         let info = s.proxy.v2_json(Method::GET, &info_path, None, None).await?;
+        let delivery_id = id.to_owned();
+        let image:Option<(String,String,String,String,i64)>=self.store.call(false,move|c|Ok(c.query_row("SELECT w.request_id,w.response_id,w.workspace_id,r.message_id,d.image_ordinal FROM resource_deliveries d JOIN generated_image_watches w ON w.request_id=d.image_request_id JOIN requests r ON r.id=w.request_id WHERE d.id=?1",[delivery_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?)).await?;
+        if let Some((_, response, ws, _, _)) = &image {
+            self.discord
+                .check_attachment_permissions(thread, &s.cfg.discord.guild_id)
+                .await?;
+            ensure!(
+                info["response_id"] == *response
+                    && info["workspace_id"] == *ws
+                    && info["media_type"] == "image/png",
+                "generated image metadata mismatch"
+            );
+        }
         let rid = id.to_owned();
         let shared: Option<String> = self
             .store
@@ -457,7 +511,28 @@ impl App {
         } else {
             s.cfg.limits.output_bytes
         };
-        ensure!(size <= limit as u64, "resource exceeds delivery limit");
+        // One attachment per message; retain a conservative Bot upload ceiling.
+        let limit = if kind == "artifact" {
+            limit.min(20 * 1024 * 1024)
+        } else {
+            limit
+        };
+        if size > limit as u64 {
+            return Err(crate::proxy_v2::ApiError {
+                status: 413,
+                code: "delivery_size_limit".into(),
+                retry: "none".into(),
+            }
+            .into());
+        }
+        if let Some((request, _, _, _, ordinal)) = &image {
+            // Lease is already acquired. Bound ordering wait independently from discovery.
+            let (r, ord) = (request.clone(), *ordinal);
+            let waiting:bool=self.store.call(false,move|c|Ok(c.query_row("SELECT EXISTS(SELECT 1 FROM generated_image_items earlier LEFT JOIN resource_deliveries d ON d.id=earlier.delivery_id WHERE earlier.request_id=?1 AND earlier.ordinal<?2 AND (earlier.state='creating' OR (earlier.state='ready' AND d.state IN ('WAITING','CACHED'))) AND ?3 < (SELECT first_seen_ms+30000 FROM generated_image_items WHERE request_id=?1 AND ordinal=?2))",params![r,ord,domain::now_ms()],|r|r.get(0))?)).await?;
+            if waiting {
+                return Ok(());
+            }
+        }
         let _reservation = tokio::time::timeout(
             Duration::from_secs(5),
             self.files.reserve(size, s.cfg.limits.temp_bytes),
@@ -516,6 +591,16 @@ impl App {
                     .any(|c| c.is_control() || c == '/' || c == '\\'),
             "unsafe display filename"
         );
+        if image.is_some()
+            && crate::generated_images::validate_png(&bytes, s.cfg.limits.image_pixels).is_err()
+        {
+            return Err(crate::proxy_v2::ApiError {
+                status: 415,
+                code: "generated_image_invalid".into(),
+                retry: "none".into(),
+            }
+            .into());
+        }
         crate::storage::private_dir(&s.cfg.storage.temp_dir)?;
         let cache_path = s
             .cfg
@@ -531,13 +616,50 @@ impl App {
         f.write_all(&bytes)?;
         f.sync_all()?;
         drop(f);
+        self.authorized_thread(thread).await?;
+        let image_caption = if let Some((request, response, _, message, ordinal)) = &image {
+            self.discord
+                .check_attachment_permissions(thread, &s.cfg.discord.guild_id)
+                .await?;
+            let current = s
+                .proxy
+                .v2_json(
+                    Method::GET,
+                    &format!("/v2/codex/responses/{}", path_id(response)?),
+                    None,
+                    None,
+                )
+                .await?;
+            ensure!(
+                current["response_id"] == *response && current["conversation_id"] == cv,
+                "image response changed"
+            );
+            let state = self.store.request(request).await?.state;
+            let partial = matches!(
+                current["execution_status"].as_str(),
+                Some("failed" | "interrupted")
+            ) || matches!(
+                state,
+                crate::domain::RequestState::Failed | crate::domain::RequestState::Cancelled
+            );
+            Some((
+                message.clone(),
+                format!(
+                    "{}画像{}",
+                    if partial { "作業途中の" } else { "" },
+                    ordinal + 1
+                ),
+            ))
+        } else {
+            None
+        };
         let i = id.to_owned();
         let name = filename.clone();
         let send=self.store.call(true,move|c|Ok(c.execute("UPDATE resource_deliveries SET state='POST_PENDING',display_name=?2 WHERE id=?1 AND state IN ('WAITING','CACHED')",params![i,name])?==1)).await?;
         let nonce = crate::delivery::nonce(id);
         let receipt = if send {
             self.discord
-                .upload(thread, filename.clone(), bytes, &nonce)
+                .upload_attachment(thread, filename.clone(), bytes, &nonce, image_caption)
                 .await?
         } else {
             let list = self
@@ -588,6 +710,18 @@ impl Drop for CacheFile {
 
 pub fn resource_error_message(code: &str) -> &'static str {
     match code {
+        "delivery_size_limit" | "discord_attachment_too_large" => {
+            "画像・ファイルが送信容量の上限を超えています。保存版はProxyの保持期限内に取得可能ですが、/getでも同じ送信制限が適用されます。"
+        }
+        "generated_image_invalid" => {
+            "画像を安全に表示できる形式・画素数として検証できなかったため、添付しませんでした。AIは再実行していません。"
+        }
+        "discord_permission_denied" => {
+            "Discordへの添付権限がありません。Botの送信・ファイル添付権限を確認してください。"
+        }
+        "discord_attachment_rejected" => {
+            "Discordが添付を受け付けませんでした。再送前にファイルと送信先を確認してください。"
+        }
         "content_expired" | "resource_expired" | "artifact_expired" | "output_expired"
         | "lease_expired" => {
             "保存期限が切れたため、この保存版は取得できません。元ファイルが残っている場合は /get の path 欄から新しい保存版を作れます。AIは再実行していません。"

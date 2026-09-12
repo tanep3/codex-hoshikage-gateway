@@ -37,13 +37,14 @@ impl App {
             .clone();
         stream::iter(entries.into_iter().map(|entry|{let p=p.clone();async move{
             let id=path_id(entry["id"].as_str().context("resource identity missing")?)?;
-            let path=match entry["kind"].as_str(){Some("conversation")=>format!("/v2/codex/conversations/{id}"),Some("response")=>format!("/v2/codex/responses/{id}"),Some("artifact")=>format!("/v2/codex/artifacts/{id}"),Some("lease")=>format!("/v2/codex/leases/{id}"),Some("operation")=>format!("/v2/codex/operations/by-key/{id}"),_=>anyhow::bail!("unknown recovery type")};
+            let path=match entry["kind"].as_str(){Some("conversation")=>format!("/v2/codex/conversations/{id}"),Some("response")=>format!("/v2/codex/responses/{id}"),Some("images")=>format!("/v2/codex/responses/{id}/generated-images"),Some("artifact")=>format!("/v2/codex/artifacts/{id}"),Some("lease")=>format!("/v2/codex/leases/{id}"),Some("operation")=>format!("/v2/codex/operations/by-key/{id}"),_=>anyhow::bail!("unknown recovery type")};
             let remote=match p.v2_json(Method::GET,&path,None,None).await {
                 Ok(v)=>v,
                 Err(e)=>{let api=e.downcast_ref::<crate::proxy_v2::ApiError>().context("recovery lookup failed")?;ensure!(matches!(api.status,403|404|410),"recovery lookup unavailable");return Ok(json!({"entry":entry,"state":"unavailable","code":api.code}));}
             };
-            let identity=match entry["kind"].as_str(){Some("conversation")=>"conversation_id",Some("response")=>"response_id",Some("artifact")=>"artifact_id",Some("lease")=>"lease_id",_=>""};
+            let identity=match entry["kind"].as_str(){Some("conversation")=>"conversation_id",Some("response"|"images")=>"response_id",Some("artifact")=>"artifact_id",Some("lease")=>"lease_id",_=>""};
             if !identity.is_empty(){ensure!(remote[identity]==entry["id"],"recovery identity mismatch");}
+            if entry["kind"]=="images" {let expected:Value=serde_json::from_str(entry["expected"].as_str().context("image recovery binding missing")?)?;ensure!(remote["conversation_id"]==expected["conversation_id"]&&remote["workspace_id"]==expected["workspace_id"],"image recovery scope changed");}
             if entry["kind"]=="conversation"&&!entry["expected"].is_null(){ensure!(remote["workspace_id"]==entry["expected"],"recovery workspace changed");}
             if entry["kind"]=="artifact"&&!entry["expected"].is_null(){ensure!(remote["sha256"]==entry["expected"]&&remote["size_bytes"]==entry["size"],"recovery artifact changed");}
             // Never persist a raw response that might contain input or output text.
@@ -143,6 +144,10 @@ impl App {
             tx.execute("UPDATE conversations SET paused=1",[])?;
             tx.execute("UPDATE admissions SET status='QUARANTINED',version=version+1 WHERE status='VALIDATING'",[])?;
             for result in results {
+                if result["entry"]["kind"]=="images" {
+                    let local=result["entry"]["local_id"].as_str().context("image watch identity missing")?;
+                    tx.execute("UPDATE generated_image_watches SET accepted_generation=?2,state=CASE WHEN ?3 THEN 'BLOCKED' ELSE state END WHERE request_id=?1",params![local,n.generation,result["state"]=="unavailable"])?;
+                }
                 if result["state"]=="unavailable" {
                     let entry=&result["entry"];let local=entry["local_id"].as_str().context("local identity missing")?;
                     match entry["kind"].as_str(){
@@ -176,6 +181,10 @@ fn inventory(c: &mut rusqlite::Connection) -> Result<Value> {
     let binding:Value=c.query_row("SELECT instance_id,generation,base_url FROM proxy_binding",[],|r|Ok(json!({"instance_id":r.get::<_,String>(0)?,"generation":r.get::<_,String>(1)?,"base_url":r.get::<_,String>(2)?})))?;
     let mut entries = Vec::new();
     let queries = [
+        (
+            "images",
+            "SELECT request_id,response_id,json_object('conversation_id',conversation_id,'workspace_id',workspace_id),NULL FROM generated_image_watches WHERE state!='UNSUPPORTED' ORDER BY request_id",
+        ),
         (
             "conversation",
             "SELECT thread_id,conversation_id,workspace_id,NULL FROM proxy_conversations WHERE conversation_id IS NOT NULL ORDER BY thread_id",
@@ -212,5 +221,31 @@ fn inventory(c: &mut rusqlite::Connection) -> Result<Value> {
     let admissions = st
         .query_map([], |r| r.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(json!({"binding":binding,"entries":entries,"admissions":admissions}))
+    let mut q=c.prepare("SELECT request_id,revision,digest,state,accepted_generation FROM generated_image_watches ORDER BY request_id")?;
+    let images = q
+        .query_map([], |r| {
+            Ok(json!([
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, Option<String>>(4)?
+            ]))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut q=c.prepare("SELECT instance_id,generation,artifact_id,thread_id,delivery_id FROM artifact_delivery_claims ORDER BY instance_id,generation,artifact_id,thread_id")?;
+    let claims = q
+        .query_map([], |r| {
+            Ok(json!([
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?
+            ]))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(
+        json!({"binding":binding,"entries":entries,"admissions":admissions,"images":images,"image_claims":claims}),
+    )
 }

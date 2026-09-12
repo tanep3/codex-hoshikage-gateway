@@ -17,11 +17,16 @@ use std::{
 async fn model_commands_list_inspect_and_change_in_channel() {
     let replies = Arc::new(Mutex::new(Vec::<String>::new()));
     let out = replies.clone();
+    let menus = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let menus_out = menus.clone();
+    let posted = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let post_out = posted.clone();
     let router=Router::new()
+      .route("/channels/4/messages",post(move |Json(v):Json<Value>|{let p=post_out.clone();async move {p.lock().unwrap().push(v);Json(json!({"id":"900","channel_id":"4"}))}}))
       .route("/channels/4",get(||async{Json(json!({"id":"4","guild_id":"1","type":0}))}))
       .route("/v1/models",get(||async{Json(json!({"data":[{"id":"chatgpt/test","owned_by":"chatgpt"},{"id":"chatgpt/next","owned_by":"chatgpt"}]}))}))
       .route("/interactions/{id}/test-token/callback",post(||async{Json(json!({}))}))
-      .route("/webhooks/9/test-token/messages/@original",patch(move|Json(v):Json<Value>|{let out=out.clone();async move {out.lock().unwrap().push(v["content"].as_str().unwrap().into());Json(json!({}))}}));
+      .route("/webhooks/9/test-token/messages/@original",patch(move|Json(v):Json<Value>|{let out=out.clone();let menus=menus_out.clone();async move {menus.lock().unwrap().push(v.clone());out.lock().unwrap().push(v["content"].as_str().unwrap().into());Json(json!({}))}}));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
@@ -58,6 +63,27 @@ async fn model_commands_list_inspect_and_change_in_channel() {
         .await
         .unwrap();
     }
+    let menu = menus.lock().unwrap()[1]["components"][0]["components"][0].clone();
+    assert_eq!(menu["type"], 3);
+    let choice = menu["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["label"] == "chatgpt/test")
+        .unwrap()["value"]
+        .clone();
+    tx.send(Incoming::Interaction(json!({"id":"150","guild_id":"1","channel_id":"4","application_id":"9","token":"test-token","member":{"user":{"id":"2"}},"data":{"custom_id":menu["custom_id"],"values":[choice]}}))).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while replies.lock().unwrap().len() < 5 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        app.store.conversation("4").await.unwrap().selected_model,
+        "chatgpt/test"
+    );
     let r = replies.lock().unwrap().clone();
     assert!(r[0].contains("chatgpt/next"));
     assert!(r[1].contains("選択中のモデル: chatgpt/test"));
@@ -65,7 +91,7 @@ async fn model_commands_list_inspect_and_change_in_channel() {
     assert!(r[3].contains("そのモデルIDは利用できません"));
     assert_eq!(
         app.store.conversation("4").await.unwrap().selected_model,
-        "chatgpt/next"
+        "chatgpt/test"
     );
 
     // Plain model commands use control handling even without a mention or ready generation gate.
@@ -83,7 +109,15 @@ async fn model_commands_list_inspect_and_change_in_channel() {
         ("204", "/model chatgpt/next", "999"),
     ] {
         messages.send(Incoming::Message(json!({"id":id,"channel_id":"4","guild_id":"1","author":{"id":user,"bot":false},"content":content,"attachments":[]}))).await.unwrap();
-        if id != "204" {
+        if id == "201" {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while posted.lock().unwrap().is_empty() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+        } else if id != "204" {
             let target = id.to_owned();
             tokio::time::timeout(Duration::from_secs(5), async {
                 loop {
@@ -135,13 +169,20 @@ async fn model_commands_list_inspect_and_change_in_channel() {
                 )?,
                 0
             );
-            let selected: String =
-                c.query_row("SELECT code FROM notices WHERE id='201'", [], |r| r.get(0))?;
-            assert!(selected.contains("chatgpt/test"));
             Ok(())
         })
         .await
         .unwrap();
+    assert!(
+        posted.lock().unwrap()[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("chatgpt/test")
+    );
+    assert_eq!(
+        posted.lock().unwrap()[0]["components"][0]["components"][0]["type"],
+        3
+    );
     app.cancel.cancel();
     job.await.unwrap().unwrap();
     admission.await.unwrap().unwrap();

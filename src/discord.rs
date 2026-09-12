@@ -206,11 +206,70 @@ impl Discord {
         .await?;
         Ok(())
     }
-    pub async fn register(&self, app: &str, guild: &str) -> Result<()> {
+    pub async fn check_attachment_permissions(&self, thread: &str, guild: &str) -> Result<()> {
+        let bot = self
+            .bot_id
+            .read()
+            .unwrap()
+            .clone()
+            .context("Bot identity missing")?;
+        let mut channel = self
+            .get(&format!("/channels/{}", snowflake(thread)?))
+            .await?;
+        ensure!(
+            channel["id"] == thread && channel["guild_id"] == guild,
+            "attachment channel mismatch"
+        );
+        let in_thread = matches!(channel["type"].as_u64(), Some(10..=12));
+        if in_thread {
+            let parent = channel["parent_id"]
+                .as_str()
+                .context("thread parent missing")?
+                .to_owned();
+            channel = self
+                .get(&format!("/channels/{}", snowflake(&parent)?))
+                .await?;
+            ensure!(
+                channel["id"] == parent && channel["guild_id"] == guild,
+                "attachment parent mismatch"
+            );
+        }
+        let member = self
+            .get(&format!(
+                "/guilds/{}/members/{}",
+                snowflake(guild)?,
+                snowflake(&bot)?
+            ))
+            .await?;
+        let roles = self
+            .get(&format!("/guilds/{}/roles", snowflake(guild)?))
+            .await?;
+        if !crate::discord_permissions::attachment_allowed(
+            guild,
+            &bot,
+            &roles,
+            &member,
+            &channel["permission_overwrites"],
+            in_thread,
+        )? {
+            return Err(crate::proxy_v2::ApiError {
+                status: 403,
+                code: "discord_permission_denied".into(),
+                retry: "none".into(),
+            }
+            .into());
+        }
+        Ok(())
+    }
+    pub async fn identify_bot(&self) -> Result<()> {
         let me = self.get("/users/@me").await?;
         ensure!(me["bot"] == true, "Discord identity is not a bot");
         *self.bot_id.write().unwrap() =
             Some(me["id"].as_str().context("bot identity missing")?.into());
+        Ok(())
+    }
+    pub async fn register(&self, app: &str, guild: &str) -> Result<()> {
+        self.identify_bot().await?;
         let opt = |name: &str, description: &str, required: bool| json!({"type":3,"name":name,"description":description,"required":required});
         let commands = json!([
             {"name":"new","description":"新しい会話を作成","options":[opt("title","会話の名前",true)]},
@@ -221,7 +280,7 @@ impl Discord {
             {"name":"model","description":"選択中モデルの確認／次の依頼のモデル変更","options":[opt("id","ProxyのモデルID",false)]},
             {"name":"steer","description":"現在のTurnへ追加指示","options":[opt("text","追加指示",true)]},
             {"name":"workspace","description":"会話を始める前に共有ワークを選択（通常は不要）"},
-            {"name":"retry","description":"未配信・結果不明の保存版を選び、明示的に再送"},
+            {"name":"retry","description":"保存版を選び、確認してもう一度送信"},
             {"name":"get","description":"指定した成果物を返送","options":[opt("path","ワーク内の相対パス（省略で一覧）",false),{"type":3,"name":"scope","description":"成果物一覧の範囲","required":false,"choices":[{"name":"この会話","value":"conversation"},{"name":"共有ワーク全体","value":"shared"}]}]}
         ]);
         self.api(
@@ -243,12 +302,34 @@ impl Discord {
         bytes: Vec<u8>,
         nonce: &str,
     ) -> Result<Value> {
-        let data = json!({"content":"指定された成果物です。","nonce":nonce,"enforce_nonce":true,"allowed_mentions":{"parse":[]},"attachments":[{"id":0,"filename":filename}]});
+        self.upload_attachment(thread, filename, bytes, nonce, None)
+            .await
+    }
+    pub async fn upload_attachment(
+        &self,
+        thread: &str,
+        filename: String,
+        bytes: Vec<u8>,
+        nonce: &str,
+        image: Option<(String, String)>,
+    ) -> Result<Value> {
+        let mut data = json!({"content":"指定された成果物です。","nonce":nonce,"enforce_nonce":true,"allowed_mentions":{"parse":[]},"attachments":[{"id":0,"filename":filename}]});
+        let mime = if let Some((message, caption)) = image {
+            snowflake(&message)?;
+            data["content"] = json!(caption);
+            data["message_reference"] = json!({"message_id":message,"fail_if_not_exists":false});
+            data["allowed_mentions"]["replied_user"] = json!(false);
+            "image/png"
+        } else {
+            "application/octet-stream"
+        };
         let form = reqwest::multipart::Form::new()
             .text("payload_json", serde_json::to_string(&data)?)
             .part(
                 "files[0]",
-                reqwest::multipart::Part::bytes(bytes).file_name(filename),
+                reqwest::multipart::Part::bytes(bytes)
+                    .file_name(filename)
+                    .mime_str(mime)?,
             );
         let r = self
             .client
@@ -262,7 +343,21 @@ impl Discord {
             .send()
             .await
             .context("artifact delivery unknown")?;
-        ensure!(r.status().is_success(), "artifact delivery failed");
+        if !r.status().is_success() {
+            let status = r.status().as_u16();
+            let code = match status {
+                413 => "discord_attachment_too_large",
+                403 => "discord_permission_denied",
+                400 => "discord_attachment_rejected",
+                _ => "discord_delivery_unconfirmed",
+            };
+            return Err(crate::proxy_v2::ApiError {
+                status,
+                code: code.into(),
+                retry: "none".into(),
+            }
+            .into());
+        }
         r.json().await.context("artifact receipt unknown")
     }
 }

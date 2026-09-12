@@ -15,7 +15,8 @@ use std::{
 };
 use tokio::sync::{mpsc, oneshot};
 
-pub const SCHEMA: i64 = 4;
+pub const SCHEMA: i64 = 5;
+pub const MIGRATION_V5: &str = include_str!("../migrations/005_generated_images.sql");
 pub const MIGRATION_V4: &str = include_str!("../migrations/004_recovery_delivery.sql");
 pub const MIGRATION_V3: &str = include_str!("../migrations/003_delivery_controls.sql");
 pub const MIGRATION_V2: &str = include_str!("../migrations/002_proxy_v2.sql");
@@ -119,7 +120,7 @@ fn migrate_v2(c: &mut Connection, quarantine: bool) -> Result<()> {
     if version == SCHEMA {
         return Ok(());
     }
-    ensure!((1..=3).contains(&version), "unsupported schema migration");
+    ensure!((1..=4).contains(&version), "unsupported schema migration");
     if version == 1 {
         let tx = c.transaction()?;
         tx.execute_batch(MIGRATION_V2)?;
@@ -139,7 +140,7 @@ fn migrate_v2(c: &mut Connection, quarantine: bool) -> Result<()> {
         tx.execute("UPDATE schema_meta SET schema_version=2", [])?;
         tx.commit()?;
     }
-    for (target, sql) in [(3, MIGRATION_V3), (4, MIGRATION_V4)] {
+    for (target, sql) in [(3, MIGRATION_V3), (4, MIGRATION_V4), (5, MIGRATION_V5)] {
         if version >= target {
             continue;
         }
@@ -183,7 +184,12 @@ pub fn validate_database(path: &Path) -> Result<(i64, String)> {
         hash == domain::digest(MIGRATION.as_bytes()),
         "schema migration checksum mismatch"
     );
-    for (version, migration) in [(2, MIGRATION_V2), (3, MIGRATION_V3), (4, MIGRATION_V4)] {
+    for (version, migration) in [
+        (2, MIGRATION_V2),
+        (3, MIGRATION_V3),
+        (4, MIGRATION_V4),
+        (5, MIGRATION_V5),
+    ] {
         if v < version {
             continue;
         }
@@ -543,7 +549,7 @@ impl Store {
         .await
     }
 }
-fn recovery_pending(c: &Connection) -> Result<bool> {
+pub(crate) fn recovery_pending(c: &Connection) -> Result<bool> {
     Ok(c.query_row(
         "SELECT recovery_pending OR EXISTS(SELECT 1 FROM proxy_binding WHERE blocked=1) FROM schema_meta WHERE singleton=1",
         [],

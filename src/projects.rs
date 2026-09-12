@@ -13,10 +13,9 @@ impl App {
     pub(crate) async fn project_menu(&self, v: &Value) -> Option<Value> {
         let channel = v["channel_id"].as_str()?;
         let custom = v["data"]["custom_id"].as_str().unwrap_or("");
-        let is_project = v["data"]["name"] == "model"
-            || v["content"]
-                .as_str()
-                .is_some_and(|s| s.split_whitespace().next() == Some("/model"));
+        let is_project = (v["data"]["name"] == "model"
+            && v["data"]["options"].as_array().is_none_or(|a| a.is_empty()))
+            || v["content"].as_str().is_some_and(|s| s.trim() == "/model");
         if !is_project && !custom.starts_with("model-page:") {
             return None;
         }
@@ -41,7 +40,7 @@ impl App {
         let options: Vec<_> = p.models.iter().enumerate().skip(page*25).take(25)
             .map(|(index,m)|json!({"label":m.chars().take(100).collect::<String>(),"value":index.to_string()})).collect();
         let mut rows = vec![
-            json!({"type":1,"components":[{"type":3,"custom_id":format!("model-model:{}",p.token),"placeholder":format!("初期モデルを選択 ({}/{})",page+1,pages),"min_values":1,"max_values":1,"options":options}]}),
+            json!({"type":1,"components":[{"type":3,"custom_id":format!("model-model:{}",p.token),"placeholder":format!("モデルを選択 ({}/{})",page+1,pages),"min_values":1,"max_values":1,"options":options}]}),
         ];
         let mut buttons = Vec::new();
         if page > 0 {
@@ -84,7 +83,10 @@ impl App {
                 created: Instant::now(),
             },
         );
-        Ok("この会話の初期モデルを一覧から選んでください（10分以内）。選択後、そのまま話しかけられます。作業先の登録は不要です。".into())
+        let current = self.store.conversation(channel).await?.selected_model;
+        Ok(format!(
+            "選択中のモデル: {current}\n変更するモデルを一覧から選んでください（10分以内）。次の依頼から適用します。"
+        ))
     }
     pub(crate) async fn project_selection(&self, v: &Value) -> Result<String> {
         let channel = v["channel_id"].as_str().context("channel missing")?;
@@ -104,7 +106,7 @@ impl App {
             );
         };
         if kind == "model-page" {
-            return Ok("初期モデルを選んでください。".into());
+            return Ok("モデルを選んでください。".into());
         }
         ensure!(
             kind == "model-model" && v["data"]["values"].as_array().is_some_and(|a| a.len() == 1),

@@ -1,7 +1,7 @@
 # Codex Hoshikage Gateway システム設計書
 
-版: 1.2 / 2026-09-11 / Tane Channel Technology / MIT
-基準: [要件2.2](requirements.ja.md)、[Proxy API v2 契約案0.2](../../codex-hoshikage-proxy/docs/workspace-artifact-api-v2.ja.md)。設計は実装・配備済みの宣言ではない。
+版: 1.3 / 2026-09-12 / Tane Channel Technology / MIT
+基準: [要件2.3](requirements.ja.md)、[Proxy API v2 契約案0.2](../../codex-hoshikage-proxy/docs/workspace-artifact-api-v2.ja.md)。設計は実装・配備済みの宣言ではない。
 
 ## 1. 構成と境界
 
@@ -114,3 +114,11 @@ v1の実行開始・SSE所有・継続判定クライアントは削除した。
 Proxy側の実装完了前でもFake Proxyで独立して実装できる。実際のイベント形状やエラー契約と相違が判明した場合は契約側と調整する。Fake成功だけで本番導入可能とはしない。進捗・制約は[実装状況](implementation-status.ja.md)に記録する。
 
 受付transaction内で、Proxy会話記録なし・過去RequestがCOMPLETED/FAILED/CANCELLEDのみ・有効holdなしを確認し、継続不可のローカル会話をNEWへ戻す。Response/Thread参照は外し、モデル・Discordの場所・依頼履歴・Message ID重複防止を保持する。直近の適用済み停止操作が未再開ならpauseを保持する。予約失敗・重複投稿では初期化を確定しない。
+
+## 生成画像の自動配信設計
+
+[確定した生成画像配信仕様](generated-image-delivery-contract.ja.md)を適用する。通常の画像作成依頼に対し、Proxyが帰属を確定して登録したPNGを依頼元へ自動添付する。回答本文とは独立した監視・配信状態を持ち、schema 5のwatch/item/claimで永続化・重複抑止する。一般成果物の無差別送信は許可しない。/getは必須ではなく、明示再添付は /retry で確認する。
+
+### 2026-09-13 操作・進捗表示の補正
+
+実行要求送信中は依頼ID別のRAIIガードを保持し、通常監視の受理照会と競合させない。異常終了・キャンセル時はガードを解放し、従来の照会・UNKNOWN保護を継続する。画像のpendingが実行終了確認から10秒続く、または未配信画像を発見したとき、既存notice IDを更新して準備状況を表示する。画像なし確定・配信完了・失敗で同じ案内を更新する。UNKNOWN解消後は所有確認済みの警告投稿を削除し、正常復帰の投稿はしない。削除記録は監査用に保持する。

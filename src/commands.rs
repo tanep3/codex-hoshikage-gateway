@@ -127,7 +127,7 @@ impl App {
             );
         }
         let cv = self.authorized_thread(thread).await?;
-        if name == "model" && option(v, "id").is_none() && cv.selected_model.is_empty() {
+        if name == "model" && option(v, "id").is_none() {
             return self.start_model_menu(iid, thread).await;
         }
         if stopped {
@@ -196,13 +196,36 @@ impl App {
                             .join(" / ")
                     )
                 };
+                let t = thread.to_owned();
+                let images:Vec<(String,i64)>=self.store.call(false,move|c|{let mut q=c.prepare("SELECT state,count(*) FROM generated_image_watches WHERE thread_id=?1 GROUP BY state")?;Ok(q.query_map([t],|r|Ok((r.get(0)?,r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?)}).await?;
+                let image_status = if images.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "\n画像: {}",
+                        images
+                            .iter()
+                            .map(|(state, n)| format!(
+                                "{} {n}件",
+                                match state.as_str() {
+                                    "DONE" => "確認済み",
+                                    "WATCHING" => "登録・配信を確認中",
+                                    "UNSUPPORTED" => "追跡対象外",
+                                    "EXPIRED" => "照会期限切れ",
+                                    _ => "未完了・確認が必要",
+                                }
+                            ))
+                            .collect::<Vec<_>>()
+                            .join(" / ")
+                    )
+                };
                 let recovery_help = if cv.continuation == "NEW_CONVERSATION_REQUIRED" {
                     "\n会話の接続状態を確認する必要があります。実行中・結果不明の依頼がある場合は、その確認が終わるまで新しい実行を保留します。"
                 } else {
                     ""
                 };
                 let text = format!(
-                    "{rejection}状態: {state}\n待機列: {}\n会話継続: {}\n選択モデル: {}\n実行モデル: {}\nProxy: {}\n確定回答と成果物はProxyの保存期限内に再取得します。{delivery_status}{recovery_help}",
+                    "{rejection}状態: {state}\n待機列: {}\n会話継続: {}\n選択モデル: {}\n実行モデル: {}\nProxy: {}\n確定回答と成果物はProxyの保存期限内に再取得します。{delivery_status}{image_status}{recovery_help}",
                     if cv.paused {
                         "停止中"
                     } else {

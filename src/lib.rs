@@ -24,3 +24,7 @@ pub mod retention;
 pub mod resource_controls;
 
 pub mod proxy_recovery;
+
+pub mod generated_images;
+
+pub mod discord_permissions;

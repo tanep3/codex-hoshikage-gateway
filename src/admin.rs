@@ -146,6 +146,7 @@ async fn execute(
             )
         }
         Command::Reconcile { request_id } => {
+            app.reconcile_images(&request_id).await?;
             let state = app
                 .settings()
                 .await

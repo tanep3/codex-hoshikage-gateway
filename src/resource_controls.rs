@@ -74,20 +74,23 @@ impl App {
                 && meta["state"] == "ready",
             "artifact outside shared scope"
         );
-        self.queue_resource(iid, thread, "artifact", id).await?;
-        let (i, ws) = (iid.to_owned(), workspace.to_owned());
+        let delivery = self.queue_resource(iid, thread, "artifact", id).await?;
+        let (i, ws) = (delivery.clone(), workspace.to_owned());
         self.store.call(true,move|c|{c.execute("UPDATE resource_deliveries SET shared_workspace=?2 WHERE id=?1 AND state='WAITING'",params![i,ws])?;Ok(())}).await?;
-        Ok("選んだ共有ワークの保存版を、この会話へ届けます。".into())
+        self.artifact_delivery_status(&delivery).await
     }
     pub(crate) async fn retry_menu(&self, iid: &str, thread: &str) -> Result<String> {
         self.authorized_thread(thread).await?;
         let t = thread.to_owned();
         let items=self.store.call(false,move|c|{
-            let mut st=c.prepare("SELECT id,resource_type,resource_id,coalesce(display_name,'回答テキスト'),state FROM resource_deliveries WHERE thread_id=?1 AND state IN ('WAITING','CACHED','POST_PENDING','BLOCKED','FAILED','EXPIRED') ORDER BY created_at DESC LIMIT 25")?;
+            let mut st=c.prepare("SELECT id,resource_type,resource_id,coalesce(display_name,'回答テキスト'),state FROM resource_deliveries WHERE thread_id=?1 AND state IN ('WAITING','CACHED','POST_PENDING','BLOCKED','FAILED','EXPIRED','DELIVERED','RELEASE_PENDING') ORDER BY created_at DESC LIMIT 25")?;
             Ok(st.query_map([t],|r|Ok(json!({"id":r.get::<_,String>(0)?,"type":r.get::<_,String>(1)?,"resource_id":r.get::<_,String>(2)?,"display_name":r.get::<_,String>(3)?,"state":r.get::<_,String>(4)?})))?.collect::<rusqlite::Result<Vec<_>>>()?)
         }).await?;
         if items.is_empty() {
-            return Ok("再送待ちの回答・成果物はありません。成果物をもう一度受け取る場合は /get を使ってください。".into());
+            return Ok(
+                "再送待ちの回答・成果物はありません。/get で保存済みの成果物を確認できます。"
+                    .into(),
+            );
         }
         let token = save_menu(
             &self.store,
@@ -143,8 +146,12 @@ impl App {
         let queued=self.store.call(true,move|c|{
             let tx=c.transaction()?;
             if tx.prepare("SELECT 1 FROM resource_deliveries WHERE id=?1")?.exists([&i])?{return Ok(true);}
-            let n=tx.execute("INSERT INTO resource_deliveries(id,thread_id,resource_type,resource_id,request_key,display_name,sha256,size_bytes,created_at,retry_of,shared_workspace) SELECT ?1,thread_id,resource_type,resource_id,?2,display_name,sha256,size_bytes,?3,id,shared_workspace FROM resource_deliveries WHERE id=?4 AND thread_id=?5 AND state IN ('WAITING','CACHED','POST_PENDING','BLOCKED','FAILED','EXPIRED')",params![i,format!("lease-{i}"),domain::now_ms(),o,t])?;
-            if n==1{tx.execute("UPDATE resource_deliveries SET state='SUPERSEDED' WHERE id=?1",[&o])?;}
+            let n=tx.execute("INSERT INTO resource_deliveries(id,thread_id,resource_type,resource_id,request_key,display_name,sha256,size_bytes,created_at,retry_of,shared_workspace,image_request_id,image_ordinal) SELECT ?1,thread_id,resource_type,resource_id,?2,display_name,sha256,size_bytes,?3,id,shared_workspace,image_request_id,image_ordinal FROM resource_deliveries WHERE id=?4 AND thread_id=?5 AND state IN ('WAITING','CACHED','POST_PENDING','BLOCKED','FAILED','EXPIRED','DELIVERED','RELEASE_PENDING')",params![i,format!("lease-{i}"),domain::now_ms(),o,t])?;
+            if n==1{
+                tx.execute("UPDATE generated_image_items SET delivery_id=?2 WHERE delivery_id=?1 AND NOT EXISTS(SELECT 1 FROM resource_deliveries WHERE id=?1 AND message_id IS NOT NULL)",params![o,i])?;
+                tx.execute("UPDATE artifact_delivery_claims SET delivery_id=?2 WHERE delivery_id=?1",params![o,i])?;
+                tx.execute("UPDATE resource_deliveries SET state='SUPERSEDED' WHERE id=?1",[&o])?;
+            }
             tx.commit()?;Ok(n==1)
         }).await?;
         if queued {

@@ -45,6 +45,16 @@ pub struct App {
     pub reloading: Arc<AtomicBool>,
     pub retired_secrets: Arc<std::sync::RwLock<Vec<String>>>,
     pub output: Arc<Mutex<HashMap<String, Output>>>,
+    dispatching: Arc<std::sync::Mutex<HashSet<String>>>,
+}
+struct DispatchGuard {
+    ids: Arc<std::sync::Mutex<HashSet<String>>>,
+    id: String,
+}
+impl Drop for DispatchGuard {
+    fn drop(&mut self) {
+        self.ids.lock().unwrap().remove(&self.id);
+    }
 }
 pub struct Output {
     pub thread: String,
@@ -82,6 +92,7 @@ impl App {
             reloading: Arc::new(AtomicBool::new(false)),
             retired_secrets: Arc::new(std::sync::RwLock::new(vec![])),
             output: Arc::new(Mutex::new(HashMap::new())),
+            dispatching: Arc::new(std::sync::Mutex::new(HashSet::new())),
         })
     }
     pub async fn settings(&self) -> Settings {
@@ -266,6 +277,11 @@ impl App {
             .ensure_conversation_v2(&self.store, &r.thread_id)
             .await?;
         let permit = s.proxy.authorize(r.id.clone(), s.revision).await?;
+        self.dispatching.lock().unwrap().insert(r.id.clone());
+        let _dispatch = DispatchGuard {
+            ids: self.dispatching.clone(),
+            id: r.id.clone(),
+        };
         let r = self
             .store
             .begin_send_authorized(r.id.clone(), permit)
@@ -342,6 +358,7 @@ impl App {
                 },
                 _=tick.tick()=>{
                     for r in self.store.pending().await?{
+                    if self.dispatching.lock().unwrap().contains(&r.id) { continue; }
                         if jobs.len()>=2{break;}
                         if r.response_id.is_none()||r.state.terminal()||active.contains(&r.id)||attempts.get(&r.id).is_some_and(|t|t.elapsed()<Duration::from_secs(5)){continue;}
                         active.insert(r.id.clone());attempts.insert(r.id.clone(),Instant::now());let app=self.clone();let id=r.id.clone();let task=jobs.spawn(async move{app.watch_events(r).await});ids.insert(task.id(),id);
@@ -371,6 +388,7 @@ impl App {
                 chunk=stream.next()=>{let Some(chunk)=chunk else{return Ok(())};last_byte=Instant::now();for event in decoder.feed(&chunk?)?{
                     match event.event.as_str(){
                         "snapshot"|"gap"|"response.execution_terminal"|"response.output_ready"|"response.output_failed"=>{s.proxy.reconcile(&self.store,&r.id).await?;},
+                        "response.generated_images_changed"=>{let id=r.id.clone();self.store.call(false,move|c|{c.execute("UPDATE generated_image_watches SET next_poll_ms=0 WHERE request_id=?1 AND state='WATCHING'",[id])?;Ok(())}).await?;},
                         "response.delta"=>{
                             let v:Value=serde_json::from_str(&event.data)?;
                             ensure!(v["response_id"].as_str()==r.response_id.as_deref(),"delta target mismatch");
@@ -397,6 +415,7 @@ impl App {
             tokio::select! {_=self.cancel.cancelled()=>return Ok(()),_=tick.tick()=>{
                 let s=self.settings().await;
                 for r in self.store.pending().await?{
+                    if self.dispatching.lock().unwrap().contains(&r.id) { continue; }
                     let state=s.proxy.reconcile(&self.store,&r.id).await?;
                     let current=self.store.request(&r.id).await?;
                     if current.stop_requested&&!state.terminal(){let _=self.interrupt(&current).await;}
@@ -423,8 +442,12 @@ impl App {
                     if done&&confirmed&& (!lost || self.delivery.text(&id,&thread,"delivery",0,"回答表示に欠落があります。再実行はしていません。",json!([])).await?){self.output.lock().await.remove(&id);let rid=id.clone();self.store.call(false,move|c|{c.execute("UPDATE output_state SET state='DELIVERED' WHERE request_id=?1",[&rid])?;c.execute("UPDATE resource_deliveries SET state='RELEASE_PENDING' WHERE id=?1",[rid])?;Ok(())}).await?;}
                 }
                 // State cards remain recoverable without retaining answer text.
-                let rows=self.store.call(false,|c|{let mut st=c.prepare("SELECT id,thread_id,state,error_code FROM requests ORDER BY updated_at DESC LIMIT 20")?;Ok(st.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<String>>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?)}).await?;
-                for(id,thread,state,error)in rows {
+                let rows=self.store.call(false,|c|{let mut st=c.prepare("SELECT id,thread_id,state,error_code,EXISTS(SELECT 1 FROM deliveries d WHERE d.target_id=requests.id AND d.kind='status') FROM requests ORDER BY updated_at DESC LIMIT 20")?;Ok(st.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<String>>(3)?,r.get::<_,bool>(4)?)))?.collect::<rusqlite::Result<Vec<_>>>()?)}).await?;
+                for(id,thread,state,error,had_status)in rows {
+                    if had_status && matches!(state.as_str(), "COMPLETED"|"RUNNING"|"APPROVAL_REQUIRED") {
+                        let _=self.delivery.clear_status(&id,&thread).await?;
+                        continue;
+                    }
                     let message=match state.as_str(){
                         "FAILED"=>failure_message(error.as_deref()),
                         "CANCELLED"=>"作業を中断しました。",

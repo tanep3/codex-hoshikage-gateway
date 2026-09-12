@@ -16,10 +16,10 @@ The administrator chooses whether the Bot responds to all authorized posts or on
 | --- | --- |
 | `/new title:NAME` | Start a new thread or forum post |
 | `/workspace` | Choose a shared workspace before starting a conversation (optional) |
-| `/retry` | Select an undelivered or uncertain saved reply/file and confirm redelivery |
+| `/retry` | Select a saved reply/file and confirm redelivery |
 | `/get scope:shared` | Explicitly list artifacts from the shared workspace |
 | `/models` | List available models |
-| `/model` | Show the selected model, or open the initial selection menu |
+| `/model` | Show the selected model and choose a different model from the menu |
 | `/model id:MODEL_ID` | Select the next request's model while preserving same-provider context |
 | `/status` | Check conversation, model, pause, and Proxy connection state |
 | `/steer text:INSTRUCTION` | Add an instruction to the current Turn; ordinary messages queue the next request |
@@ -51,3 +51,13 @@ An existing conversation cannot change workspaces. Create another with `/new tit
 See [Operations guide](operations.md).
 
 Post normally in the place you want to use. `/new` is an optional shortcut to create a different Discord thread or forum post, not a prerequisite for conversation.
+
+## Generated images
+
+Ask for an image normally. With a compatible Proxy, the generated PNG appears automatically in the same conversation, even when the reply has no text. You do not need `/get`. Images may arrive after the text. Failed or interrupted work can still deliver saved images, marked as partial results when known before sending.
+
+`/get` avoids attaching a saved version that is already queued or delivered. Use `/retry` and confirm if you want another copy. A size limit or expired resource may prevent delivery; `/get` does not bypass these limits. No extra configuration is required.
+
+When image preparation or delivery takes longer, the Bot shows a progress message. That same message updates when delivery finishes, no images are found, or a problem occurs. You can wait without submitting the request again.
+
+The Bot does not add routine working or completion messages. Temporary status warnings are removed automatically once normal operation is confirmed.

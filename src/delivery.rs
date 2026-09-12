@@ -34,6 +34,13 @@ impl Delivery {
             text.encode_utf16().count() <= 2000,
             "Discord text exceeds limit"
         );
+        if kind == "status" {
+            let (t, ch) = (target.to_owned(), thread.to_owned());
+            let deleting: bool=self.store.call(false,move|c|Ok(c.query_row("SELECT EXISTS(SELECT 1 FROM deliveries WHERE target_id=?1 AND thread_id=?2 AND kind='status' AND state IN ('DELETE_PENDING','DELETED'))",params![t,ch],|r|r.get(0))?)).await?;
+            if deleting && !self.clear_status(target, thread).await? {
+                return Ok(false);
+            }
+        }
         let target = target.to_owned();
         let thread = thread.to_owned();
         let kind = kind.to_owned();
@@ -231,10 +238,28 @@ fn canonical_components(v: &Value) -> Value {
 impl Delivery {
     /// Remove only our persisted surplus parts, after resolving any previous send ambiguity.
     pub async fn trim_answer(&self, target: &str, thread: &str, keep: usize) -> Result<bool> {
+        self.trim_parts(target, thread, "answer", keep).await
+    }
+    /// Delete only a confirmed, bot-owned status; preserve its record for audit.
+    pub async fn clear_status(&self, target: &str, thread: &str) -> Result<bool> {
+        if !self.trim_parts(target, thread, "status", 0).await? {
+            return Ok(false);
+        }
         let (t, ch) = (target.to_owned(), thread.to_owned());
+        self.store.call(true,move|c|{c.execute("UPDATE deliveries SET kind='retired-status-' || id WHERE target_id=?1 AND thread_id=?2 AND kind='status' AND state='DELETED'",params![t,ch])?;Ok(())}).await?;
+        Ok(true)
+    }
+    async fn trim_parts(
+        &self,
+        target: &str,
+        thread: &str,
+        kind: &str,
+        keep: usize,
+    ) -> Result<bool> {
+        let (t, ch, kind) = (target.to_owned(), thread.to_owned(), kind.to_owned());
         let rows=self.store.call(false,move|c|{
-            let mut st=c.prepare("SELECT id,message_id,state,pending_digest FROM deliveries WHERE target_id=?1 AND thread_id=?2 AND kind='answer' AND part>=?3 AND state!='DELETED'")?;
-            Ok(st.query_map(params![t,ch,keep as i64],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<String>>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?)
+            let mut st=c.prepare("SELECT id,message_id,state,pending_digest FROM deliveries WHERE target_id=?1 AND thread_id=?2 AND kind=?4 AND part>=?3 AND state!='DELETED'")?;
+            Ok(st.query_map(params![t,ch,keep as i64,kind],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<String>>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?)
         }).await?;
         let mut complete = true;
         for (id, message, state, pending) in rows {

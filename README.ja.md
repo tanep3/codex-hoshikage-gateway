@@ -10,6 +10,8 @@
 
 API v2では、Proxyが成果物と確定回答の保存版を管理します。Gatewayは受け取るファイルの選択とDiscordへの配信を担当します。配信トラブルを理由にAIの作業を自動でやり直すことはありません。
 
+対応Proxyで生成したPNGは、その会話へ自動添付します。画像を受け取るための `/get` 操作は不要です。
+
 - [導入手順](docs/installation.ja.md)：Discordサーバー・Botの用意、キーの設定、インストール。
 - [ユーザーマニュアル](docs/user-manual.ja.md)：会話・モデル・停止・ファイルの使い方。
 - [実装・検証状況](docs/implementation-status.ja.md)：今使える経路と残作業。

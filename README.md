@@ -10,6 +10,8 @@ Keep conversations in text channels or individual forum posts. You do not need t
 
 API v2 lets the Proxy retain fixed versions of artifacts and final replies. The Gateway handles selection and Discord delivery. A delivery failure never triggers an automatic rerun of the AI task.
 
+Generated PNG images are attached automatically to the conversation when the Proxy supports image registration; no `/get` is needed.
+
 - [Installation](docs/installation.md): create the Discord server and Bot, configure credentials, and install.
 - [User manual](docs/user-manual.md): conversations, models, stopping work, and files.
 - [Implementation status (Japanese)](docs/implementation-status.ja.md): implemented paths and remaining work.

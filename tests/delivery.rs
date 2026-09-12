@@ -20,8 +20,8 @@ struct Mock {
     message: Mutex<Value>,
 }
 async fn create(State(s): State<Arc<Mock>>, Json(mut body): Json<Value>) -> Response {
-    s.posts.fetch_add(1, Ordering::SeqCst);
-    body["id"] = json!("100");
+    let count = s.posts.fetch_add(1, Ordering::SeqCst);
+    body["id"] = json!((100 + count).to_string());
     body["channel_id"] = json!("4");
     body["author"] = json!({"id":"99","bot":true});
     *s.message.lock().unwrap() = body;
@@ -36,6 +36,13 @@ async fn edit(State(s): State<Arc<Mock>>, Json(body): Json<Value>) -> Response {
 }
 #[tokio::test]
 async fn lost_post_and_patch_receipts_are_reconciled_without_resending() {
+    exercise_delivery("answer").await;
+}
+#[tokio::test]
+async fn resolved_status_is_removed_without_posting_success_message() {
+    exercise_delivery("status").await;
+}
+async fn exercise_delivery(kind: &str) {
     let t = tempfile::tempdir().unwrap();
     let cfg = common::config(&t);
     let (store, _) = common::store(&cfg).await;
@@ -56,7 +63,7 @@ async fn lost_post_and_patch_receipts_are_reconciled_without_resending() {
             }),
         )
         .route(
-            "/channels/4/messages/100",
+            "/channels/4/messages/{message}",
             get(
                 |State(s): State<Arc<Mock>>| async move { Json(s.message.lock().unwrap().clone()) },
             )
@@ -79,35 +86,72 @@ async fn lost_post_and_patch_receipts_are_reconciled_without_resending() {
     let delivery = Delivery { store, discord };
     assert!(
         !delivery
-            .text("request", "4", "answer", 0, "最初", json!([]))
+            .text("request", "4", kind, 0, "最初", json!([]))
             .await
             .unwrap()
     );
     assert!(
         delivery
-            .text("request", "4", "answer", 0, "最初", json!([]))
+            .text("request", "4", kind, 0, "最初", json!([]))
             .await
             .unwrap()
     );
     assert_eq!(state.posts.load(Ordering::SeqCst), 1);
     assert!(
         !delivery
-            .text("request", "4", "answer", 0, "最初と続き", json!([]))
+            .text("request", "4", kind, 0, "最初と続き", json!([]))
             .await
             .unwrap()
     );
     assert!(
         delivery
-            .text("request", "4", "answer", 0, "最初と続き", json!([]))
+            .text("request", "4", kind, 0, "最初と続き", json!([]))
             .await
             .unwrap()
     );
     assert_eq!(state.patches.load(Ordering::SeqCst), 1);
     // Final saved output can be shorter than streamed output. Delete only the
     // persisted, verified bot-owned surplus; repeated cleanup must not delete twice.
-    assert!(delivery.trim_answer("request", "4", 0).await.unwrap());
-    assert!(delivery.trim_answer("request", "4", 0).await.unwrap());
+    if kind == "status" {
+        assert!(delivery.clear_status("request", "4").await.unwrap());
+    } else {
+        assert!(delivery.trim_answer("request", "4", 0).await.unwrap());
+    }
+    if kind == "status" {
+        assert!(delivery.clear_status("request", "4").await.unwrap());
+    } else {
+        assert!(delivery.trim_answer("request", "4", 0).await.unwrap());
+    }
     assert_eq!(state.deletes.load(Ordering::SeqCst), 1);
+    assert_eq!(state.posts.load(Ordering::SeqCst), 1);
+    if kind == "status" {
+        delivery
+            .store
+            .call(true, |c| {
+                c.execute(
+                    "UPDATE deliveries SET kind='status' WHERE state='DELETED'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(
+            !delivery
+                .text("request", "4", "status", 0, "新しい確認待ち", json!([]))
+                .await
+                .unwrap()
+        );
+        assert!(
+            delivery
+                .text("request", "4", "status", 0, "新しい確認待ち", json!([]))
+                .await
+                .unwrap()
+        );
+        assert_eq!(state.posts.load(Ordering::SeqCst), 2);
+        delivery.store.call(false,|c|{assert_eq!(c.query_row("SELECT count(*) FROM deliveries WHERE kind LIKE 'retired-status-%' AND state='DELETED'",[],|r|r.get::<_,i64>(0))?,1);Ok(())}).await.unwrap();
+    }
+
     // No prompt or answer content is retained in any SQLite text value.
     delivery
         .store
