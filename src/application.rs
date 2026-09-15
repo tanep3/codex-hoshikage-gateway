@@ -464,7 +464,7 @@ impl App {
                 let lost=self.store.call(false,|c|{let mut st=c.prepare("SELECT o.request_id,r.thread_id FROM output_state o JOIN requests r ON r.id=o.request_id WHERE o.state='UNAVAILABLE' ORDER BY r.updated_at DESC LIMIT 20")?;Ok(st.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?)}).await?;
                 for(id,t)in lost{let _=self.delivery.text(&id,&t,"output_unavailable",0,"再起動または配信失敗により、回答全文を再取得できません。実行状態は別途確認します。自動再実行はしません。",json!([])).await?;}
                 let notices=self.store.call(false,|c|{let mut st=c.prepare("SELECT id,thread_id,code FROM notices UNION ALL SELECT request_id,thread_id,'入力を確認できなかったため、実行していません。' FROM admissions WHERE status='REJECTED' LIMIT 50")?;Ok(st.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?)}).await?;
-                for(id,t,text)in notices{let _=self.delivery.text(&id,&t,"notice",0,&text,json!([])).await?;}
+                for(id,t,text)in notices{if id.starts_with("resource-error-"){self.resource_notice(&id,&t).await?;}else{let _=self.delivery.text(&id,&t,"notice",0,&text,json!([])).await?;}}
                 self.delivery.recover().await?;
             }}
         }

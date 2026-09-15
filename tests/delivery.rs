@@ -42,6 +42,10 @@ async fn lost_post_and_patch_receipts_are_reconciled_without_resending() {
 async fn resolved_status_is_removed_without_posting_success_message() {
     exercise_delivery("status").await;
 }
+#[tokio::test]
+async fn resolved_resource_notice_is_removed_without_reposting() {
+    exercise_delivery("notice").await;
+}
 async fn exercise_delivery(kind: &str) {
     let t = tempfile::tempdir().unwrap();
     let cfg = common::config(&t);
@@ -114,11 +118,15 @@ async fn exercise_delivery(kind: &str) {
     // persisted, verified bot-owned surplus; repeated cleanup must not delete twice.
     if kind == "status" {
         assert!(delivery.clear_status("request", "4").await.unwrap());
+    } else if kind == "notice" {
+        assert!(delivery.clear_notice("request", "4").await.unwrap());
     } else {
         assert!(delivery.trim_answer("request", "4", 0).await.unwrap());
     }
     if kind == "status" {
         assert!(delivery.clear_status("request", "4").await.unwrap());
+    } else if kind == "notice" {
+        assert!(delivery.clear_notice("request", "4").await.unwrap());
     } else {
         assert!(delivery.trim_answer("request", "4", 0).await.unwrap());
     }

@@ -15,6 +15,36 @@ use std::{
     time::{Duration, Instant},
 };
 impl App {
+    /// Render current delivery evidence instead of a stale, first-error notice.
+    pub(crate) async fn resource_notice(&self, id: &str, thread: &str) -> Result<()> {
+        let _guard = self.resource_mutation.read().await;
+        let resource = id
+            .strip_prefix("resource-error-")
+            .context("invalid resource notice")?
+            .to_owned();
+        let channel = thread.to_owned();
+        let row: Option<(String, Option<String>, bool)> = self.store.call(false, move |c| {
+            Ok(c.query_row("SELECT state,error_code,EXISTS(SELECT 1 FROM deliveries d WHERE d.target_id=r.id AND d.kind='answer' AND d.state IN ('POST_PENDING','PATCH_PENDING')) FROM resource_deliveries r WHERE id=?1 AND thread_id=?2", params![resource,channel], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?)
+        }).await?;
+        let Some((state, code, uncertain)) = row else {
+            return Ok(());
+        };
+        if let Some(text) = resource_notice_message(&state, code.as_deref(), uncertain) {
+            self.delivery
+                .text(id, thread, "notice", 0, text, json!([]))
+                .await?;
+        } else if self.delivery.clear_notice(id, thread).await? {
+            let id = id.to_owned();
+            self.store
+                .call(true, move |c| {
+                    c.execute("DELETE FROM notices WHERE id=?1", [id])?;
+                    Ok(())
+                })
+                .await?;
+        }
+        Ok(())
+    }
+
     pub(crate) async fn artifact_command(
         &self,
         iid: &str,
@@ -708,38 +738,56 @@ impl Drop for CacheFile {
     }
 }
 
+pub fn resource_notice_message(
+    state: &str,
+    code: Option<&str>,
+    uncertain: bool,
+) -> Option<&'static str> {
+    if matches!(state, "DELIVERED" | "RELEASE_PENDING" | "SUPERSEDED") {
+        return None;
+    }
+    if uncertain || state == "POST_PENDING" {
+        return Some(
+            "Discordへの送信が完了したか確認できません。まず、この会話に回答・ファイルが届いているか確認してください。届いていれば操作は不要です。届かず再送したい場合は /retry で対象を選び、重複する可能性を確認して再送してください。AIを再実行せず、同じ保存版を送ります。",
+        );
+    }
+    Some(resource_error_message(
+        code.unwrap_or("resource_unavailable"),
+    ))
+}
+
 pub fn resource_error_message(code: &str) -> &'static str {
     match code {
         "delivery_size_limit" | "discord_attachment_too_large" => {
-            "画像・ファイルが送信容量の上限を超えています。保存版はProxyの保持期限内に取得可能ですが、/getでも同じ送信制限が適用されます。"
+            "回答・ファイルが配信容量の上限を超えています。ファイルは小さくするか分割してから /get で取得してください。回答テキストの場合は運用者に配信上限の確認を依頼してください。同じ保存版への /retry や /get だけでは解消しません。"
         }
         "generated_image_invalid" => {
-            "画像を安全に表示できる形式・画素数として検証できなかったため、添付しませんでした。AIは再実行していません。"
+            "画像の形式・画素数を検証できず、添付を止めています。運用者に画像形式と画素数上限の確認を依頼してください。同じ画像の再送だけでは解消しません。AIは再実行していません。"
         }
         "discord_permission_denied" => {
-            "Discordへの添付権限がありません。Botの送信・ファイル添付権限を確認してください。"
+            "Botに送信・ファイル添付の権限がありません。サーバー管理者にこの場所のBot権限を確認してもらい、修正後に /retry で対象を選んで再送してください。"
         }
         "discord_attachment_rejected" => {
-            "Discordが添付を受け付けませんでした。再送前にファイルと送信先を確認してください。"
+            "Discordが添付を受け付けませんでした。運用者にファイル形式・容量と送信先の制限を確認してもらい、解消後に /retry で再送してください。"
         }
         "content_expired" | "resource_expired" | "artifact_expired" | "output_expired"
         | "lease_expired" => {
-            "保存期限が切れたため、この保存版は取得できません。元ファイルが残っている場合は /get の path 欄から新しい保存版を作れます。AIは再実行していません。"
+            "保存期限が切れ、この保存版は取得できません。ファイルは元ファイルが残っていれば /get の path 欄で新しい保存版を取得してください。回答テキストは /get では復旧できないため、運用者に復旧可否を確認してください。AIは再実行していません。"
         }
         "content_corrupt" | "resource_corrupt" | "artifact_corrupt" | "output_corrupt" => {
-            "保存データの破損を検出しました。このデータは送信していません。Proxyの保存領域を確認してください。AIは再実行していません。"
+            "保存データの破損を検出したため、送信を止めています。運用者にこのメッセージを伝え、Proxyの保存領域と復旧可否の確認を依頼してください。同じ保存版の再送だけでは解消しません。"
         }
         "workspace_access_revoked" | "access_revoked" => {
-            "作業先へのアクセスが許可されていないため、取得できません。Proxyの権限設定を確認してください。"
+            "作業先へのアクセスが許可されていないため取得できません。運用者にProxyの権限設定の確認を依頼し、許可された後に /retry で再送してください。"
         }
         "storage_capacity_exceeded" | "storage_full" | "capacity_exceeded" | "retention_limit" => {
-            "保存容量または保持期間の制限に達しています。Proxyの容量・保持設定を確認してください。AIは再実行していません。"
+            "保存容量または保持期間の制限に達しています。運用者にProxyの容量・保持設定の確認を依頼してください。解消後も届かなければ /retry で対象を確認してください。AIは再実行していません。"
         }
         "output_unavailable" | "resource_failed" => {
-            "実行結果とは別に、回答または成果物の保存に失敗しています。/status で実行状態を確認できます。AIは再実行していません。"
+            "回答またはファイルの保存に失敗しています。まず /status で作業自体の結果を確認し、運用者に保存失敗の調査を依頼してください。/retry だけでは保存失敗は解消しません。AIは再実行していません。"
         }
         _ => {
-            "ファイルまたは回答の取得をまだ確認できません。接続とProxyの状態を確認しながら、同じ保存版を照会します。AIは再実行していません。"
+            "回答・ファイルをまだ取得できていません。自動で確認を続けるので、今は同じ依頼を送り直さずお待ちください。数分たっても届かない場合は /status を確認し、このメッセージと結果を運用者に伝えてください。AIは再実行していません。"
         }
     }
 }

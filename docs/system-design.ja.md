@@ -140,3 +140,7 @@ Typing APIの表示寿命は10秒。仕様根拠: [Discord公式 Channels Resour
 Discordのmodalは初回応答で開き、その他の入力操作はephemeral、空フォームの許可・拒否はdeferred updateで元カードのみ更新する。公式仕様: https://docs.discord.com/developers/interactions/receiving-and-responding 。実Discordの結合受入は利用者による許可/拒否操作と実MCPの結果照合を別途必要とする。
 
 Discord受信境界ではSerenityのInteraction列挙型から取得したkindをJSONのtypeへ明示的に保存する。Serenityの再シリアライズだけではtypeが落ちるため、生のDiscord JSONを直接渡すモックだけでは検証しない。ボタンとmodalの実ライブラリ往復を回帰試験に含める。MCP監視はschema 6導入以降の依頼または既存MCP記録がある依頼を対象とし、照会失敗は30秒間隔へ抑える。
+
+## リソース配信エラーの案内
+
+resource-error noticeは初回文面を固定せず、resource_deliveriesと回答のdeliveriesを再照会して表示する。POST_PENDING/PATCH_PENDINGでは取得障害より送信結果不明の案内を優先し、重複の可能性を確認する /retry を案内する。DELIVERED/RELEASE_PENDING/SUPERSEDEDではnoticeの所有確認・結果照合を経て削除し、監査記録を保持する。照合不能な投稿は勝手に再投稿・削除しない。

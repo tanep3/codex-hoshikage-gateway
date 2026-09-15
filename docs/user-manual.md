@@ -79,3 +79,11 @@ The bot shows the server name and its request. Choose **今回許可 (Allow this
 For a form, open **入力フォームを開く**, select a field, and choose **入力する**. Enter the displayed number for an enumerated choice, or はい / いいえ for a boolean. Extra text boxes can hold the rest of a long string. Choose **この内容で送信** when ready. Defaults are never filled automatically. Form screens are private; answers are not posted to the public conversation. Re-enter unfinished answers after a bot restart.
 
 Use `/stop` to stop the task. Expired or uncertain answers are never automatically approved or resent. Check the original card and `/status`. “Answer sent to MCP” confirms submission, not successful tool execution; the task result follows separately.
+
+## If an answer or file does not arrive
+
+- **Retrieval is being checked automatically:** wait without submitting the AI request again. If nothing arrives after a few minutes, share `/status` and the warning with the operator.
+- **Discord delivery is uncertain:** check this conversation first. If the answer or file is present, no action is needed. Otherwise, use `/retry`, select the saved item, and acknowledge the possibility of duplicate messages. This resends the same saved version; it does not rerun the AI task.
+- **Permission, capacity, corruption, or expiry errors:** address the stated cause first. Resending alone cannot fix it. Ask the operator to check settings or storage. For an expired file whose original still exists, `/get path:...` creates a new saved version. This cannot recover expired answer text.
+
+Old retrieval warnings are removed after delivery completes. If the warning's own send or deletion result is uncertain, it can remain until reconciled.

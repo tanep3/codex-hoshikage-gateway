@@ -252,6 +252,9 @@ impl Delivery {
         self.store.call(true,move|c|{c.execute("UPDATE deliveries SET kind='retired-status-' || id WHERE target_id=?1 AND thread_id=?2 AND kind='status' AND state='DELETED'",params![t,ch])?;Ok(())}).await?;
         Ok(true)
     }
+    pub async fn clear_notice(&self, target: &str, thread: &str) -> Result<bool> {
+        self.trim_parts(target, thread, "notice", 0).await
+    }
     async fn trim_parts(
         &self,
         target: &str,
