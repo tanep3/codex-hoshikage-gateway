@@ -240,6 +240,9 @@ impl Delivery {
     pub async fn trim_answer(&self, target: &str, thread: &str, keep: usize) -> Result<bool> {
         self.trim_parts(target, thread, "answer", keep).await
     }
+    pub async fn clear_draft(&self, target: &str, thread: &str) -> Result<bool> {
+        self.trim_parts(target, thread, "draft", 0).await
+    }
     /// Delete only a confirmed, bot-owned status; preserve its record for audit.
     pub async fn clear_status(&self, target: &str, thread: &str) -> Result<bool> {
         if !self.trim_parts(target, thread, "status", 0).await? {

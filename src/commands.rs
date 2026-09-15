@@ -465,6 +465,11 @@ impl App {
                 && current["details"]["turnId"].as_str() == r.turn_id.as_deref(),
             "approval identity mismatch"
         );
+        if current["state"] != "pending" {
+            return Ok(
+                "この承認は回答済み、または期限切れです。元の作業は再実行していません。".into(),
+            );
+        }
         ensure!(
             current["available_decisions"]
                 .as_array()
@@ -484,7 +489,12 @@ impl App {
         let result=s.proxy.control(&format!("/v1/codex/approvals/{}",path_id(aid)?),Some(json!({"decision":decision,"expected_thread_id":r.proxy_thread_id,"expected_turn_id":r.turn_id}))).await;
         self.finish_operation(op, result.is_ok()).await?;
         result?;
-        Ok("承認への回答を受け付けました。実行結果は別途確認します。".into())
+        Ok(match decision {
+            "accept" => "今回の操作を承認しました。続きの回答はこの会話に届きます。",
+            "decline" => "この操作を拒否しました。",
+            _ => "この承認を取り消しました。",
+        }
+        .into())
     }
 }
 fn option<'a>(v: &'a Value, name: &str) -> Option<&'a str> {

@@ -61,3 +61,11 @@ Ask for an image normally. With a compatible Proxy, the generated PNG appears au
 When image preparation or delivery takes longer, the Bot shows a progress message. That same message updates when delivery finishes, no images are found, or a problem occurs. You can wait without submitting the request again.
 
 The Bot does not add routine working or completion messages. Temporary status warnings are removed automatically once normal operation is confirmed.
+
+## Approvals and activity
+
+Approval cards show the purpose and operation in readable form. “Approve once” permits only that operation. After approval, refusal, or cancellation, the same card shows the result and removes its buttons. If delivery is still being checked, wait in the same conversation instead of submitting again.
+
+Discord’s native typing indicator shows that work is underway. Updates stop during approval waits, after completion, or when execution status is unknown; the indicator may remain visible for up to about 10 seconds. It indicates activity, not the model’s private reasoning.
+
+Intermediate text is a temporary preview. The final answer arrives as a new message at the bottom of the conversation, then the preview is removed. You do not need to search above approval cards for an edited answer.

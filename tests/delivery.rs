@@ -220,6 +220,13 @@ async fn only_explicit_rate_limit_rejection_allows_transport_retry() {
 
 #[tokio::test]
 async fn successful_answer_has_no_status_or_completion_posts() {
+    exercise_final_answer(false).await;
+}
+#[tokio::test]
+async fn final_answer_is_posted_after_approval_and_draft_is_removed() {
+    exercise_final_answer(true).await;
+}
+async fn exercise_final_answer(streamed: bool) {
     use codex_hoshikage_gateway::{
         application::{App, Output},
         proxy::Proxy,
@@ -227,18 +234,58 @@ async fn successful_answer_has_no_status_or_completion_posts() {
     use std::time::{Duration, Instant};
     let received = Arc::new(Mutex::new(Vec::<Value>::new()));
     let r = received.clone();
-    let router = Router::new().route(
-        "/channels/4/messages",
-        post(move |Json(mut body): Json<Value>| {
-            let r = r.clone();
-            async move {
-                r.lock().unwrap().push(body.clone());
-                body["id"] = json!("100");
-                body["channel_id"] = json!("4");
-                Json(body)
-            }
-        }),
-    );
+    let reads = received.clone();
+    let deletes = received.clone();
+    let router = Router::new()
+        .route(
+            "/users/@me",
+            get(|| async { Json(json!({"id":"99","bot":true})) }),
+        )
+        .route(
+            "/channels/4/messages/{mid}",
+            get(
+                move |axum::extract::Path(mid): axum::extract::Path<String>| {
+                    let r = reads.clone();
+                    async move {
+                        Json(
+                            r.lock()
+                                .unwrap()
+                                .iter()
+                                .find(|v| v["id"] == mid)
+                                .unwrap()
+                                .clone(),
+                        )
+                    }
+                },
+            )
+            .delete(
+                move |axum::extract::Path(mid): axum::extract::Path<String>| {
+                    let r = deletes.clone();
+                    async move {
+                        r.lock()
+                            .unwrap()
+                            .iter_mut()
+                            .find(|v| v["id"] == mid)
+                            .unwrap()["deleted"] = json!(true);
+                        StatusCode::NO_CONTENT
+                    }
+                },
+            ),
+        )
+        .route(
+            "/channels/4/messages",
+            post(move |Json(mut body): Json<Value>| {
+                let r = r.clone();
+                async move {
+                    let mut rows = r.lock().unwrap();
+                    body["id"] = json!((100 + rows.len()).to_string());
+                    body["channel_id"] = json!("4");
+                    body["author"] = json!({"id":"99","bot":true});
+                    rows.push(body.clone());
+                    Json(body)
+                }
+            }),
+        );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
@@ -262,13 +309,14 @@ async fn successful_answer_has_no_status_or_completion_posts() {
         Proxy::new(endpoint, "test".into()).unwrap(),
     )
     .unwrap();
+    app.discord.identify_bot().await.unwrap();
     app.connected.store(true, Ordering::SeqCst);
     app.output.lock().await.insert(
         id.clone(),
         Output {
             thread: "4".into(),
             text: "こんにちは☺️".into(),
-            done: true,
+            done: !streamed,
             lost: false,
             created: Instant::now(),
             last_progress: Instant::now(),
@@ -277,6 +325,26 @@ async fn successful_answer_has_no_status_or_completion_posts() {
     );
     let a = app.clone();
     let task = tokio::spawn(async move { a.delivery_loop().await });
+    if streamed {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while received.lock().unwrap().is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            app.delivery
+                .text("approval_a", "4", "approval", 0, "承認待ち", json!([]))
+                .await
+                .unwrap()
+        );
+        let mut cache = app.output.lock().await;
+        let output = cache.get_mut(&id).unwrap();
+        output.text = "更新しました。実測値は25.7Mbpsです。".into();
+        output.done = true;
+    }
+
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let rid = id.clone();
@@ -302,8 +370,20 @@ async fn successful_answer_has_no_status_or_completion_posts() {
     app.cancel.cancel();
     task.await.unwrap().unwrap();
     let messages = received.lock().unwrap();
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0]["content"], "こんにちは☺️");
-    assert_eq!(messages[0]["components"], json!([]));
+    if streamed {
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0]["deleted"], true);
+        assert_eq!(messages[1]["content"], "承認待ち");
+        assert_eq!(
+            messages[2]["content"],
+            "更新しました。実測値は25.7Mbpsです。"
+        );
+        assert!(messages[1].get("deleted").is_none());
+        assert!(messages[2].get("deleted").is_none());
+    } else {
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["content"], "こんにちは☺️");
+        assert_eq!(messages[0]["components"], json!([]));
+    }
     server.abort();
 }

@@ -437,8 +437,8 @@ impl App {
                     let _guard=self.resource_mutation.read().await;
                     if !self.output.lock().await.contains_key(&id){continue;}
                     let mut confirmed=true;
-                    for(i,part)in chunks(&text).iter().enumerate(){if !self.delivery.text(&id,&thread,"answer",i as i64,part,json!([])).await?{confirmed=false;break;}}
-                    if done&&confirmed {confirmed=self.delivery.trim_answer(&id,&thread,chunks(&text).len()).await?;}
+                    for(i,part)in chunks(&text).iter().enumerate(){if !self.delivery.text(&id,&thread,if done {"answer"} else {"draft"},i as i64,part,json!([])).await?{confirmed=false;break;}}
+                    if done&&confirmed {confirmed=self.delivery.trim_answer(&id,&thread,chunks(&text).len()).await?; if confirmed {confirmed=self.delivery.clear_draft(&id,&thread).await?;}}
                     if done&&confirmed&& (!lost || self.delivery.text(&id,&thread,"delivery",0,"回答表示に欠落があります。再実行はしていません。",json!([])).await?){self.output.lock().await.remove(&id);let rid=id.clone();self.store.call(false,move|c|{c.execute("UPDATE output_state SET state='DELIVERED' WHERE request_id=?1",[&rid])?;c.execute("UPDATE resource_deliveries SET state='RELEASE_PENDING' WHERE id=?1",[rid])?;Ok(())}).await?;}
                 }
                 // State cards remain recoverable without retaining answer text.
@@ -493,36 +493,6 @@ impl App {
                 v["expires_at_ms"].as_i64(),
             );
             self.store.call(true,move|c|{c.execute("INSERT OR IGNORE INTO approvals(id,request_id,thread_id,turn_id,state,expires_at) VALUES(?1,?2,?3,?4,'PENDING',?5)",params![aid_owned,rid,thread,turn_owned,expires])?;Ok(())}).await?;
-            let mut buttons = vec![];
-            for (decision, label, style) in [
-                ("accept", "今回のみ承認", 3),
-                ("decline", "拒否", 4),
-                ("cancel", "取消", 2),
-            ] {
-                if v["available_decisions"]
-                    .as_array()
-                    .is_some_and(|a| a.iter().any(|d| d == decision))
-                {
-                    let custom = format!("approval:{aid}:{decision}");
-                    ensure!(custom.len() <= 100, "approval component ID exceeds limit");
-                    buttons.push(json!({"type":2,"style":style,"label":label,"custom_id":custom}));
-                }
-            }
-            let details = self.redact(&s, &serde_json::to_string(&v["details"])?);
-            let snippet = details.chars().take(1200).collect::<String>();
-            let text = format!(
-                "依頼 {} の承認待ちです。\n{}\n期限切れ・対象変更後の操作は拒否します。",
-                &r.id[..8],
-                snippet
-            );
-            let components = if buttons.is_empty() {
-                json!([])
-            } else {
-                json!([{"type":1,"components":buttons}])
-            };
-            self.delivery
-                .text(aid, &r.thread_id, "approval", 0, &text, components)
-                .await?;
         }
         Ok(())
     }

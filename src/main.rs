@@ -287,6 +287,10 @@ async fn daemon(cfg: Config, config_path: PathBuf, force_recovery: bool) -> Resu
     let a = app.clone();
     task!("generated_images", a.generated_images_loop());
     let a = app.clone();
+    task!("approval_ui", a.approval_ui_loop());
+    let a = app.clone();
+    task!("typing", a.typing_loop());
+    let a = app.clone();
     task!("retention", a.retention_loop());
     let a = app.clone();
     task!("admin", admin::serve(a, config_path));
