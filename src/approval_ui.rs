@@ -202,7 +202,7 @@ impl App {
         }
     }
     pub async fn typing_tick(&self) -> Result<()> {
-        let threads=self.store.call(false,|c|{let mut q=c.prepare("SELECT DISTINCT r.thread_id FROM requests r WHERE r.state IN ('SENDING','RUNNING') AND NOT EXISTS(SELECT 1 FROM approvals a WHERE a.request_id=r.id AND a.state IN ('PENDING','DECISION_PENDING')) LIMIT 2")?;Ok(q.query_map([],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?)}).await?;
+        let threads=self.store.call(false,|c|{let mut q=c.prepare("SELECT DISTINCT r.thread_id FROM requests r WHERE r.state IN ('SENDING','RUNNING') AND NOT EXISTS(SELECT 1 FROM approvals a WHERE a.request_id=r.id AND a.state IN ('PENDING','DECISION_PENDING')) AND NOT EXISTS(SELECT 1 FROM mcp_interactions m WHERE m.request_id=r.id AND m.closed=0 AND m.state IN ('pending','sending')) LIMIT 2")?;Ok(q.query_map([],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?)}).await?;
         for thread in threads {
             if self.authorized_thread(&thread).await.is_err() {
                 continue;

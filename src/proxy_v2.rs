@@ -20,6 +20,7 @@ pub struct Binding {
 #[derive(Default)]
 pub struct V2State {
     pub binding: RwLock<Option<Binding>>,
+    pub mcp_form: std::sync::atomic::AtomicBool,
     pub store: RwLock<Option<Store>>,
 }
 #[derive(Debug)]
@@ -352,7 +353,7 @@ impl Proxy {
         conversation: &str,
         input: Value,
     ) -> Result<Value> {
-        self.v2_json(Method::POST,&format!("/v2/codex/conversations/{}/responses",path_id(conversation)?),r.client_request_id.as_deref(),Some(&json!({"input":input,"model":r.model,"metadata":{"codex.approval_capability":"interactive","codex.auto_approve_workspace":"false"}}))).await
+        self.v2_json(Method::POST,&format!("/v2/codex/conversations/{}/responses",path_id(conversation)?),r.client_request_id.as_deref(),Some(&json!({"input":input,"model":r.model,"interaction_capabilities":if self.v2.mcp_form.load(std::sync::atomic::Ordering::SeqCst) {vec!["mcp_form"]}else{vec![]},"metadata":{"codex.approval_capability":"interactive","codex.auto_approve_workspace":"false"}}))).await
     }
 }
 
@@ -410,10 +411,20 @@ impl Proxy {
             Ok::<_,anyhow::Error>((state,cv["state"]=="ready",v["error"]["code"].as_str().map(str::to_owned)))
         }.await;
         let (next, ready, code) = result.unwrap_or((S::Unknown, false, None));
+        let rid = r.id.clone();
+        let declined=store.call(false,move|c|Ok(c.query_row("SELECT EXISTS(SELECT 1 FROM mcp_interactions WHERE request_id=?1 AND action='decline' AND operation_state='succeeded')",[rid],|r|r.get::<_,bool>(0))?)).await?;
         let reason = match code.as_deref() {
             Some("provider_busy" | "workspace_busy" | "conversation_busy") => "proxy_busy",
             Some("storage_capacity_exceeded") => "proxy_capacity",
             Some("workspace_access_revoked") => "workspace_access_revoked",
+            Some(code)
+                if code.len() <= 80
+                    && code.bytes().all(|b| b.is_ascii_lowercase() || b == b'_') =>
+            {
+                code
+            }
+            _ if next == S::Cancelled && r.stop_requested => "user_stop",
+            _ if next == S::Cancelled && declined => "mcp_user_declined",
             _ => "v2_current_query",
         };
         if next == S::Sending {

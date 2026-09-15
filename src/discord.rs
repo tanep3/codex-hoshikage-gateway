@@ -166,7 +166,44 @@ impl Discord {
         );
         input_message(&v, guild)
     }
+    pub async fn interaction_callback(&self, id: &str, token: &str, body: Value) -> Result<()> {
+        ensure!(
+            token
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)),
+            "invalid interaction token"
+        );
+        self.api(
+            reqwest::Method::POST,
+            &format!("/interactions/{}/{token}/callback", snowflake(id)?),
+            Some(body),
+        )
+        .await?;
+        Ok(())
+    }
+    pub async fn followup_components(
+        &self,
+        app: &str,
+        token: &str,
+        text: &str,
+        components: Value,
+    ) -> Result<()> {
+        ensure!(
+            token
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)),
+            "invalid interaction token"
+        );
+        self.api(reqwest::Method::POST,&format!("/webhooks/{}/{token}",snowflake(app)?),Some(json!({"content":text,"flags":64,"components":components,"allowed_mentions":{"parse":[]}}))).await?;
+        Ok(())
+    }
     pub async fn acknowledge(&self, id: &str, token: &str) -> Result<()> {
+        self.acknowledge_kind(id, token, false).await
+    }
+    pub async fn acknowledge_update(&self, id: &str, token: &str) -> Result<()> {
+        self.acknowledge_kind(id, token, true).await
+    }
+    async fn acknowledge_kind(&self, id: &str, token: &str, update: bool) -> Result<()> {
         // Interaction tokens are deliberately kept only in memory.
         ensure!(
             token
@@ -177,7 +214,26 @@ impl Discord {
         self.api(
             reqwest::Method::POST,
             &format!("/interactions/{}/{token}/callback", snowflake(id)?),
-            Some(json!({"type":5,"data":{"flags":64}})),
+            Some(if update {
+                json!({"type":6})
+            } else {
+                json!({"type":5,"data":{"flags":64}})
+            }),
+        )
+        .await?;
+        Ok(())
+    }
+    pub async fn followup_error(&self, app: &str, token: &str, text: &str) -> Result<()> {
+        ensure!(
+            token
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)),
+            "invalid interaction token"
+        );
+        self.api(
+            reqwest::Method::POST,
+            &format!("/webhooks/{}/{token}", snowflake(app)?),
+            Some(json!({"content":text,"flags":64,"allowed_mentions":{"parse":[]}})),
         )
         .await?;
         Ok(())
@@ -412,6 +468,13 @@ pub fn input_message(v: &Value, guild: &str) -> Result<InputMessage> {
         attachments,
     })
 }
+/// Serenity serializes the variant body without the wire discriminator.
+/// Preserve it at the ingress boundary for buttons and modal submissions.
+pub fn interaction_value(interaction: &serenity::model::application::Interaction) -> Result<Value> {
+    let mut value = serde_json::to_value(interaction)?;
+    value["type"] = serde_json::to_value(interaction.kind())?;
+    Ok(value)
+}
 pub enum Incoming {
     Message(Value),
     Interaction(Value),
@@ -433,7 +496,7 @@ impl RawEventHandler for Handler {
             ),
             Event::InteractionCreate(e) => (
                 &self.controls,
-                serde_json::to_value(e.interaction)
+                interaction_value(&e.interaction)
                     .ok()
                     .map(Incoming::Interaction),
             ),

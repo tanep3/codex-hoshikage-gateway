@@ -289,6 +289,8 @@ async fn daemon(cfg: Config, config_path: PathBuf, force_recovery: bool) -> Resu
     let a = app.clone();
     task!("approval_ui", a.approval_ui_loop());
     let a = app.clone();
+    task!("mcp_interactions", a.mcp_interaction_loop());
+    let a = app.clone();
     task!("typing", a.typing_loop());
     let a = app.clone();
     task!("retention", a.retention_loop());

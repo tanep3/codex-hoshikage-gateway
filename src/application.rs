@@ -35,6 +35,7 @@ pub struct App {
     pub config_mutation: Arc<Mutex<()>>,
     pub(crate) resource_mutation: Arc<RwLock<()>>,
     pub(crate) pending_projects: Arc<Mutex<HashMap<String, crate::projects::PendingProject>>>,
+    pub(crate) mcp_drafts: Arc<Mutex<HashMap<String, crate::mcp_ui::Draft>>>,
     pub store: Store,
     pub discord: Discord,
     pub files: Files,
@@ -70,6 +71,7 @@ impl App {
         let cfg = cfg.with_registered_projects(&store.path)?;
         let workspaces = cfg.validate()?;
         Ok(Self {
+            mcp_drafts: Arc::new(Mutex::new(HashMap::new())),
             config_mutation: Arc::new(Mutex::new(())),
             resource_mutation: Arc::new(RwLock::new(())),
             pending_projects: Arc::new(Mutex::new(HashMap::new())),
@@ -442,15 +444,15 @@ impl App {
                     if done&&confirmed&& (!lost || self.delivery.text(&id,&thread,"delivery",0,"回答表示に欠落があります。再実行はしていません。",json!([])).await?){self.output.lock().await.remove(&id);let rid=id.clone();self.store.call(false,move|c|{c.execute("UPDATE output_state SET state='DELIVERED' WHERE request_id=?1",[&rid])?;c.execute("UPDATE resource_deliveries SET state='RELEASE_PENDING' WHERE id=?1",[rid])?;Ok(())}).await?;}
                 }
                 // State cards remain recoverable without retaining answer text.
-                let rows=self.store.call(false,|c|{let mut st=c.prepare("SELECT id,thread_id,state,error_code,EXISTS(SELECT 1 FROM deliveries d WHERE d.target_id=requests.id AND d.kind='status') FROM requests ORDER BY updated_at DESC LIMIT 20")?;Ok(st.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<String>>(3)?,r.get::<_,bool>(4)?)))?.collect::<rusqlite::Result<Vec<_>>>()?)}).await?;
-                for(id,thread,state,error,had_status)in rows {
+                let rows=self.store.call(false,|c|{let mut st=c.prepare("SELECT id,thread_id,state,error_code,EXISTS(SELECT 1 FROM deliveries d WHERE d.target_id=requests.id AND d.kind='status'),stop_requested,EXISTS(SELECT 1 FROM mcp_interactions m WHERE m.request_id=requests.id AND m.action='decline' AND m.operation_state='succeeded') FROM requests ORDER BY updated_at DESC LIMIT 20")?;Ok(st.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<String>>(3)?,r.get::<_,bool>(4)?,r.get::<_,bool>(5)?,r.get::<_,bool>(6)?)))?.collect::<rusqlite::Result<Vec<_>>>()?)}).await?;
+                for(id,thread,state,error,had_status,stopped,declined)in rows {
                     if had_status && matches!(state.as_str(), "COMPLETED"|"RUNNING"|"APPROVAL_REQUIRED") {
                         let _=self.delivery.clear_status(&id,&thread).await?;
                         continue;
                     }
                     let message=match state.as_str(){
                         "FAILED"=>failure_message(error.as_deref()),
-                        "CANCELLED"=>"作業を中断しました。",
+                        "CANCELLED"=>interruption_with_evidence(error.as_deref(),stopped,declined),
                         "CANCEL_REQUESTED"=>"中断を要求しました。停止の確認を待っています。",
                         "UNKNOWN"=>"作業の状態を確認できません。再実行せず保留しています。/status で確認してください。",
                         _=>continue,
@@ -536,8 +538,15 @@ impl App {
     }
 }
 
-pub(crate) fn failure_message(code: Option<&str>) -> &'static str {
+pub fn failure_message(code: Option<&str>) -> &'static str {
     match code {
+        Some(
+            "unsupported_interaction"
+            | "unsupported_interaction_schema"
+            | "interaction_expired"
+            | "interaction_events_lost"
+            | "interaction_connection_lost",
+        ) => interruption_message(code),
         Some("proxy_busy") => {
             "Proxyが混み合っていたため開始できませんでした。少し待って、新しいメッセージとして依頼してください。この依頼は自動再送しません。"
         }
@@ -555,4 +564,51 @@ pub(crate) fn failure_message(code: Option<&str>) -> &'static str {
         }
         _ => "作業を完了できませんでした。/status で確認してください。",
     }
+}
+
+pub fn interruption_message(code: Option<&str>) -> &'static str {
+    match code {
+        Some("unsupported_interaction" | "unsupported_interaction_schema") => {
+            "必要な承認・入力画面に未対応のため実行できませんでした。利用者による拒否ではありません。"
+        }
+        Some("interaction_expired") => {
+            "承認・入力の期限が切れたため停止しました。利用者による拒否ではありません。"
+        }
+        Some("interaction_events_lost" | "interaction_connection_lost") => {
+            "実行側の接続・対話情報を失ったため停止しました。利用者による拒否ではありません。"
+        }
+        Some("user_stop" | "v2_stop_observed") => "停止操作により作業を中断しました。",
+        Some("mcp_user_declined") => {
+            "作業は中断しています。この依頼では、利用者によるMCP要求の拒否を送信済みです。"
+        }
+        _ => {
+            "作業は中断されていますが、理由を確定できません。利用者の拒否・停止とは断定していません。/status で確認してください。"
+        }
+    }
+}
+
+pub fn interruption_with_evidence(
+    code: Option<&str>,
+    stopped: bool,
+    declined: bool,
+) -> &'static str {
+    if matches!(
+        code,
+        Some(
+            "unsupported_interaction"
+                | "unsupported_interaction_schema"
+                | "interaction_expired"
+                | "interaction_events_lost"
+                | "interaction_connection_lost"
+        )
+    ) {
+        return interruption_message(code);
+    }
+    if stopped {
+        return interruption_message(Some("user_stop"));
+    }
+    if declined {
+        return interruption_message(Some("mcp_user_declined"));
+    }
+    interruption_message(code)
 }

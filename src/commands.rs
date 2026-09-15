@@ -40,8 +40,24 @@ impl App {
                             if jobs.len()>=10{continue;}
                             jobs.spawn(async move{
                                 let Some(id)=v["id"].as_str() else{return};let Some(token)=v["token"].as_str() else{return};let Some(application)=v["application_id"].as_str() else{return};
-                                let _=tokio::time::timeout(Duration::from_millis(2500),app.discord.acknowledge(id,token)).await;
+                                if v["data"]["custom_id"].as_str().is_some_and(|x|x.starts_with("mcp:")) {
+                                    if app.handle_mcp(&v).await.is_err(){tracing::warn!(event="mcp_ui_operation_failed");}
+                                    return;
+                                }
+                                let approval=v["type"]==3&&v["data"]["custom_id"].as_str().is_some_and(|x|x.starts_with("approval:"));
+                                if approval {
+                                    let _=tokio::time::timeout(Duration::from_millis(2500),app.discord.acknowledge_update(id,token)).await;
+                                } else {
+                                    let _=tokio::time::timeout(Duration::from_millis(2500),app.discord.acknowledge(id,token)).await;
+                                }
                                 let result=tokio::time::timeout(Duration::from_secs(45),app.command(&v,stop)).await;
+                                if approval {
+                                    // The approval UI worker owns the original card. Do not create a second success message.
+                                    if !matches!(result,Ok(Ok(_))) {
+                                        let _=app.discord.followup_error(application,token,"操作を完了確認できませんでした。元の承認カードで状態を確認してください。承認の自動再送はしません。").await;
+                                    }
+                                    return;
+                                }
                                 let text=match result{Ok(Ok(text))=>text,_=>"操作を完了確認できませんでした。/status で確認してください。実行要求の自動再送はしません。".into()};
                                 let components=app.project_menu(&v).await.unwrap_or(json!([]));
                                 let _=app.discord.reply_components(application,token,&text,components).await;
@@ -169,16 +185,21 @@ impl App {
                     .map(|r| r.state.as_str())
                     .unwrap_or("実行中なし");
                 let location = thread.to_owned();
-                let latest=self.store.call(false,move|c|{use rusqlite::OptionalExtension;Ok(c.query_row("SELECT state,error_code FROM requests WHERE thread_id=?1 ORDER BY sequence DESC LIMIT 1",[location],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?))).optional()?)}).await?;
+                let latest=self.store.call(false,move|c|{use rusqlite::OptionalExtension;Ok(c.query_row("SELECT state,error_code,stop_requested,EXISTS(SELECT 1 FROM mcp_interactions m WHERE m.request_id=requests.id AND m.action='decline' AND m.operation_state='succeeded') FROM requests WHERE thread_id=?1 ORDER BY sequence DESC LIMIT 1",[location],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,bool>(2)?,r.get::<_,bool>(3)?))).optional()?)}).await?;
                 let rejection = latest
-                    .filter(|(state, code)| {
-                        state == "FAILED"
-                            && code.as_deref().is_some_and(|c| c.starts_with("proxy_"))
-                    })
-                    .map(|(_, code)| {
+                    .filter(|(state, _, _, _)| matches!(state.as_str(), "FAILED" | "CANCELLED"))
+                    .map(|(state, code, stopped, declined)| {
                         format!(
                             "直前の依頼: {}\n",
-                            crate::application::failure_message(code.as_deref())
+                            if state == "CANCELLED" {
+                                crate::application::interruption_with_evidence(
+                                    code.as_deref(),
+                                    stopped,
+                                    declined,
+                                )
+                            } else {
+                                crate::application::failure_message(code.as_deref())
+                            }
                         )
                     })
                     .unwrap_or_default();
@@ -198,6 +219,28 @@ impl App {
                 };
                 let t = thread.to_owned();
                 let images:Vec<(String,i64)>=self.store.call(false,move|c|{let mut q=c.prepare("SELECT state,count(*) FROM generated_image_watches WHERE thread_id=?1 GROUP BY state")?;Ok(q.query_map([t],|r|Ok((r.get(0)?,r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?)}).await?;
+                let t = thread.to_owned();
+                let mcp:Vec<(String,i64)>=self.store.call(false,move|c|{let mut q=c.prepare("SELECT m.state,count(*) FROM mcp_interactions m JOIN requests r ON r.id=m.request_id WHERE r.thread_id=?1 AND (m.closed=0 OR m.state='unknown' OR m.operation_state IN ('SENDING','unknown')) GROUP BY m.state")?;Ok(q.query_map([t],|r|Ok((r.get(0)?,r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?)}).await?;
+                let mcp_status = if mcp.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "\nMCP承認・入力: {}",
+                        mcp.iter()
+                            .map(|(s, n)| format!(
+                                "{} {n}件",
+                                match s.as_str() {
+                                    "pending" => "回答待ち",
+                                    "sending" => "送信確認中",
+                                    "submitted" => "回答送信済み",
+                                    "unknown" => "結果不明",
+                                    _ => "照合中",
+                                }
+                            ))
+                            .collect::<Vec<_>>()
+                            .join(" / ")
+                    )
+                };
                 let image_status = if images.is_empty() {
                     String::new()
                 } else {
@@ -225,7 +268,7 @@ impl App {
                     ""
                 };
                 let text = format!(
-                    "{rejection}状態: {state}\n待機列: {}\n会話継続: {}\n選択モデル: {}\n実行モデル: {}\nProxy: {}\n確定回答と成果物はProxyの保存期限内に再取得します。{delivery_status}{image_status}{recovery_help}",
+                    "{rejection}状態: {state}\n待機列: {}\n会話継続: {}\n選択モデル: {}\n実行モデル: {}\nProxy: {}\n確定回答と成果物はProxyの保存期限内に再取得します。{delivery_status}{image_status}{mcp_status}{recovery_help}",
                     if cv.paused {
                         "停止中"
                     } else {

@@ -69,3 +69,13 @@ Approval cards show the purpose and operation in readable form. “Approve once�
 Discord’s native typing indicator shows that work is underway. Updates stop during approval waits, after completion, or when execution status is unknown; the indicator may remain visible for up to about 10 seconds. It indicates activity, not the model’s private reasoning.
 
 Intermediate text is a temporary preview. The final answer arrives as a new message at the bottom of the conversation, then the preview is removed. You do not need to search above approval cards for an edited answer.
+
+After you choose an approval button, the original card shows the result. A duplicate private confirmation is not posted.
+
+### When an MCP tool asks for confirmation
+
+The bot shows the server name and its request. Choose **今回許可 (Allow this request)** or **拒否 (Decline)**. This applies only to that request. A tool may ask for more information after you allow it.
+
+For a form, open **入力フォームを開く**, select a field, and choose **入力する**. Enter the displayed number for an enumerated choice, or はい / いいえ for a boolean. Extra text boxes can hold the rest of a long string. Choose **この内容で送信** when ready. Defaults are never filled automatically. Form screens are private; answers are not posted to the public conversation. Re-enter unfinished answers after a bot restart.
+
+Use `/stop` to stop the task. Expired or uncertain answers are never automatically approved or resent. Check the original card and `/status`. “Answer sent to MCP” confirms submission, not successful tool execution; the task result follows separately.

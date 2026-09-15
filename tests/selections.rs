@@ -46,7 +46,7 @@ async fn selections_survive_restart_but_reject_wrong_scope_generation_and_expiry
         codex_hoshikage_gateway::storage::validate_database(&path)
             .unwrap()
             .0,
-        5
+        6
     );
 }
 
@@ -56,7 +56,7 @@ async fn schema_two_upgrade_preserves_waiting_deliveries_and_queue() {
     let cfg = common::config(&tmp);
     let (store, _lock) = common::store(&cfg).await;
     let request = common::queued(&store, &cfg, "10").await;
-    store.call(true,|c|{c.execute_batch("DROP TABLE artifact_delivery_claims; ALTER TABLE resource_deliveries DROP COLUMN image_request_id; ALTER TABLE resource_deliveries DROP COLUMN image_ordinal; DROP TABLE generated_image_items; DROP TABLE generated_image_watches; DROP TABLE recovery_reviews; DROP TABLE selection_menus; ALTER TABLE resource_deliveries DROP COLUMN retry_of; ALTER TABLE resource_deliveries DROP COLUMN shared_workspace; ALTER TABLE resource_deliveries DROP COLUMN next_attempt_at; ALTER TABLE resource_deliveries DROP COLUMN attempts; DELETE FROM schema_migrations WHERE version>=3; UPDATE schema_meta SET schema_version=2;")?;Ok(())}).await.unwrap();
+    store.call(true,|c|{c.execute_batch("ALTER TABLE requests DROP COLUMN interaction_scan_done; DROP TABLE mcp_interactions; DROP TABLE artifact_delivery_claims; ALTER TABLE resource_deliveries DROP COLUMN image_request_id; ALTER TABLE resource_deliveries DROP COLUMN image_ordinal; DROP TABLE generated_image_items; DROP TABLE generated_image_watches; DROP TABLE recovery_reviews; DROP TABLE selection_menus; ALTER TABLE resource_deliveries DROP COLUMN retry_of; ALTER TABLE resource_deliveries DROP COLUMN shared_workspace; ALTER TABLE resource_deliveries DROP COLUMN next_attempt_at; ALTER TABLE resource_deliveries DROP COLUMN attempts; DELETE FROM schema_migrations WHERE version>=3; UPDATE schema_meta SET schema_version=2;")?;Ok(())}).await.unwrap();
     drop(store);
     let (store, _) = codex_hoshikage_gateway::storage::Store::open(&cfg).unwrap();
     assert!(store.request(&request).await.unwrap().dispatch_eligible);
@@ -65,7 +65,7 @@ async fn schema_two_upgrade_preserves_waiting_deliveries_and_queue() {
         codex_hoshikage_gateway::storage::validate_database(&store.path)
             .unwrap()
             .0,
-        5
+        6
     );
 }
 

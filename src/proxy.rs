@@ -132,6 +132,9 @@ impl Proxy {
             let caps = self.get("/v2/codex/capabilities").await?;
             crate::proxy_v2::validate(&caps)?;
             self.bind_v2(&caps).await?;
+            self.v2
+                .mcp_form
+                .store(crate::mcp_form::supported(&caps), Ordering::SeqCst);
             ensure!(
                 epoch == self.gate.epoch.load(Ordering::SeqCst),
                 "stale capability check"

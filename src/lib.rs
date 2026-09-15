@@ -30,3 +30,6 @@ pub mod generated_images;
 pub mod discord_permissions;
 
 pub mod approval_ui;
+
+pub mod mcp_form;
+pub mod mcp_ui;

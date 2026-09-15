@@ -128,3 +128,15 @@ Proxy側の実装完了前でもFake Proxyで独立して実装できる。実�
 承認発見処理はDB登録のみを行い、単一のapproval_uiタスクが3秒間隔で内容・期限・判断状況を再照会して同一カードを更新する。Proxyへの決定再送や会話作成は行わない。確定回答はanswer、途中表示はdraftの別配信キーとし、answer確認後に所有確認・送信結果照合を通してdraftを削除する。7秒間隔の独立typingタスクはSENDING/RUNNINGかつ承認待ちでない会話だけを対象とし、API失敗を実行失敗にせず、3秒で打ち切る。未対応の承認詳細を読めない場合は承認ボタンを出さない。
 
 Typing APIの表示寿命は10秒。仕様根拠: [Discord公式 Channels Resource](https://docs.discord.com/developers/resources/channel#trigger-typing-indicator)。
+
+承認コンポーネントはDiscordのDEFERRED_UPDATE_MESSAGE（type 6）で受け付け、承認UIタスクだけが元カードを更新する。正常時はinteraction返信を追加しない。失敗・タイムアウト時のみephemeral followupを送り、元カードを直接上書きしない。
+
+## MCPフォーム設計（2026-09-15追加）
+
+実行枠外のSupervisorタスクが1秒周期でResponseのinteractionsを照会する。mcp_interactions（schema 6）はProxy instance/世代/接続先、Response/会話/ワーク、interaction ID/revision、要求digest、期限、送信意思・操作キー・結果を保持する。要求本文・回答本文は保存しない。Bot再起動後は元カードを更新し、入力途中の回答だけは再入力とする。送信意思のある回答はoperationとinteractionの照会のみで復旧し、POSTを再送しない。
+
+承認文面は長文でも分割して省略せず表示し、すべての本文配信が確認できてから操作ボタンを出す。空フォームは今回許可/拒否。非空フォームは本人専用の項目一覧から入力し、最後に明示送信する。最大32項目をページ分けし、enumは最大64候補を番号で選択できる。長いstringは最大3入力欄に分けて結合し、8192 bytesとUnicode文字数の制約を検証する。defaultsは説明だけで自動採用しない。入力途中の値は期限付きメモリにのみ保持する。
+
+Discordのmodalは初回応答で開き、その他の入力操作はephemeral、空フォームの許可・拒否はdeferred updateで元カードのみ更新する。公式仕様: https://docs.discord.com/developers/interactions/receiving-and-responding 。実Discordの結合受入は利用者による許可/拒否操作と実MCPの結果照合を別途必要とする。
+
+Discord受信境界ではSerenityのInteraction列挙型から取得したkindをJSONのtypeへ明示的に保存する。Serenityの再シリアライズだけではtypeが落ちるため、生のDiscord JSONを直接渡すモックだけでは検証しない。ボタンとmodalの実ライブラリ往復を回帰試験に含める。MCP監視はschema 6導入以降の依頼または既存MCP記録がある依頼を対象とし、照会失敗は30秒間隔へ抑える。

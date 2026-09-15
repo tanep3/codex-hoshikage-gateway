@@ -15,7 +15,8 @@ use std::{
 };
 use tokio::sync::{mpsc, oneshot};
 
-pub const SCHEMA: i64 = 5;
+pub const SCHEMA: i64 = 6;
+pub const MIGRATION_V6: &str = include_str!("../migrations/006_interactions.sql");
 pub const MIGRATION_V5: &str = include_str!("../migrations/005_generated_images.sql");
 pub const MIGRATION_V4: &str = include_str!("../migrations/004_recovery_delivery.sql");
 pub const MIGRATION_V3: &str = include_str!("../migrations/003_delivery_controls.sql");
@@ -120,7 +121,7 @@ fn migrate_v2(c: &mut Connection, quarantine: bool) -> Result<()> {
     if version == SCHEMA {
         return Ok(());
     }
-    ensure!((1..=4).contains(&version), "unsupported schema migration");
+    ensure!((1..=5).contains(&version), "unsupported schema migration");
     if version == 1 {
         let tx = c.transaction()?;
         tx.execute_batch(MIGRATION_V2)?;
@@ -140,7 +141,12 @@ fn migrate_v2(c: &mut Connection, quarantine: bool) -> Result<()> {
         tx.execute("UPDATE schema_meta SET schema_version=2", [])?;
         tx.commit()?;
     }
-    for (target, sql) in [(3, MIGRATION_V3), (4, MIGRATION_V4), (5, MIGRATION_V5)] {
+    for (target, sql) in [
+        (3, MIGRATION_V3),
+        (4, MIGRATION_V4),
+        (5, MIGRATION_V5),
+        (6, MIGRATION_V6),
+    ] {
         if version >= target {
             continue;
         }
@@ -189,6 +195,7 @@ pub fn validate_database(path: &Path) -> Result<(i64, String)> {
         (3, MIGRATION_V3),
         (4, MIGRATION_V4),
         (5, MIGRATION_V5),
+        (6, MIGRATION_V6),
     ] {
         if v < version {
             continue;
@@ -459,9 +466,10 @@ impl Store {
         &self,
         id: String,
         next: RequestState,
-        reason: &'static str,
+        reason: &str,
         continuable: bool,
     ) -> Result<()> {
+        let reason = reason.to_owned();
         self.call(true,move|c|{
         let tx=c.transaction()?;let r=read_request(&tx,&id)?;
         if r.state.terminal(){
@@ -470,7 +478,7 @@ impl Store {
         }
         ensure!(r.state.allows(next),"illegal state transition");
         tx.execute("UPDATE requests SET state=?2,version=version+1,error_code=?3,updated_at=?4 WHERE id=?1",params![id,next.as_str(),reason,domain::now_ms()])?;
-        event(&tx,&id,Some(r.state.as_str()),next.as_str(),reason)?;
+        event(&tx,&id,Some(r.state.as_str()),next.as_str(),&reason)?;
         if next.terminal(){
             tx.execute("UPDATE holds SET released=1 WHERE request_id=?1",[&id])?;
             let cv=read_conversation(&tx,&r.thread_id)?;
