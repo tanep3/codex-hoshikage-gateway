@@ -46,6 +46,10 @@ async fn resolved_status_is_removed_without_posting_success_message() {
 async fn resolved_resource_notice_is_removed_without_reposting() {
     exercise_delivery("notice").await;
 }
+#[tokio::test]
+async fn reconciling_old_card_does_not_confirm_new_contents() {
+    exercise_delivery("mcp_summary").await;
+}
 async fn exercise_delivery(kind: &str) {
     let t = tempfile::tempdir().unwrap();
     let cfg = common::config(&t);
@@ -94,6 +98,15 @@ async fn exercise_delivery(kind: &str) {
             .await
             .unwrap()
     );
+    if kind == "mcp_summary" {
+        assert!(
+            !delivery
+                .text("request", "4", kind, 0, "新しい件数", json!([]))
+                .await
+                .unwrap(),
+            "Confirming the old POST must not acknowledge contents that were never sent"
+        );
+    }
     assert!(
         delivery
             .text("request", "4", kind, 0, "最初", json!([]))
@@ -107,6 +120,15 @@ async fn exercise_delivery(kind: &str) {
             .await
             .unwrap()
     );
+    if kind == "mcp_summary" {
+        assert!(
+            !delivery
+                .text("request", "4", kind, 0, "さらに新しい件数", json!([]))
+                .await
+                .unwrap(),
+            "Confirming an old PATCH must not acknowledge a newer revision"
+        );
+    }
     assert!(
         delivery
             .text("request", "4", kind, 0, "最初と続き", json!([]))
@@ -114,6 +136,24 @@ async fn exercise_delivery(kind: &str) {
             .unwrap()
     );
     assert_eq!(state.patches.load(Ordering::SeqCst), 1);
+    if kind == "mcp_summary" {
+        assert!(
+            !delivery
+                .text("request", "4", kind, 0, "さらに新しい件数", json!([]))
+                .await
+                .unwrap()
+        );
+        assert!(
+            delivery
+                .text("request", "4", kind, 0, "さらに新しい件数", json!([]))
+                .await
+                .unwrap()
+        );
+        assert_eq!(state.patches.load(Ordering::SeqCst), 2);
+        assert_eq!(state.posts.load(Ordering::SeqCst), 1);
+        server.abort();
+        return;
+    }
     // Final saved output can be shorter than streamed output. Delete only the
     // persisted, verified bot-owned surplus; repeated cleanup must not delete twice.
     if kind == "status" {

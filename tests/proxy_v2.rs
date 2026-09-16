@@ -184,7 +184,7 @@ async fn schema_one_upgrade_preserves_identity_and_quarantines_old_queue() {
     drop(store);
     let _ = done.await;
     let c = rusqlite::Connection::open(storage::db_path(&cfg)).unwrap();
-    c.execute_batch("ALTER TABLE requests DROP COLUMN interaction_scan_done; DROP TABLE mcp_interactions; DROP TABLE artifact_delivery_claims; ALTER TABLE resource_deliveries DROP COLUMN image_request_id; ALTER TABLE resource_deliveries DROP COLUMN image_ordinal; DROP TABLE generated_image_items; DROP TABLE generated_image_watches; DROP TABLE recovery_reviews; DROP TABLE selection_menus; DROP TABLE resource_deliveries; DROP TABLE remote_operations; DROP TABLE proxy_conversations; DROP TABLE proxy_binding; DELETE FROM schema_migrations WHERE version>=2; UPDATE schema_meta SET schema_version=1;").unwrap();
+    c.execute_batch("DROP TABLE mcp_inline_views; DROP TABLE mcp_inline_runs; DROP TABLE mcp_grant_revokes; DROP TABLE mcp_grant_records; DROP TABLE mcp_detail_views; DROP TABLE mcp_run_context; ALTER TABLE requests DROP COLUMN interaction_scan_done; DROP TABLE mcp_interactions; DROP TABLE artifact_delivery_claims; ALTER TABLE resource_deliveries DROP COLUMN image_request_id; ALTER TABLE resource_deliveries DROP COLUMN image_ordinal; DROP TABLE generated_image_items; DROP TABLE generated_image_watches; DROP TABLE recovery_reviews; DROP TABLE selection_menus; DROP TABLE resource_deliveries; DROP TABLE remote_operations; DROP TABLE proxy_conversations; DROP TABLE proxy_binding; DELETE FROM schema_migrations WHERE version>=2; UPDATE schema_meta SET schema_version=1;").unwrap();
     drop(c);
     let (store, _) = Store::open(&cfg).unwrap();
     assert!(!store.request(&id).await.unwrap().dispatch_eligible);
@@ -194,7 +194,10 @@ async fn schema_one_upgrade_preserves_identity_and_quarantines_old_queue() {
         "NEW_CONVERSATION_REQUIRED"
     );
     assert!(store.candidates().await.unwrap().is_empty());
-    assert_eq!(storage::validate_database(&store.path).unwrap().0, 6);
+    assert_eq!(
+        storage::validate_database(&store.path).unwrap().0,
+        storage::SCHEMA
+    );
 }
 
 #[tokio::test]

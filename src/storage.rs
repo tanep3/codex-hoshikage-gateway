@@ -15,7 +15,9 @@ use std::{
 };
 use tokio::sync::{mpsc, oneshot};
 
-pub const SCHEMA: i64 = 6;
+pub const SCHEMA: i64 = 8;
+pub const MIGRATION_V8: &str = include_str!("../migrations/008_mcp_inline.sql");
+pub const MIGRATION_V7: &str = include_str!("../migrations/007_mcp_turn_grants.sql");
 pub const MIGRATION_V6: &str = include_str!("../migrations/006_interactions.sql");
 pub const MIGRATION_V5: &str = include_str!("../migrations/005_generated_images.sql");
 pub const MIGRATION_V4: &str = include_str!("../migrations/004_recovery_delivery.sql");
@@ -121,7 +123,7 @@ fn migrate_v2(c: &mut Connection, quarantine: bool) -> Result<()> {
     if version == SCHEMA {
         return Ok(());
     }
-    ensure!((1..=5).contains(&version), "unsupported schema migration");
+    ensure!((1..=7).contains(&version), "unsupported schema migration");
     if version == 1 {
         let tx = c.transaction()?;
         tx.execute_batch(MIGRATION_V2)?;
@@ -146,6 +148,8 @@ fn migrate_v2(c: &mut Connection, quarantine: bool) -> Result<()> {
         (4, MIGRATION_V4),
         (5, MIGRATION_V5),
         (6, MIGRATION_V6),
+        (7, MIGRATION_V7),
+        (8, MIGRATION_V8),
     ] {
         if version >= target {
             continue;
@@ -196,6 +200,8 @@ pub fn validate_database(path: &Path) -> Result<(i64, String)> {
         (4, MIGRATION_V4),
         (5, MIGRATION_V5),
         (6, MIGRATION_V6),
+        (7, MIGRATION_V7),
+        (8, MIGRATION_V8),
     ] {
         if v < version {
             continue;

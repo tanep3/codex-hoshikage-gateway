@@ -40,6 +40,8 @@ impl App {
                             if jobs.len()>=10{continue;}
                             jobs.spawn(async move{
                                 let Some(id)=v["id"].as_str() else{return};let Some(token)=v["token"].as_str() else{return};let Some(application)=v["application_id"].as_str() else{return};
+                                if v["data"]["custom_id"].as_str().is_some_and(|x|x.starts_with("mi:")) {let _=app.handle_inline_mcp(&v).await;return;}
+                                if v["data"]["custom_id"].as_str().is_some_and(|x|x.starts_with("mt:")) {let _=app.handle_mcp_turn(&v).await;return;}
                                 if v["data"]["custom_id"].as_str().is_some_and(|x|x.starts_with("mcp:")) {
                                     if app.handle_mcp(&v).await.is_err(){tracing::warn!(event="mcp_ui_operation_failed");}
                                     return;
@@ -59,6 +61,7 @@ impl App {
                                     return;
                                 }
                                 let text=match result{Ok(Ok(text))=>text,_=>"操作を完了確認できませんでした。/status で確認してください。実行要求の自動再送はしません。".into()};
+                                if text.is_empty(){return;}
                                 let components=app.project_menu(&v).await.unwrap_or(json!([]));
                                 let _=app.discord.reply_components(application,token,&text,components).await;
                             });
@@ -304,6 +307,16 @@ impl App {
                     ),
                 )),
             },
+            "mcp" => {
+                self.latest_mcp_grants(
+                    thread,
+                    v["application_id"]
+                        .as_str()
+                        .context("application missing")?,
+                    v["token"].as_str().context("token missing")?,
+                )
+                .await
+            }
             "steer" => {
                 self.steer(iid, thread, option(v, "text").context("text required")?)
                     .await
@@ -564,6 +577,7 @@ pub(crate) fn is_text_control(text: &str) -> bool {
                 | "/get"
                 | "/workspace"
                 | "/retry"
+                | "/mcp"
         )
     )
 }

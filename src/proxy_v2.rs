@@ -22,6 +22,7 @@ pub struct V2State {
     pub binding: RwLock<Option<Binding>>,
     pub mcp_form: std::sync::atomic::AtomicBool,
     pub store: RwLock<Option<Store>>,
+    pub mcp_caps: RwLock<crate::mcp_grants::Capabilities>,
 }
 #[derive(Debug)]
 pub struct ApiError {
@@ -170,6 +171,22 @@ impl Proxy {
         key: Option<&str>,
         body: Option<&Value>,
     ) -> Result<Value> {
+        let limit =
+            if path.starts_with("/v2/codex/interactions/") && path.ends_with("/presentation") {
+                32768
+            } else if path.ends_with("/interactions") {
+                if self.v2.mcp_caps.read().unwrap().turn {
+                    64 * 1024 * 1024
+                } else {
+                    65536
+                }
+            } else if path.starts_with("/v2/codex/interactions/") {
+                262144
+            } else if path.ends_with("/mcp-grants") {
+                1048576
+            } else {
+                4 * 1024 * 1024
+            };
         ensure!(path.starts_with("/v2/codex/"), "invalid v2 endpoint");
         let mut request = self.bound(
             self.control
@@ -194,7 +211,7 @@ impl Proxy {
         let mut bytes = Vec::new();
         while let Some(chunk) = response.chunk().await.context("Proxy JSON read failure")? {
             ensure!(
-                bytes.len() + chunk.len() <= 4 * 1024 * 1024,
+                bytes.len() + chunk.len() <= limit,
                 "Proxy JSON exceeds limit"
             );
             bytes.extend_from_slice(&chunk);
@@ -353,7 +370,66 @@ impl Proxy {
         conversation: &str,
         input: Value,
     ) -> Result<Value> {
-        self.v2_json(Method::POST,&format!("/v2/codex/conversations/{}/responses",path_id(conversation)?),r.client_request_id.as_deref(),Some(&json!({"input":input,"model":r.model,"interaction_capabilities":if self.v2.mcp_form.load(std::sync::atomic::Ordering::SeqCst) {vec!["mcp_form"]}else{vec![]},"metadata":{"codex.approval_capability":"interactive","codex.auto_approve_workspace":"false"}}))).await
+        let mut body = json!({"input":input,"model":r.model,"interaction_capabilities":if self.v2.mcp_form.load(std::sync::atomic::Ordering::SeqCst) {vec!["mcp_form"]}else{vec![]},"metadata":{"codex.approval_capability":"interactive","codex.auto_approve_workspace":"false"}});
+        let caps = *self.v2.mcp_caps.read().unwrap();
+        let saved_store = self.v2.store.read().unwrap().clone();
+        if let Some(store) = saved_store {
+            let id = r.id.clone();
+            let declared: bool = store
+                .call(false, move |c| {
+                    Ok(c.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM mcp_inline_runs WHERE request_id=?1)",
+                        [id],
+                        |r| r.get(0),
+                    )?)
+                })
+                .await?;
+            ensure!(
+                !declared || (caps.inline && caps.details),
+                "inline capability changed after declaration"
+            );
+        }
+        if caps.details || caps.turn {
+            let store = self
+                .v2
+                .store
+                .read()
+                .unwrap()
+                .clone()
+                .context("context store missing")?;
+            let id = r.id.clone();
+            let context=store.call(false,move|c|Ok(c.query_row("SELECT principal_id,channel_id,run_id FROM mcp_run_context WHERE request_id=?1",[id],|row|Ok(json!({"principal_id":row.get::<_,String>(0)?,"channel_id":row.get::<_,String>(1)?,"run_id":row.get::<_,String>(2)?}))).optional()?)).await?;
+            if let Some(context) = context {
+                body["approval_context"] = context;
+            }
+            let id = r.id.clone();
+            let inline: bool = store
+                .call(false, move |c| {
+                    Ok(c.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM mcp_inline_runs WHERE request_id=?1)",
+                        [id],
+                        |r| r.get(0),
+                    )?)
+                })
+                .await?;
+            if inline {
+                ensure!(
+                    caps.inline && caps.details,
+                    "inline approval capability changed"
+                );
+                body["approval_presentation"] = json!({"mode":"source_conversation"});
+            }
+        }
+        self.v2_json(
+            Method::POST,
+            &format!(
+                "/v2/codex/conversations/{}/responses",
+                path_id(conversation)?
+            ),
+            r.client_request_id.as_deref(),
+            Some(&body),
+        )
+        .await
     }
 }
 

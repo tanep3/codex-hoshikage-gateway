@@ -6,7 +6,7 @@ use axum::{
 };
 use codex_hoshikage_gateway::{
     application::App,
-    approval_ui::approval_description,
+    approval_ui::{approval_can_accept, approval_description},
     discord::{Discord, Incoming},
     domain::RequestState,
     proxy::Proxy,
@@ -53,7 +53,7 @@ async fn approval_updates_in_place_and_typing_pauses_until_decision() {
     let router=Router::new()
       .route("/channels/4",get(||async{Json(json!({"id":"4","guild_id":"1","type":0}))}))
       .route("/channels/4/typing",post(move||{let t=t.clone();async move{t.fetch_add(1,Ordering::SeqCst);StatusCode::NO_CONTENT}}))
-      .route("/v1/codex/approvals/approval_a",get(move||{let a=a.clone();async move{Json(json!({"id":"approval_a","state":if a.load(Ordering::SeqCst)>0{"approved"}else{"pending"},"reply_status":if a.load(Ordering::SeqCst)>0{"written"}else{"not_sent"},"available_decisions":["accept","cancel"],"details":{"kind":"command","reason":"スキルを更新します","command":"cp stage skills","threadId":"thread_a","turnId":"turn_a"}}))}}).post(move|Json(v):Json<Value>|{let b=b.clone();async move{assert_eq!(v["expected_thread_id"],"thread_a");assert_eq!(v["expected_turn_id"],"turn_a");assert_eq!(v["decision"],"accept");b.fetch_add(1,Ordering::SeqCst);Json(json!({"reply_status":"written"}))}}))
+      .route("/v1/codex/approvals/approval_a",get(move||{let a=a.clone();async move{Json(json!({"id":"approval_a","state":if a.load(Ordering::SeqCst)>0{"approved"}else{"pending"},"reply_status":if a.load(Ordering::SeqCst)>0{"written"}else{"not_sent"},"available_decisions":["accept","cancel"],"details":{"reason":null,"grantRoot":null,"paths":["skills/reset/SKILL.md"],"threadId":"thread_a","turnId":"turn_a"}}))}}).post(move|Json(v):Json<Value>|{let b=b.clone();async move{assert_eq!(v["expected_thread_id"],"thread_a");assert_eq!(v["expected_turn_id"],"turn_a");assert_eq!(v["decision"],"accept");b.fetch_add(1,Ordering::SeqCst);Json(json!({"reply_status":"written"}))}}))
       .route("/channels/4/messages",post(move|Json(mut v):Json<Value>|{let c=c.clone();async move{v["id"]=json!("100");v["channel_id"]=json!("4");c.lock().unwrap().push(v.clone());Json(v)}}))
       .route("/channels/4/messages/100",axum::routing::patch(move|Json(mut v):Json<Value>|{let p=p.clone();async move{v["id"]=json!("100");v["channel_id"]=json!("4");p.lock().unwrap().push(v.clone());Json(v)}}))
       .route("/interactions/{id}/token/callback",post(move|Json(v):Json<Value>|{let reply=reply.clone();async move{assert_eq!(v,json!({"type":6}));reply.fetch_add(1,Ordering::SeqCst);StatusCode::NO_CONTENT}}))
@@ -163,4 +163,28 @@ async fn approval_updates_in_place_and_typing_pauses_until_decision() {
     job.await.unwrap().unwrap();
     assert_eq!(extra_messages.load(Ordering::SeqCst), 0);
     server.abort();
+}
+
+#[test]
+fn file_paths_approval_uses_real_proxy_shape_and_consistent_instructions() {
+    let mut v = json!({"available_decisions":["accept","accept_for_session","decline","cancel"],"details":{"paths":["src/main.rs"],"grantRoot":null,"reason":null,"itemId":"item_a","threadId":"thread_a","turnId":"turn_a"}});
+    assert!(approval_can_accept(&v));
+    let text = approval_description(&v);
+    assert!(text.contains("ファイル変更の許可"));
+    assert!(text.contains("src/main.rs"));
+    assert!(text.contains("今回のみ承認"));
+    for paths in [json!([]), json!([""]), json!([null]), json!(["ok", 1])] {
+        v["details"]["paths"] = paths;
+        assert!(!approval_can_accept(&v));
+        let text = approval_description(&v);
+        assert!(!text.contains("「今回のみ承認」は"));
+        assert!(text.contains("運用者"));
+    }
+    v["details"]["paths"] = json!(["src/main.rs"]);
+    v["details"]["grantRoot"] = json!("/additional-scope");
+    assert!(!approval_can_accept(&v));
+    v["details"]["grantRoot"] = Value::Null;
+    v["available_decisions"] = json!(["decline", "cancel"]);
+    assert!(!approval_can_accept(&v));
+    assert!(!approval_description(&v).contains("「今回のみ承認」は"));
 }

@@ -4,39 +4,79 @@ use anyhow::{Result, ensure};
 use serde_json::{Value, json};
 use std::{sync::atomic::Ordering, time::Duration};
 
+fn approval_paths(d: &Value) -> Option<Vec<&str>> {
+    // A grant root extends the approval scope; do not infer it from file paths.
+    if !d["grantRoot"].is_null() {
+        return None;
+    }
+    if let Some(changes) = d["changes"].as_object() {
+        let paths: Vec<_> = changes.keys().map(String::as_str).collect();
+        return (!paths.is_empty() && paths.iter().all(|p| !p.trim().is_empty())).then_some(paths);
+    }
+    let paths: Vec<_> = d["paths"]
+        .as_array()?
+        .iter()
+        .map(Value::as_str)
+        .collect::<Option<_>>()?;
+    (!paths.is_empty() && paths.iter().all(|p| !p.trim().is_empty())).then_some(paths)
+}
+
+pub fn approval_can_accept(view: &Value) -> bool {
+    let d = &view["details"];
+    let described =
+        d["command"].as_str().is_some_and(|s| !s.trim().is_empty()) || approval_paths(d).is_some();
+    described
+        && view["available_decisions"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|v| v == "accept"))
+}
+
 pub fn approval_description(view: &Value) -> String {
     let d = &view["details"];
     let title = match d["kind"].as_str() {
         Some("command") => "コマンドの実行許可",
         Some("file_change") => "ファイル変更の許可",
+        _ if approval_paths(d).is_some() => "ファイル変更の許可",
         _ => "操作の実行許可",
     };
     let mut lines = vec![format!("**{title}が必要です**")];
     if let Some(reason) = d["reason"].as_str().filter(|s| !s.trim().is_empty()) {
         lines.push(format!("目的：{}", safe_text(reason, 500)));
     }
-    if let Some(command) = d["command"].as_str() {
+    if let Some(command) = d["command"].as_str().filter(|s| !s.trim().is_empty()) {
         lines.push(format!(
             "実行する内容：\n```text\n{}\n```",
             safe_text(command, 950)
         ));
-    } else if let Some(changes) = d["changes"].as_object() {
+    } else if let Some(paths) = approval_paths(d) {
         lines.push(format!(
             "対象ファイル：\n{}",
-            changes
-                .keys()
+            paths
+                .iter()
                 .take(8)
                 .map(|p| format!("• {}", safe_text(p, 100)))
                 .collect::<Vec<_>>()
                 .join("\n")
         ));
+        if paths.len() > 8 {
+            lines.push(format!(
+                "ほか{}件は省略しています。全対象を確認できない場合は取消してください。",
+                paths.len() - 8
+            ));
+        }
     } else {
         lines.push(
-            "具体的な操作内容を取得できません。内容が分からない場合は承認せず、取消してください。"
+            "操作内容・許可範囲を確認できないため、承認ボタンを表示していません。「取消」でこの要求を取り消し、このメッセージを運用者へ伝えてください。"
                 .into(),
         );
     }
-    lines.push("「今回のみ承認」は、この操作だけを許可します。以後の操作を自動承認する設定には変えません。".into());
+    if approval_can_accept(view) {
+        lines.push("「今回のみ承認」は、この操作だけを許可します。以後の操作を自動承認する設定には変えません。".into());
+    } else if approval_paths(d).is_some()
+        || d["command"].as_str().is_some_and(|s| !s.trim().is_empty())
+    {
+        lines.push("この要求では今回のみの承認を選べません。「取消」で取り消し、運用者へ確認してください。".into());
+    }
     lines.join("\n\n")
 }
 fn safe_text(s: &str, limit: usize) -> String {
@@ -117,10 +157,7 @@ impl App {
                             ("decline", "拒否", 4),
                             ("cancel", "取消", 2),
                         ] {
-                            if decision == "accept"
-                                && v["details"]["command"].as_str().is_none()
-                                && v["details"]["changes"].as_object().is_none()
-                            {
+                            if decision == "accept" && !approval_can_accept(&v) {
                                 continue;
                             }
                             if v["available_decisions"]

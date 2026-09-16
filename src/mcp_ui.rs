@@ -16,19 +16,19 @@ pub struct Draft {
     pub answers: Map<String, Value>,
 }
 #[derive(Clone)]
-struct Record {
-    id: String,
-    remote: String,
-    request: String,
-    response: String,
-    conversation: String,
-    workspace: String,
-    binding: Binding,
-    revision: i64,
-    digest: String,
-    expires: i64,
-    key: Option<String>,
-    action: Option<String>,
+pub(crate) struct Record {
+    pub(crate) id: String,
+    pub(crate) remote: String,
+    pub(crate) request: String,
+    pub(crate) response: String,
+    pub(crate) conversation: String,
+    pub(crate) workspace: String,
+    pub(crate) binding: Binding,
+    pub(crate) revision: i64,
+    pub(crate) digest: String,
+    pub(crate) expires: i64,
+    pub(crate) key: Option<String>,
+    pub(crate) action: Option<String>,
 }
 const SELECT: &str = "SELECT id,interaction_id,request_id,response_id,conversation_id,workspace_id,instance_id,generation,base_url,revision,request_digest,expires_at,operation_key,action FROM mcp_interactions WHERE id=?1";
 fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Record> {
@@ -71,8 +71,36 @@ fn clean(s: &str) -> String {
 fn short(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
+/// Existing contract supplies confirmation prose, not verified tool-call arguments.
+/// Never extract a tool identity or infer read-only permission from this prose.
+pub fn confirmation_description(form: &Value) -> Result<String> {
+    let server = form["serverName"].as_str().context("server missing")?;
+    let message = form["message"].as_str().context("message missing")?;
+    let is_tool = form["_meta"]["codex_approval_kind"] == "mcp_tool_call";
+    let mut text = format!(
+        "{}\nサーバー: {}\n\nMCPからの確認（原文）：\n{}",
+        if is_tool {
+            "MCPツールの実行許可が必要です"
+        } else {
+            "MCPから入力・確認が届きました"
+        },
+        clean(server),
+        clean(message)
+    );
+    if is_tool {
+        text.push_str("\n\nこの確認原文とは別に、実際の引数・実行コードを照合できる情報は取得できていません。ツール名が同じでも操作内容は変わります。内容が分からない場合は「拒否」を選び、作業全体を止める場合は /stop を使ってください。");
+    }
+    for key in ["title", "description"] {
+        if let Some(value) = form["requestedSchema"].get(key) {
+            text.push('\n');
+            text.push_str(&clean(&mcp_form::display(value)));
+        }
+    }
+    Ok(text)
+}
+
 impl App {
-    async fn mcp_record(&self, id: &str) -> Result<Record> {
+    pub(crate) async fn mcp_record(&self, id: &str) -> Result<Record> {
         let id = id.to_owned();
         self.store
             .call(false, move |c| Ok(c.query_row(SELECT, [id], row)?))
@@ -110,7 +138,12 @@ impl App {
         );
         Ok(v)
     }
-    async fn mcp_pending(&self, r: &Record, thread: &str, revision: i64) -> Result<Value> {
+    pub(crate) async fn mcp_pending(
+        &self,
+        r: &Record,
+        thread: &str,
+        revision: i64,
+    ) -> Result<Value> {
         self.authorized_thread(thread).await?;
         let req = self.store.request(&r.request).await?;
         ensure!(
@@ -221,12 +254,21 @@ impl App {
                 if self.authorized_thread(&r.thread_id).await.is_err() {
                     continue;
                 }
+                if !blocked
+                    && binding.as_ref() == Some(&rec.binding)
+                    && !self.recovery.load(Ordering::SeqCst)
+                    && self.mcp_compaction_ready(&rec.id).await?
+                {
+                    self.compact_resolved_mcp(&rec, &r.thread_id).await?;
+                    continue;
+                }
                 self.close_mcp(&rec,&r.thread_id,"この承認・入力は期限切れ、作業終了、または復旧確認中のため操作できません。送信済みの回答は自動再送しません。").await?;
             }
         }
         Ok(())
     }
     pub async fn scan_mcp(&self, id: &str) -> Result<()> {
+        let _scan = self.mcp_scan_lock.lock().await;
         let s = self.settings().await;
         let r = self.store.request(id).await?;
         self.authorized_thread(&r.thread_id).await?;
@@ -258,7 +300,12 @@ impl App {
             .as_array()
             .context("interaction list invalid")?;
         ensure!(
-            data.len() <= 16 && serde_json::to_vec(&list)?.len() <= 65536,
+            data.len()
+                <= if s.proxy.v2.mcp_caps.read().unwrap().turn {
+                    256
+                } else {
+                    16
+                },
             "interaction list oversized"
         );
         for v in data {
@@ -353,8 +400,91 @@ impl App {
         }
         Ok(())
     }
+    async fn mcp_compaction_ready(&self, id: &str) -> Result<bool> {
+        let id = id.to_owned();
+        self.store.call(false, move |c| Ok(c.query_row(
+            "SELECT coalesce(state='resolved' AND action='accept' AND operation_state='succeeded',0) FROM mcp_interactions WHERE id=?1",
+            [id], |r| r.get(0))?)).await
+    }
+
+    async fn compact_resolved_mcp(&self, rec: &Record, thread: &str) -> Result<()> {
+        // A previously closed UNKNOWN card may now have a verified resolution.
+        // Keep recovery polling until the entire UI cleanup is confirmed.
+        let local_id = rec.id.clone();
+        self.store
+            .call(true, move |c| {
+                c.execute(
+                    "UPDATE mcp_interactions SET closed=0 WHERE id=?1",
+                    [local_id],
+                )?;
+                Ok(())
+            })
+            .await?;
+        // A restart may find partially deleted cards; never recreate those cards.
+        let local_id = rec.id.clone();
+        let deleting: bool = self.store.call(false, move |c| Ok(c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM deliveries WHERE target_id=?1 AND kind IN ('mcp_description','mcp_action') AND state IN ('DELETE_PENDING','DELETED'))",
+            [local_id], |r| r.get(0))?)).await?;
+        // First remove all actionable controls. An uncertain PATCH blocks cleanup.
+        if !deleting
+            && !self
+                .delivery
+                .text(
+                    &rec.id,
+                    thread,
+                    "mcp_action",
+                    0,
+                    "この確認への回答を送りました。作業結果は続く回答で確認してください。",
+                    json!([]),
+                )
+                .await?
+        {
+            return Ok(());
+        }
+        let request = rec.request.clone();
+        let count: i64 = self.store.call(false, move |c| Ok(c.query_row(
+            "SELECT count(*) FROM mcp_interactions WHERE request_id=?1 AND state='resolved' AND action='accept' AND operation_state='succeeded'",
+            [request], |r| r.get(0))?)).await?;
+        let summary = format!(
+            "この作業のMCP確認への回答：{count}件を送信済み。\nこれは確認への回答記録です。ツールの実行結果は続く回答で確認してください。"
+        );
+        if !self
+            .delivery
+            .text(&rec.request, thread, "mcp_summary", 0, &summary, json!([]))
+            .await?
+        {
+            return Ok(());
+        }
+        if !self.delivery.clear_mcp_cards(&rec.id, thread).await? {
+            return Ok(());
+        }
+        let id = rec.id.clone();
+        self.store
+            .call(true, move |c| {
+                c.execute("UPDATE mcp_interactions SET closed=1 WHERE id=?1", [id])?;
+                Ok(())
+            })
+            .await?;
+        self.mcp_drafts.lock().await.remove(&rec.id);
+        Ok(())
+    }
+
     async fn render_mcp(&self, id: &str, v: &Value) -> Result<()> {
         let rec = self.mcp_record(id).await?;
+        let local_id = id.to_owned();
+        let closed: bool = self
+            .store
+            .call(false, move |c| {
+                Ok(c.query_row(
+                    "SELECT closed AND EXISTS(SELECT 1 FROM deliveries WHERE target_id=mcp_interactions.id AND kind='mcp_action' AND state='DELETED') FROM mcp_interactions WHERE id=?1",
+                    [local_id],
+                    |r| r.get(0),
+                )?)
+            })
+            .await?;
+        if closed {
+            return Ok(());
+        }
         let req = self.store.request(&rec.request).await?;
         let s = self.settings().await;
         ensure!(
@@ -393,6 +523,9 @@ impl App {
                     Ok(())
                 })
                 .await?;
+        }
+        if self.mcp_compaction_ready(id).await? {
+            return self.compact_resolved_mcp(&rec, &req.thread_id).await;
         }
         if state != "pending"
             || req.state.terminal()
@@ -437,26 +570,16 @@ impl App {
         );
         let form = &v["request"];
         let valid = mcp_form::validate_schema(&form["requestedSchema"]);
-        let text = self.redact(
-            &s,
-            &clean(&format!(
-                "MCPから確認が届きました\nサーバー: {}\n\n{}",
-                form["serverName"].as_str().context("server missing")?,
-                form["message"].as_str().context("message missing")?
-            )),
-        );
-        let text = format!(
-            "{text}{}{}",
-            form["requestedSchema"]
-                .get("title")
-                .map(|v| format!("\n{}", clean(&mcp_form::display(v))))
-                .unwrap_or_default(),
-            form["requestedSchema"]
-                .get("description")
-                .map(|v| format!("\n{}", clean(&mcp_form::display(v))))
-                .unwrap_or_default()
-        );
-        let text = self.redact(&s, &text);
+        let detailed = s.proxy.v2.mcp_caps.read().unwrap().details
+            && form["_meta"]["codex_approval_kind"] == "mcp_tool_call";
+        if detailed && self.has_inline_run(&rec.request).await? {
+            return self.render_inline_mcp(&rec, &req.thread_id).await;
+        }
+        let text = if detailed {
+            "MCP操作の確認が必要です。操作内容は本人限定画面で確認してください。".to_owned()
+        } else {
+            self.redact(&s, &confirmation_description(form)?)
+        };
         for (n, t) in chunks(&text).iter().enumerate() {
             if !self
                 .delivery
@@ -491,14 +614,26 @@ impl App {
             .unwrap()
             .is_empty();
         let prefix = format!("mcp:{id}:{}", rec.revision);
-        let buttons = json!([{"type":1,"components":[button(&format!("{prefix}:{}",if empty{"accept"}else{"form"}),if empty{"今回許可"}else{"入力フォームを開く"},if empty{3}else{1}),button(&format!("{prefix}:decline"),"拒否",4)]}]);
+        let buttons = if detailed {
+            let controls = vec![
+                button(
+                    &format!("mt:details:{id}:{}", rec.revision),
+                    "操作内容を確認",
+                    1,
+                ),
+                button(&format!("{prefix}:decline"), "拒否", 4),
+            ];
+            json!([{"type":1,"components":controls}])
+        } else {
+            json!([{"type":1,"components":[button(&format!("{prefix}:{}",if empty{"accept"}else{"form"}),if empty{"今回だけ許可"}else{"入力フォームを開く"},if empty{3}else{1}),button(&format!("{prefix}:decline"),"拒否",4)]}])
+        };
         self.delivery
             .text(
                 id,
                 &req.thread_id,
                 "mcp_action",
                 0,
-                "今回の要求だけが対象です。自動許可・包括許可はしません。",
+                "内容を確認してから選んでください。「今回だけ許可」はこの1件のみで、次の呼出しには引き継ぎません。",
                 buttons,
             )
             .await?;
@@ -512,13 +647,70 @@ impl App {
         action: &str,
         answers: Map<String, Value>,
     ) -> Result<()> {
+        self.mcp_reply_scoped(id, thread, revision, action, answers, None)
+            .await
+    }
+    pub(crate) async fn mcp_reply_scoped(
+        &self,
+        id: &str,
+        thread: &str,
+        revision: i64,
+        action: &str,
+        answers: Map<String, Value>,
+        scope: Option<(String, bool)>,
+    ) -> Result<()> {
+        self.mcp_reply_with_view(id, thread, revision, action, answers, scope, None)
+            .await
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn mcp_reply_with_view(
+        &self,
+        id: &str,
+        thread: &str,
+        revision: i64,
+        action: &str,
+        answers: Map<String, Value>,
+        scope: Option<(String, bool)>,
+        presentation: Option<crate::mcp_inline::Receipt>,
+    ) -> Result<()> {
         ensure!(matches!(action, "accept" | "decline"), "invalid action");
         let rec = self.mcp_record(id).await?;
         let v = self.mcp_pending(&rec, thread, revision).await?;
+        if action == "accept"
+            && scope.is_none()
+            && self
+                .settings()
+                .await
+                .proxy
+                .v2
+                .mcp_caps
+                .read()
+                .unwrap()
+                .details
+            && v["request"]["_meta"]["codex_approval_kind"] == "mcp_tool_call"
+        {
+            anyhow::bail!("操作内容を確認する画面から許可してください");
+        }
         if action == "accept" {
             mcp_form::validate_answers(&v["request"]["requestedSchema"], &answers)?;
         }
-        let body = json!({"expected_revision":revision,"response":{"action":action,"content":if action=="accept"{Value::Object(answers)}else{Value::Null}}});
+        let mut body = json!({"expected_revision":revision,"response":{"action":action,"content":if action=="accept"{Value::Object(answers)}else{Value::Null}}});
+        let grant_scope = if scope.as_ref().is_some_and(|(_, turn)| *turn) {
+            Some("turn_tool".to_owned())
+        } else {
+            None
+        };
+        if let Some((fp, turn)) = scope {
+            body["expected_scope_fingerprint"] = json!(fp);
+            if turn {
+                body["grant_scope"] = json!("turn_tool");
+            }
+        }
+        if let Some(token) = presentation.as_ref() {
+            ensure!(action == "accept", "presentation only for acceptance");
+            body["approval_view"] = json!("source_conversation");
+            body["expected_presentation_fingerprint"] = json!(token.token);
+        }
         ensure!(
             serde_json::to_vec(&body)?.len() <= 65536,
             "回答全体がProxyの容量上限を超えています"
@@ -535,7 +727,8 @@ impl App {
       ensure!(matches!(state.as_str(),"RUNNING"|"APPROVAL_REQUIRED")&&!stop,"停止または終了済みです");
       let current:(String,String,String,bool)=tx.query_row("SELECT instance_id,generation,base_url,blocked FROM proxy_binding",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
       ensure!(current==(r.binding.instance_id,r.binding.generation,r.binding.base_url,false),"Proxyの世代が変わりました");
-      ensure!(tx.execute("UPDATE mcp_interactions SET operation_key=?2,operation_state='SENDING',reply_digest=?3,action=?4 WHERE id=?1 AND operation_key IS NULL AND closed=0 AND state='pending' AND revision=?5 AND expires_at>?6",params![r.id,k,hash,a,revision,domain::now_ms()])?==1,"回答済みまたは失効済みです");tx.commit()?;Ok(())
+      if let Some(receipt)=presentation.as_ref(){let valid:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM mcp_inline_views v JOIN deliveries d ON d.target_id=v.interaction_local_id WHERE v.interaction_local_id=?1 AND v.fingerprint=?2 AND v.active=1 AND v.expires_at>?3 AND d.kind='mcp_action' AND d.part=0 AND d.state='CONFIRMED' AND d.message_id=?4 AND d.confirmed_digest=?5)",params![r.id,receipt.token,domain::now_ms(),receipt.message_id,receipt.card_digest],|r|r.get(0))?;ensure!(valid,"表示が失効しました");}
+      ensure!(tx.execute("UPDATE mcp_interactions SET operation_key=?2,operation_state='SENDING',reply_digest=?3,action=?4,grant_scope=?7 WHERE id=?1 AND operation_key IS NULL AND closed=0 AND state='pending' AND revision=?5 AND expires_at>?6",params![r.id,k,hash,a,revision,domain::now_ms(),grant_scope])?==1,"回答済みまたは失効済みです");tx.commit()?;Ok(())
     }).await?;
         self.mcp_drafts.lock().await.remove(id);
         let s = self.settings().await;
@@ -692,7 +885,13 @@ impl App {
         }
         Ok(())
     }
-    async fn mcp_private(&self, app: &str, token: &str, text: &str, controls: Value) -> Result<()> {
+    pub(crate) async fn mcp_private(
+        &self,
+        app: &str,
+        token: &str,
+        text: &str,
+        controls: Value,
+    ) -> Result<()> {
         let parts = chunks(text);
         for (i, t) in parts.iter().enumerate() {
             if i == 0 {

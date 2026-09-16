@@ -228,6 +228,10 @@ async fn exercise_delivery(partial: bool) {
     })
     .await
     .unwrap();
+    // The resource worker also updates image progress. Wait for that update to
+    // finish before checking the final notice, not an intermediate write.
+    restored.cancel.cancel();
+    worker.await.unwrap().unwrap();
     restored.image_progress(&id).await.unwrap();
     assert_eq!(posts.load(Ordering::SeqCst), 1);
     let i = id.clone();
@@ -258,8 +262,6 @@ async fn exercise_delivery(partial: bool) {
             .await
             .unwrap();
     }
-    restored.cancel.cancel();
-    worker.await.unwrap().unwrap();
     server.abort();
 }
 

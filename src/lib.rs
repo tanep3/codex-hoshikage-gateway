@@ -33,3 +33,7 @@ pub mod approval_ui;
 
 pub mod mcp_form;
 pub mod mcp_ui;
+
+pub mod mcp_grants;
+
+pub mod mcp_inline;

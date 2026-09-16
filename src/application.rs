@@ -35,6 +35,7 @@ pub struct App {
     pub config_mutation: Arc<Mutex<()>>,
     pub(crate) resource_mutation: Arc<RwLock<()>>,
     pub(crate) pending_projects: Arc<Mutex<HashMap<String, crate::projects::PendingProject>>>,
+    pub(crate) mcp_scan_lock: Arc<Mutex<()>>,
     pub(crate) mcp_drafts: Arc<Mutex<HashMap<String, crate::mcp_ui::Draft>>>,
     pub store: Store,
     pub discord: Discord,
@@ -71,6 +72,7 @@ impl App {
         let cfg = cfg.with_registered_projects(&store.path)?;
         let workspaces = cfg.validate()?;
         Ok(Self {
+            mcp_scan_lock: Arc::new(Mutex::new(())),
             mcp_drafts: Arc::new(Mutex::new(HashMap::new())),
             config_mutation: Arc::new(Mutex::new(())),
             resource_mutation: Arc::new(RwLock::new(())),
@@ -279,6 +281,7 @@ impl App {
             .ensure_conversation_v2(&self.store, &r.thread_id)
             .await?;
         let permit = s.proxy.authorize(r.id.clone(), s.revision).await?;
+        self.prepare_mcp_context(&r, &s).await?;
         self.dispatching.lock().unwrap().insert(r.id.clone());
         let _dispatch = DispatchGuard {
             ids: self.dispatching.clone(),

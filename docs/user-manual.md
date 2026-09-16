@@ -2,7 +2,20 @@
 
 [日本語](user-manual.ja.md) · [Installation](installation.md)
 
-This guide targets API v2. API v2 integration is implemented and acceptance testing is in progress; see [implementation status (Japanese)](implementation-status.ja.md). This is not a production rollout guide.
+This manual is for people using an already configured Bot in Discord. If you are installing the Bot or setting up keys, start with the [installation guide](installation.md).
+
+## Try your first conversation
+
+1. Open the Discord server containing the Bot and enter a text channel, or open a forum post.
+2. Send “Hello, what can you help me with?” If the Bot responds only to mentions, type `@`, select the Bot, and include your message.
+3. Continue chatting after its reply. You do not need a new-conversation command or a server working-directory path.
+4. If it does not respond, type `/`, select this Bot's `/status` command, and read its guidance. Share the result with your administrator if the issue persists.
+
+Only the user allowed by the administrator can operate the Bot. Silence in response to other members is not necessarily an error. Conversation messages remain visible to people who can view that channel.
+
+### Using commands
+
+Notation such as `/model id:MODEL_ID` shows a command and its input field. Choose `/model` from Discord's suggestions, then enter the value in its `id` field. Do not enter the literal text `MODEL_ID`. For an easier model selection, use `/model` without an argument to open the menu.
 
 ## Start a conversation
 
@@ -14,7 +27,6 @@ The administrator chooses whether the Bot responds to all authorized posts or on
 
 | Command | Purpose |
 | --- | --- |
-| `/new title:NAME` | Start a new thread or forum post |
 | `/workspace` | Choose a shared workspace before starting a conversation (optional) |
 | `/retry` | Select a saved reply/file and confirm redelivery |
 | `/get scope:shared` | Explicitly list artifacts from the shared workspace |
@@ -25,6 +37,8 @@ The administrator chooses whether the Bot responds to all authorized posts or on
 | `/steer text:INSTRUCTION` | Add an instruction to the current Turn; ordinary messages queue the next request |
 | `/stop` | Pause the queue and stop the accepted request, including before Turn start |
 | `/resume` | Resume the queue, without rerunning a cancelled request |
+| `/new title:NAME` | Start a new thread or forum post |
+| `/mcp` | Inspect/revoke MCP permissions for this task. Use `/stop` to stop the whole task |
 
 Stop acceptance and confirmed termination are different. The Bot reports uncertainty rather than claiming success. When approval is required, inspect the target and details before using the approval buttons.
 
@@ -74,7 +88,9 @@ After you choose an approval button, the original card shows the result. A dupli
 
 ### When an MCP tool asks for confirmation
 
-The bot shows the server name and its request. Choose **今回許可 (Allow this request)** or **拒否 (Decline)**. This applies only to that request. A tool may ask for more information after you allow it.
+MCP lets Codex use external tools such as browsers. Permission here means allowing a tool operation; it is separate from signing in.
+
+The bot shows the operation and available choices. **今回だけ許可 (Allow this call only)** permits the displayed call once. Eligible tools also offer **この依頼中、このツールを許可 (Allow this tool during this request)**; see “Repeated MCP confirmations” below for its scope. A tool may ask for more information after you allow it.
 
 For a form, open **入力フォームを開く**, select a field, and choose **入力する**. Enter the displayed number for an enumerated choice, or はい / いいえ for a boolean. Extra text boxes can hold the rest of a long string. Choose **この内容で送信** when ready. Defaults are never filled automatically. Form screens are private; answers are not posted to the public conversation. Re-enter unfinished answers after a bot restart.
 
@@ -87,3 +103,23 @@ Use `/stop` to stop the task. Expired or uncertain answers are never automatical
 - **Permission, capacity, corruption, or expiry errors:** address the stated cause first. Resending alone cannot fix it. Ask the operator to check settings or storage. For an expired file whose original still exists, `/get path:...` creates a new saved version. This cannot recover expired answer text.
 
 Old retrieval warnings are removed after delivery completes. If the warning's own send or deletion result is uncertain, it can remain until reconciled.
+
+### Repeated MCP confirmations
+
+The same server or tool can ask again for each separate call. **今回だけ許可 (Allow this call only)** applies to one request. If the gateway cannot verify actual arguments or code separately from the original confirmation text, it tells you. If the operation is unclear, choose **拒否 (Decline)**, or use `/stop` to stop the whole task.
+
+Cards with confirmed permission submission and resolution are consolidated into a count for the same task. The count covers accepted permissions and form submissions; it does not prove tool success. Declined, expired, and uncertain confirmations remain visible.
+
+With compatible Gateway and Proxy versions and the feature enabled, supported operations such as page searches and navigation show **the operation and its search text or URL on the first card**. Read it and choose:
+
+- **この依頼中、このツールを許可 (Allow this tool during this request):** allow repeated calls to this tool in the same request. This option appears only for eligible tools.
+- **今回だけ許可 (Allow this call only):** allow the displayed call once. Another call may ask again.
+- **拒否 (Decline):** decline this operation. Use `/stop` to stop the whole request.
+
+Anyone who can read this conversation can also see the displayed search text or URL. Credentials, secret inputs, executable code, unsupported operations, and oversized details stay off the first card. It explains why and offers **本人限定で確認 (Review privately)** instead. Open this supplemental screen only when needed; use **次へ (Next)** for long details. If the operation cannot be retrieved, decline or use `/stop`, and ask the operator for help if the problem persists. Older Proxies and requests already in progress before the update may retain the **操作内容を確認 (View operation)** private-screen workflow.
+
+Request-scoped permission includes **changed arguments to the same tool**; it is not limited to one website or read-only actions. It lasts up to ten minutes or until the request ends, and expires on stop or additional Steer instructions. It never carries into the next request. `browser_evaluate` and `browser_run_code_unsafe` always require individual confirmation.
+
+Use `/mcp` to inspect and revoke permissions for the latest request. Revocation stops future permission applications; it cannot undo completed operations. If confirmation is uncertain, reopen the list to check the original revocation without sending a new request.
+
+This feature requires an administrator to enable it and configure eligible tools on the Proxy; updating binaries alone does not enable it. Users do not need to edit configuration. If an option is missing, ask your administrator to check the [Gateway installation guide](installation.md) and the Proxy's [user and administrator guide (Japanese)](https://github.com/tanep3/codex-hoshikage-proxy/blob/main/docs/mcp-turn-approval-guide.ja.md). Unsupported or disabled environments retain individual confirmations.

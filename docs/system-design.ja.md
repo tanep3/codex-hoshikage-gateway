@@ -1,7 +1,7 @@
 # Codex Hoshikage Gateway システム設計書
 
-版: 1.3 / 2026-09-12 / Tane Channel Technology / MIT
-基準: [要件2.3](requirements.ja.md)、[Proxy API v2 契約案0.2](../../codex-hoshikage-proxy/docs/workspace-artifact-api-v2.ja.md)。設計は実装・配備済みの宣言ではない。
+版: 1.5 / 2026-09-16 / Tane Channel Technology / MIT
+基準: [要件2.5](requirements.ja.md)、[Proxy API v2 契約案0.2](../../codex-hoshikage-proxy/docs/workspace-artifact-api-v2.ja.md)。設計は実装・配備済みの宣言ではない。
 
 ## 1. 構成と境界
 
@@ -144,3 +144,34 @@ Discord受信境界ではSerenityのInteraction列挙型から取得したkind�
 ## リソース配信エラーの案内
 
 resource-error noticeは初回文面を固定せず、resource_deliveriesと回答のdeliveriesを再照会して表示する。POST_PENDING/PATCH_PENDINGでは取得障害より送信結果不明の案内を優先し、重複の可能性を確認する /retry を案内する。DELIVERED/RELEASE_PENDING/SUPERSEDEDではnoticeの所有確認・結果照合を経て削除し、監査記録を保持する。照合不能な投稿は勝手に再投稿・削除しない。
+
+承認UIはファイル対象 `paths: string[]` を解釈する。対象一覧が空または不正、あるいは `grantRoot` による追加範囲を解釈できない場合は承認ボタンを出さない。ボタンと説明には同一の承認可否判定を使う。
+
+## MCPターン限定許可の設計境界（2026-09-16）
+
+[双方合意の調整案](proxy-mcp-turn-approval-proposal.ja.md)を適用する。既存requests.idをGatewayの1依頼識別子としてDiscord本人/会話とProxy Response/Turnへ照合する。許可の状態機械・API・依頼内容世代・許可fingerprint・TTLは双方合意のAPI 0.3に従う。Gatewayにローカル自動acceptは追加しない。SteerはProxyによる許可失効受付→依頼内容世代更新→送信の境界を必要とし、Gatewayのローカル失効だけでは保証したと扱わない。
+
+既存APIとの互換範囲：確認原文と取得情報の限界を区別する表示、今回だけ許可の明示、正常に解消した確認カードの集約。mcp_interactionsのstate=resolved・action=accept・operation_state=succeededをすべて満たす場合だけ、requests.id単位のmcp_summary配信へ件数をまとめる。これはacceptされた承認またはフォーム回答の記録であり、ツール成功の表示ではない。個別mcp_actionからボタンを外し、summaryの配信を確認してからmcp_description/mcp_actionを既存Deliveryの所有確認・結果照合付き削除で除去する。途中失敗・再起動は同じ配信キーで回復する。拒否・期限切れ・不明は個別表示を保持する。本文や引数をSQLiteへ追加保存しない。
+
+常駐移行前の実証Gate：信頼できる操作情報の取得、run/Turn/依頼内容世代照合、許可作成/取消のat-most-once送信と照会復旧、利用者別UI認可、並列/停止/Steer/設定変更/再起動試験。実証未完了の常駐Proxyでは機能を無効に保つ。Gatewayのターン限定ボタンは対応Capabilityと操作単位の適格性の双方を満たす検証環境で受け入れる。
+
+MCPカードの集約完了は本文・操作カードの削除確認まで閉じない。UNKNOWNから後日解消した場合も整理開始時にclosed=0へ戻し、作業終了時の期限監視は確認済みresolvedの整理を優先する。全削除完了前にinteraction_scan_doneへ進めない。Deliveryの送信結果照合は保存済みpending_digestの内容だけを確認し、呼出し側の最新digestと一致しなければ送信完了を返さない。
+
+合意API 0.3の検証手順と必要項目は [MCPターン限定許可の受入表](mcp-turn-approval-acceptance.ja.md) に整理する。
+
+### Proxy合意契約0.3の反映
+
+### 最初の承認カード（要件UI-01〜UI-06）
+
+1. Proxy adapterが公開用表示を取得し、interaction・Response/Turn・実行範囲・表示の版を検証する。本人限定operation.argumentsとは別の型で扱い、公開カードrendererへ生引数を渡さない。公開APIは合意0.4のGET presentation、追加Capability、approval_presentationと返信用の表示トークンに対応する。具体境界は [接続レビュー](mcp-inline-approval-api-review.ja.md) に記録し、検索語・アクセス先URL等の操作対象を元会話へ表示することは利用者承認済み。認証情報・秘密入力・任意コードを除外した3種類のrendererとツール別規則を0.4のR-01対応版で確認し、Gateway接続レビューを完了した。
+2. Rendererは公開用の操作・対象・制限、許可範囲の説明、選択肢を同じカードに組み立てる。直接承認可能で表示が省略なしに収まる場合だけ許可ボタンを付ける。ターン限定適格性と公開可能性は別条件。長文・秘匿・未知形式は理由と補足確認／拒否へ切り替える。本文だけ先に送り後から許可ボタンを別投稿しない。
+3. 表示記録にはローカルID・対象interaction・revision・公開表示に結び付く不透明トークン・scope/本文とcomponentsのdigest・期限・送信先を保持する。公開文章や本人限定実引数の本文はDBへ保存しない。期限は元interaction/call以内かつ最大10分。表示が変われば旧版を無効化し、トークンをcustom_idや本文へ出さない。具体schemaは以下の詳細設計で定義する。
+4. 既存DeliveryのPOST/PATCH送信結果照合を使い、同じ表示digestの配信成功を確認した場合だけ、その版の押下を受け付ける。送信結果不明を新しいカードで補わない。再起動後も配信記録とProxyの現表示を照合してから再開する。
+5. 押下時はGuild・本人・元会話・カードのmessage ID・保存した版を確認し、Proxyへ表示を再照会する。公開説明・省略状態・直接承認可否・トークンが一致した場合だけ、単発／ターンを明示した返信を送る。Proxy自身も公開表示への対応を検証する。古い版は許可せず再確認を案内する。
+6. 例外の補足画面では現行の本人限定経路を使い、実引数と公開要約を混同しない。許可一覧・取消は `/mcp` へ分離する。内部フォーム・秘密入力は今回の直接承認へ変換しない。
+
+以下の0.3経路は追加契約未対応時の互換設計。新カードの要件と、既存Proxyに対する表示可能範囲を混同しない。
+
+契約書：`../codex-hoshikage-proxy/docs/mcp-turn-approval-api.ja.md`。操作詳細はGET interaction/operationで取得し、本人限定画面へ表示する。公開確認カードにコードを埋め込まない。approval_contextのprincipal/channelはGateway側で不透明識別子へ写像し、run_idは既存の永続依頼IDを使う。新しい操作は既存reply + grant_scope/expected_scope_fingerprint、一覧はResponseのmcp-grants、取消はgrantのrevokeという境界に合わせる。Capabilityの具体キー・完全な応答型・表示版の照合・取消照会・一覧件数は [接続レビュー](mcp-turn-approval-api-review.ja.md) で解消し、schema 7と接続コードへ反映する。現Gatewayのv1 SteerにもProxyの許可失効が適用されることを接続Gateとする。
+
+API 0.3の [Gateway詳細設計・DB・受入](mcp-turn-approval-gateway-design.ja.md) を接続実装の基準とする。文書上の旧「API待ち」は経緯であり、この合意版の未決事項ではない。

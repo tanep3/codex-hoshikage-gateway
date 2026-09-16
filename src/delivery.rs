@@ -67,9 +67,12 @@ impl Delivery {
             if r.state == "CONFIRMED" {
                 return Ok(r.confirmed.as_ref() == Some(&fingerprint));
             }
-            return self
+            let reconciled = self
                 .reconcile(&r.id, &thread, r.message.as_deref(), r.pending.as_deref())
-                .await;
+                .await?;
+            // Reconciliation proves only the persisted pending version, not the
+            // newer content requested by this caller. Update it on the next pass.
+            return Ok(reconciled && r.pending.as_ref() == Some(&fingerprint));
         }
         let body = json!({"content":text,"components":components,"allowed_mentions":{"parse":[]},"nonce":nonce(&r.id),"enforce_nonce":true});
         let response = match &r.message {
@@ -199,7 +202,7 @@ pub fn chunks(text: &str) -> Vec<String> {
     out
 }
 
-fn canonical_components(v: &Value) -> Value {
+pub(crate) fn canonical_components(v: &Value) -> Value {
     if let Some(a) = v.as_array() {
         return Value::Array(a.iter().map(canonical_components).collect());
     }
@@ -254,6 +257,15 @@ impl Delivery {
     }
     pub async fn clear_notice(&self, target: &str, thread: &str) -> Result<bool> {
         self.trim_parts(target, thread, "notice", 0).await
+    }
+    pub async fn clear_mcp_cards(&self, target: &str, thread: &str) -> Result<bool> {
+        if !self
+            .trim_parts(target, thread, "mcp_description", 0)
+            .await?
+        {
+            return Ok(false);
+        }
+        self.trim_parts(target, thread, "mcp_action", 0).await
     }
     async fn trim_parts(
         &self,

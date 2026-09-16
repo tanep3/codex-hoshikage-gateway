@@ -329,6 +329,7 @@ impl Discord {
         let opt = |name: &str, description: &str, required: bool| json!({"type":3,"name":name,"description":description,"required":required});
         let commands = json!([
             {"name":"new","description":"新しい会話を作成","options":[opt("title","会話の名前",true)]},
+            {"name":"mcp","description":"この作業のMCP許可を確認・取消"},
             {"name":"status","description":"実行・配信・会話の状態を表示"},
             {"name":"stop","description":"待ち行列を停止し、実行中の依頼へ中断を要求"},
             {"name":"resume","description":"一時停止した待ち行列の自動開始を再開"},
