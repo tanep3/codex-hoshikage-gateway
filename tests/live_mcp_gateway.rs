@@ -27,6 +27,9 @@ struct Wire {
 }
 type Shared = Arc<Mutex<Wire>>;
 fn input(id: &str) -> Value {
+    if std::env::var("HOSHIKAGE_MCP_CASE").as_deref() == Ok("transport") {
+        return json!({"id":id,"channel_id":"4","guild_id":"1","author":{"id":"2","bot":false},"attachments":[],"content":"Playwright MCP通信の診断です。順番に browser_tabs(action=list)、browser_navigate(url=https://www.showroom-live.com/)、browser_snapshot(depth=3)、browser_tabs(action=list) を1回ずつ実行してください。functions.execを使う場合は4操作を同じexecにまとめず、1操作ごとに別々のexec呼出しで実行してください。それ以外の操作、ログイン、クリック、ファイル操作は禁止です。ツール発見は必要なら行ってください。画面内容・個人情報は回答に記載しないでください。どれかが失敗した場合は再試行せずエラーの種類だけ報告して終了。4呼出しとも成功した場合だけ mcp transport done と回答してください。"});
+    }
     if std::env::var("HOSHIKAGE_MCP_TOOL").as_deref() == Ok("tabs") {
         return json!({"id":id,"channel_id":"4","guild_id":"1","author":{"id":"2","bot":false},"attachments":[],"content":"Gateway API 0.6 結合試験です。playwright MCPの browser_tabs を action=list で必ず別々に5回、順番に呼んでください。他の引数は指定しないでください。タブの作成・選択・閉じる操作、移動、検索、ページ内容の取得、他のMCP、ファイル操作は禁止です。ツールの発見は必要なら行ってください。一覧の内容は回答に含めず、5回完了したら mcp acceptance done とだけ答えてください。"});
     }
@@ -179,7 +182,7 @@ async fn gateway_real_mcp_single_and_turn_grants() -> Result<()> {
     let result=tokio::time::timeout(Duration::from_secs(540),async{
         // Turn grant first, then next Run must ask again for every call.
         let mut handled=HashSet::new();
-        let cases=match std::env::var("HOSHIKAGE_MCP_CASE").as_deref(){Ok("revoke")=>vec![("12",true)],Ok("cancel")=>vec![("13",false)],_=>vec![("10",true),("11",false)]};
+        let cases=match std::env::var("HOSHIKAGE_MCP_CASE").as_deref(){Ok("revoke")=>vec![("12",true)],Ok("cancel")=>vec![("13",false)],Ok("transport")=>vec![("10",false),("11",false)],_=>vec![("10",true),("11",false)]};
         for (message,turn) in cases {
             tx.send(Incoming::Message(input(message))).await?;
             let mut find_count=0;let mut nav_count=0;let mut revoked=false;
@@ -224,9 +227,10 @@ async fn gateway_real_mcp_single_and_turn_grants() -> Result<()> {
                     let tool=op["tool"].as_str().context("tool missing")?;
                     let args=&op["arguments"];
                     let turn_this=match tool {
-                        "browser_navigate"=>{ensure!(args["url"]=="https://example.com/","unexpected URL");nav_count+=1;false},
+                        "browser_navigate"=>{let expected=if std::env::var("HOSHIKAGE_MCP_CASE").as_deref()==Ok("transport"){"https://www.showroom-live.com/"}else{"https://example.com/"};ensure!(args==&json!({"url":expected}),"unexpected navigation");nav_count+=1;false},
+                        "browser_snapshot" if std::env::var("HOSHIKAGE_MCP_CASE").as_deref()==Ok("transport") => {ensure!(args==&json!({"depth":3}),"unexpected snapshot");false},
                         "browser_find"=>{ensure!(args["text"]=="Example Domain" && args.as_object().is_some_and(|o| o.keys().all(|k| k=="text")),"unexpected search (text_matches={}, keys={:?})",args["text"]=="Example Domain",args.as_object().map(|o|o.keys().collect::<Vec<_>>()));find_count+=1;turn && !revoked},
-                        "browser_tabs" if std::env::var("HOSHIKAGE_MCP_TOOL").as_deref()==Ok("tabs") => {
+                        "browser_tabs" if std::env::var("HOSHIKAGE_MCP_TOOL").as_deref()==Ok("tabs") || std::env::var("HOSHIKAGE_MCP_CASE").as_deref()==Ok("transport") => {
                             ensure!(args==&json!({"action":"list"}),"unexpected tabs operation");
                             find_count+=1;turn && !revoked
                         },
@@ -303,6 +307,10 @@ async fn gateway_real_mcp_single_and_turn_grants() -> Result<()> {
                             break;
                         }
                         ensure!(state=="COMPLETED","execution did not complete");
+                        if std::env::var("HOSHIKAGE_MCP_CASE").as_deref()==Ok("transport") {
+                            eprintln!("transport diagnostic completed; inspect exact tool outcomes in Proxy rollout (COMPLETED alone is not tool success)");
+                            break;
+                        }
                         ensure!(nav_count<=1 && (if message=="12" {find_count>=2} else {find_count==if turn{1}else{5}}),"unexpected prompt count");
                         app.handle_mcp_turn(&event(format!("mt:grants:{id}"))).await?;
                         let list=app.settings().await.proxy.v2_json(reqwest::Method::GET,&format!("/v2/codex/responses/{response}/mcp-grants"),None,None).await?;

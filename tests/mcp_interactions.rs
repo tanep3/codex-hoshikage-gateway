@@ -19,6 +19,9 @@ struct Mock {
     messages: Vec<Value>,
     callbacks: Vec<Value>,
     private: Vec<Value>,
+    private_original: Value,
+    deferred_private: bool,
+    private_sequence: u64,
     lost: bool,
     targets: Vec<String>,
     deleted: Vec<String>,
@@ -74,7 +77,7 @@ async fn setup() -> (
  StatusCode::SERVICE_UNAVAILABLE
  }))
 
- .route("/v2/codex/interactions/{id}/presentation",get(|State(m):State<Arc<Mutex<Mock>>>,axum::extract::Query(q):axum::extract::Query<std::collections::HashMap<String,String>>|async move{let mut m=m.lock().unwrap();m.presentation_gets+=1;if m.loading_gets>0 {m.loading_gets-=1;let mut p=m.presentation.clone();p["state"]=json!("unavailable");p["reason"]=json!("catalog_loading");p["diagnostic"]=json!({"code":"catalog_loading","retryable":true,"retry_after_ms":2000});p["actions"]["allow_once"]=json!(false);p["actions"]["allow_turn_tool"]=json!(false);p["actions"]["retry"]=json!(true);for k in ["presentation_id","presentation_fingerprint","page","expires_at"] {p[k]=Value::Null;}codex_hoshikage_gateway::mcp_v06::Presentation::parse(p.clone()).expect("loading fixture");return bound(p);}
+ .route("/v2/codex/interactions/{id}/presentation",get(|State(m):State<Arc<Mutex<Mock>>>,axum::extract::Query(q):axum::extract::Query<std::collections::HashMap<String,String>>|async move{let mut m=m.lock().unwrap();m.presentation_gets+=1;if m.loading_gets>0 {m.loading_gets-=1;let mut p=if q.get("audience").is_some_and(|s|s=="requester"){m.private_pages[q.get("page").and_then(|s|s.parse::<usize>().ok()).unwrap_or(0)].clone()}else{m.presentation.clone()};p["state"]=json!("unavailable");p["reason"]=json!("catalog_loading");p["diagnostic"]=json!({"code":"catalog_loading","retryable":true,"retry_after_ms":2000});p["actions"]["allow_once"]=json!(false);p["actions"]["allow_turn_tool"]=json!(false);p["actions"]["retry"]=json!(true);for k in ["presentation_id","presentation_fingerprint","page","expires_at"] {p[k]=Value::Null;}codex_hoshikage_gateway::mcp_v06::Presentation::parse(p.clone()).expect("loading fixture");return bound(p);}
  if q.get("audience").is_some_and(|s|s=="requester"){let page=q.get("page").and_then(|s|s.parse::<usize>().ok()).unwrap_or(0);return bound(m.private_pages.get(page).cloned().unwrap_or(Value::Null));}bound(m.presentation.clone())}))
  .route("/v2/codex/interactions/{id}/operation",get(|State(m):State<Arc<Mutex<Mock>>>|async move{bound(m.lock().unwrap().operation.clone())}))
  .route("/users/@me",get(||async{Json(json!({"id":"9","bot":true}))}))
@@ -198,7 +201,7 @@ async fn setup() -> (
             "/interactions/{id}/token/callback",
             post(
                 |State(m): State<Arc<Mutex<Mock>>>, Json(v): Json<Value>| async move {
-                    m.lock().unwrap().callbacks.push(v);
+                    let mut m=m.lock().unwrap();if v["type"]==5 {m.deferred_private=true;m.private_original=json!({"id":(999+m.private_sequence).to_string()});m.private_sequence+=1;}m.callbacks.push(v);
                     StatusCode::NO_CONTENT
                 },
             ),
@@ -207,7 +210,7 @@ async fn setup() -> (
             "/webhooks/9/token/messages/@original",
             patch(
                 |State(m): State<Arc<Mutex<Mock>>>, Json(v): Json<Value>| async move {
-                    let mut v=v;v["id"]=json!("999");m.lock().unwrap().private.push(v.clone());
+                    let mut m=m.lock().unwrap();if !m.private_original.is_object(){m.private_original=json!({"id":"999"});}for (k,val) in v.as_object().unwrap(){m.private_original[k]=val.clone();}m.deferred_private=false;let v=m.private_original.clone();m.private.push(v.clone());
                     Json(v)
                 },
             ),
@@ -217,7 +220,7 @@ async fn setup() -> (
             post(
                 |State(m): State<Arc<Mutex<Mock>>>, Json(v): Json<Value>| async move {
                     assert_eq!(v["flags"], 64);
-                    let mut m=m.lock().unwrap();let mut v=v;v["id"]=json!((9000+m.private.len()).to_string());m.private.push(v.clone());
+                    let mut m=m.lock().unwrap();let mut v=v;if m.deferred_private {v["id"]=m.private_original["id"].clone();m.private_original=v.clone();m.deferred_private=false;}else{v["id"]=json!((9000+m.private.len()).to_string());}m.private.push(v.clone());
                     Json(v)
                 },
             ),
@@ -1735,8 +1738,20 @@ async fn v06_private_pages_are_explicit_and_require_all_receipts() {
                 .any(|v| v["components"].to_string().contains("ma6:once:"))
         );
     }
+    assert!(
+        m.lock().unwrap().private_original["content"]
+            .as_str()
+            .unwrap()
+            .contains("1/2")
+    );
     let page = v06_event(&m, "page1", true);
     app.handle_v06_mcp(&page).await.unwrap();
+    assert!(
+        m.lock().unwrap().private_original["content"]
+            .as_str()
+            .unwrap()
+            .contains("2/2")
+    );
     let event = v06_event(&m, "once", true);
     app.handle_v06_mcp(&event).await.unwrap();
     assert_eq!(m.lock().unwrap().posts.len(), 1);
@@ -2033,7 +2048,7 @@ async fn v06_failed_private_open_finishes_deferred_message() {
         m.private.last().unwrap()["content"]
             .as_str()
             .unwrap()
-            .contains("開き直してください")
+            .contains("もう一度押してください")
     );
     assert!(m.posts.is_empty());
     server.abort();
@@ -2118,4 +2133,89 @@ async fn v06_catalog_post_rejections_do_not_block_decline() {
         assert_eq!(m.lock().unwrap().posts[0]["response"]["action"], "decline");
         server.abort();
     }
+}
+
+#[tokio::test]
+async fn v06_private_catalog_refresh_recovers_without_sending_permission() {
+    let (app, m, _tmp, _lock, server, rid) = setup().await;
+    enable_v06(&app, &m, &rid, "presentation_private_entry").await;
+    let mut p = v06_page("presentation_unreviewed", &rid);
+    p["audience"]["kind"] = json!("requester");
+    p["audience"]["principal_id"] = json!("principal");
+    p["display"]["disclosure"] = json!("requester_only");
+    p["display"]["fields"][0]["value"] = json!("PRIVATEWAITTEST");
+    {
+        let mut m = m.lock().unwrap();
+        m.private_pages = vec![p];
+        m.loading_gets = 1;
+    }
+    app.handle_v06_mcp(&v06_event(&m, "private", false))
+        .await
+        .unwrap();
+    let m = m.lock().unwrap();
+    assert!(m.posts.is_empty());
+    assert!(
+        serde_json::to_string(&m.private)
+            .unwrap()
+            .contains("PRIVATEWAITTEST")
+    );
+    assert!(
+        m.private_original["content"]
+            .as_str()
+            .unwrap()
+            .contains("PRIVATEWAITTEST")
+    );
+    assert!(
+        m.private_original["components"]
+            .to_string()
+            .contains("ma6:once:")
+    );
+    assert!(
+        !serde_json::to_string(&m.messages)
+            .unwrap()
+            .contains("PRIVATEWAITTEST")
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn v06_private_catalog_wait_explains_no_permission_was_sent() {
+    let (app, m, _tmp, _lock, server, rid) = setup().await;
+    enable_v06(&app, &m, &rid, "presentation_private_entry").await;
+    let mut p = v06_page("presentation_unreviewed", &rid);
+    p["audience"]["kind"] = json!("requester");
+    p["audience"]["principal_id"] = json!("principal");
+    p["display"]["disclosure"] = json!("requester_only");
+    {
+        let mut m = m.lock().unwrap();
+        m.private_pages = vec![p];
+        m.loading_gets = 10;
+    }
+    let before = m.lock().unwrap().presentation_gets;
+    app.handle_v06_mcp(&v06_event(&m, "private", false))
+        .await
+        .unwrap();
+    let m = m.lock().unwrap();
+    assert!(m.posts.is_empty());
+    assert_eq!(m.presentation_gets - before, 3);
+    assert!(m.private.iter().any(|v| {
+        v["content"]
+            .as_str()
+            .unwrap_or("")
+            .contains("このボタン操作では許可は送っていません")
+    }));
+    server.abort();
+}
+
+#[tokio::test]
+async fn v06_catalog_refresh_keeps_private_entry_stable() {
+    let (app, m, _tmp, _lock, server, rid) = setup().await;
+    enable_v06(&app, &m, &rid, "presentation_private_entry").await;
+    let before = m.lock().unwrap().messages.clone();
+    m.lock().unwrap().loading_gets = 1;
+    tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+    app.scan_mcp(&rid).await.unwrap();
+    assert_eq!(m.lock().unwrap().messages, before);
+    assert!(m.lock().unwrap().posts.is_empty());
+    server.abort();
 }

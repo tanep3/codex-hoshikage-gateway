@@ -21,6 +21,7 @@ pub(crate) struct Runtime {
     polls: Mutex<HashMap<String, std::time::Instant>>,
     display_slots: tokio::sync::Semaphore,
     failures: Mutex<HashMap<String, u32>>,
+    stable_cards: Mutex<HashMap<String, (i64, i64)>>,
 }
 struct View {
     receipt: PageReceipts,
@@ -39,6 +40,7 @@ impl Default for Runtime {
             polls: Mutex::new(HashMap::new()),
             display_slots: tokio::sync::Semaphore::new(4),
             failures: Mutex::new(HashMap::new()),
+            stable_cards: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -207,6 +209,23 @@ impl App {
             self.store.call(true,move|c|{c.execute("UPDATE mcp_v06_views SET state='DELIVERING' WHERE interaction_local_id=?1 AND audience='source_conversation' AND state='WAITING' AND active=1",[id])?;Ok(())}).await?;
         } else if p.value()["state"] == "unavailable" {
             self.mark_v06_wait(rec).await?;
+            if matches!(
+                p.value()["reason"].as_str(),
+                Some("catalog_loading" | "catalog_failed")
+            ) && self
+                .mcp_v06
+                .stable_cards
+                .lock()
+                .await
+                .get(&rec.id)
+                .is_some_and(|(revision, expires)| {
+                    *revision == rec.revision && *expires > domain::now_ms()
+                })
+            {
+                // Preserve the UI while refreshing; every permission click still
+                // fetches and validates current evidence before sending anything.
+                return Ok(());
+            }
         }
         if p.value()["state"] != "ready" {
             let text = if p.value()["state"] == "private_required" {
@@ -237,6 +256,9 @@ impl App {
                     controls(&rec.id, rec.revision, "-", Some(&p), None),
                 )
                 .await?;
+            if p.value()["state"] == "private_required" {
+                self.remember_v06_card(rec, &p).await?;
+            }
             return Ok(());
         }
         let id = self.v06_view(rec, &p, false).await?;
@@ -255,6 +277,15 @@ impl App {
         let local = rec.id.clone();
         self.store.call(true,move|c|{c.execute("UPDATE deliveries SET kind='retired-mcp-' || id WHERE target_id=?1 AND kind='mcp_action' AND state='DELETED'",[local])?;Ok(())}).await?;
         self.retire_v06_posts(&rec.id, thread, &id).await?;
+        self.remember_v06_card(rec, &p).await?;
+        Ok(())
+    }
+    async fn remember_v06_card(&self, rec: &Record, p: &Presentation) -> Result<()> {
+        let mut cards = self.mcp_v06.stable_cards.lock().await;
+        cards.retain(|_, (_, expires)| *expires > domain::now_ms());
+        if cards.len() < 512 || cards.contains_key(&rec.id) {
+            cards.insert(rec.id.clone(), (rec.revision, expired(p)?));
+        }
         Ok(())
     }
     async fn v06_view(&self, rec: &Record, p: &Presentation, requester: bool) -> Result<String> {
@@ -371,12 +402,19 @@ impl App {
                     json!([])
                 };
                 let body = json!({"content":text,"allowed_mentions":{"parse":[]},"components":components,"flags":if webhook.is_some(){64}else{0}});
-                let path = if let Some((app, token)) = webhook {
-                    format!("/webhooks/{app}/{token}?wait=true")
+                let (method, path) = if let Some((app, token)) = webhook {
+                    if i == 0 {
+                        (
+                            Method::PATCH,
+                            format!("/webhooks/{app}/{token}/messages/@original"),
+                        )
+                    } else {
+                        (Method::POST, format!("/webhooks/{app}/{token}?wait=true"))
+                    }
                 } else {
-                    format!("/channels/{thread}/messages")
+                    (Method::POST, format!("/channels/{thread}/messages"))
                 };
-                let sent = self.discord.api(Method::POST, &path, Some(body)).await;
+                let sent = self.discord.api(method, &path, Some(body)).await;
                 let value = sent?;
                 let id = value["id"]
                     .as_str()
@@ -467,7 +505,20 @@ impl App {
         .await;
         if !matches!(result, Ok(Ok(()))) {
             let catalog_wait = matches!(&result, Ok(Err(e)) if e.downcast_ref::<crate::proxy_v2::ApiError>().is_some_and(|e| matches!(e.code.as_str(),"catalog_loading"|"catalog_failed")));
-            let message = if catalog_wait {
+            tracing::warn!(
+                event = "mcp_v06_action_failed",
+                action,
+                category = if catalog_wait {
+                    "catalog_wait"
+                } else if result.is_err() {
+                    "timeout"
+                } else {
+                    "validation_or_delivery"
+                }
+            );
+            let message = if viewing {
+                "操作詳細の取得または表示を確認できませんでした。このボタン操作では許可は送っていません。元の会話の「自分だけに表示して確認」をもう一度押してください。不要なら「拒否」、作業全体を止めるなら /stop を使えます。"
+            } else if catalog_wait {
                 "操作情報の更新を確認できなかったため、許可は送っていません。元の会話の「再確認」で内容を読み直し、更新された画面で許可を選んでください。不要なら「拒否」、作業全体を止めるなら /stop を使えます。"
             } else {
                 "この操作を完了確認できませんでした。元の確認画面を開き直してください。許可は自動再送しません。拒否または /stop は引き続き利用できます。"
@@ -481,6 +532,43 @@ impl App {
             }
         }
         Ok(())
+    }
+    async fn v06_fetch_page(
+        &self,
+        rec: &Record,
+        requester: bool,
+        index: u64,
+        pid: Option<&str>,
+    ) -> Result<Presentation> {
+        let s = self.settings().await;
+        let mut p = s
+            .proxy
+            .approval_v06_page(&rec.remote, requester, index, pid)
+            .await?;
+        for attempt in 0..3 {
+            self.verify_v06_page(rec, &p).await?;
+            if !matches!(
+                p.value()["reason"].as_str(),
+                Some("catalog_loading" | "catalog_failed")
+            ) {
+                break;
+            }
+            if attempt == 2 {
+                return Err(crate::proxy_v2::ApiError {
+                    status: 409,
+                    code: p.value()["reason"].as_str().unwrap().into(),
+                    retry: "refetch".into(),
+                }
+                .into());
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            p = s
+                .proxy
+                .approval_v06_page(&rec.remote, requester, index, pid)
+                .await?;
+        }
+        self.verify_v06_page(rec, &p).await?;
+        Ok(p)
     }
     async fn v06_action(
         &self,
@@ -570,9 +658,8 @@ impl App {
                 );
                 (index, Some(loaded.presentation.clone()))
             };
-            let p = s
-                .proxy
-                .approval_v06_page(&rec.remote, true, index, pid.as_deref())
+            let p = self
+                .v06_fetch_page(&rec, true, index, pid.as_deref())
                 .await?;
             self.verify_v06_page(&rec, &p).await?;
             ensure!(p.value()["state"] == "ready", "private display unavailable");
@@ -588,7 +675,9 @@ impl App {
             } else {
                 None
             };
-            let body = json!({"content":if next.is_some(){"このページの内容を確認したら、次のページへ進んでください。"}else{"全ページの内容を確認して選んでください。依頼中の許可は、このツールの引数が変わる呼出しも対象です。"},"components":controls(local,revision,&view,Some(&p),next),"allowed_mentions":{"parse":[]}});
+            // Discord uses the first followup after a deferred response as
+            // @original. Keep that operation detail intact when adding controls.
+            let body = json!({"components":controls(local,revision,&view,Some(&p),next),"allowed_mentions":{"parse":[]}});
             let sent = self
                 .discord
                 .api(
@@ -633,33 +722,7 @@ impl App {
             }
             (loaded.requester, loaded.presentation.clone())
         };
-        let mut p = s
-            .proxy
-            .approval_v06_page(&rec.remote, requester, 0, Some(&pid))
-            .await?;
-        for attempt in 0..3 {
-            self.verify_v06_page(&rec, &p).await?;
-            if !matches!(
-                p.value()["reason"].as_str(),
-                Some("catalog_loading" | "catalog_failed")
-            ) {
-                break;
-            }
-            if attempt == 2 {
-                return Err(crate::proxy_v2::ApiError {
-                    status: 409,
-                    code: p.value()["reason"].as_str().unwrap().into(),
-                    retry: "refetch".into(),
-                }
-                .into());
-            }
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            p = s
-                .proxy
-                .approval_v06_page(&rec.remote, requester, 0, Some(&pid))
-                .await?;
-        }
-        self.verify_v06_page(&rec, &p).await?;
+        let p = self.v06_fetch_page(&rec, requester, 0, Some(&pid)).await?;
         if !requester {
             let (local, mid, custom) = (
                 rec.id.clone(),
