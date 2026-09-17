@@ -1,5 +1,7 @@
 # 意味ベース承認委任：Proxy回答0.2へのGateway回答
 
+> **保留（2026-09-18）：** [構造転換の方針](architecture-direction-direct-app-server.ja.md)により、Proxy向けの新規API調整・実装は停止する。本書は検討履歴であり、現行の実装指示ではない。
+
 2026-09-17 / 版0.1
 
 対象：[Proxy回答0.2](../../codex-hoshikage-proxy/docs/mcp-semantic-approval-delegation-review.ja.md)。基準：[Gateway調整案0.1](proxy-semantic-approval-delegation-proposal.ja.md)。

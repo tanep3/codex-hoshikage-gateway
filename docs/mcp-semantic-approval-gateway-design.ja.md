@@ -1,5 +1,7 @@
 # 意味ベース承認委任 — Gateway詳細設計・接続実証計画
 
+> **保留（2026-09-18）：** [構造転換の方針](architecture-direction-direct-app-server.ja.md)により、Proxy向けの新規API調整・実装は停止する。本書は検討履歴であり、現行の実装指示ではない。
+
 版0.1 / 2026-09-17 / Tane Channel Technology
 
 状態：Proxy回答0.3を受けたGateway側設計案。三つの判定経路の方向性は照合済み。具体wire、初期対応操作群、数値上限、製品実装Goは未確定。本書の状態名・論理項目は新APIのキーではない。

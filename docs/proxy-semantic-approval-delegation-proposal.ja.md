@@ -1,5 +1,7 @@
 # 操作の意味に基づく依頼中承認委任 — Proxy調整案
 
+> **保留（2026-09-18）：** [構造転換の方針](architecture-direction-direct-app-server.ja.md)により、Proxy向けの新規API調整・実装は停止する。本書は検討履歴であり、現行の実装指示ではない。
+
 版0.1 / 2026-09-17 / Tane Channel Technology
 
 状態：利用者から方向性の承認を受けたGateway側の提案。Proxyとの具体契約・実現性・数値条件は未合意。実装・常駐有効化の指示ではない。
