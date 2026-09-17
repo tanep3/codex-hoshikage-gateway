@@ -161,7 +161,7 @@ fn schema_eight_upgrade_preserves_old_records() {
     let cfg = common::config(&t);
     storage::initialize(&cfg).unwrap();
     let c = rusqlite::Connection::open(storage::db_path(&cfg)).unwrap();
-    c.execute_batch("DROP TABLE mcp_v06_decisions; DROP TABLE mcp_v06_parts; DROP TABLE mcp_v06_pages; DROP TABLE mcp_v06_views; DROP TABLE mcp_v06_runs; DELETE FROM schema_migrations WHERE version=9; UPDATE schema_meta SET schema_version=8;").unwrap();
+    c.execute_batch("DROP TRIGGER direct_dispatch_no_rewind;DROP TABLE direct_answers;DROP TABLE direct_dispatches;DROP TABLE direct_conversations;DELETE FROM schema_migrations WHERE version=10;DROP TABLE mcp_v06_decisions; DROP TABLE mcp_v06_parts; DROP TABLE mcp_v06_pages; DROP TABLE mcp_v06_views; DROP TABLE mcp_v06_runs; DELETE FROM schema_migrations WHERE version=9; UPDATE schema_meta SET schema_version=8;").unwrap();
     drop(c);
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
@@ -171,13 +171,13 @@ fn schema_eight_upgrade_preserves_old_records() {
         c.query_row("SELECT schema_version FROM schema_meta", [], |r| r
             .get::<_, i64>(0))
             .unwrap(),
-        9
+        storage::SCHEMA
     );
     assert_eq!(
         c.query_row("SELECT count(*) FROM schema_migrations", [], |r| r
             .get::<_, i64>(0))
             .unwrap(),
-        9
+        storage::SCHEMA
     );
 }
 #[test]

@@ -26,6 +26,15 @@ pub struct Manifest {
     pub db_bytes: u64,
     pub sha256: String,
     pub integrity: String,
+    #[serde(default)]
+    pub content: Vec<ContentManifest>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ContentManifest {
+    pub relative_path: String,
+    pub bytes: u64,
+    pub sha256: String,
 }
 pub fn atomic_new(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path.parent().context("missing parent")?;
@@ -64,12 +73,17 @@ pub fn create(source: &Path, target: &Path) -> Result<Manifest> {
             }
         }
         dst.execute_batch("PRAGMA journal_mode=DELETE;")?;
+        let content = list_content(&dst)?;
+        let state_dir = source.parent().context("database has no state directory")?;
+        for item in &content {
+            copy_content(state_dir, &stage, item)?;
+        }
         dst.close().map_err(|(_, e)| e)?;
         let (schema, instance) = storage::validate_database(&db)?;
         fs::File::open(&db)?.sync_all()?;
         let (db_bytes, checksum) = hash_file(&db)?;
         let manifest = Manifest {
-            format_version: 1,
+            format_version: 2,
             backup_id: domain::id(),
             schema_version: schema,
             instance_uuid: instance,
@@ -79,6 +93,7 @@ pub fn create(source: &Path, target: &Path) -> Result<Manifest> {
             db_bytes,
             sha256: checksum,
             integrity: "ok".into(),
+            content,
         };
         atomic_new(
             &stage.join("manifest.json"),
@@ -102,7 +117,7 @@ pub fn verify(bundle: &Path) -> Result<Manifest> {
     );
     let manifest: Manifest = serde_json::from_slice(&fs::read(bundle.join("manifest.json"))?)?;
     ensure!(
-        manifest.format_version == 1 && manifest.integrity == "ok",
+        matches!(manifest.format_version, 1 | 2) && manifest.integrity == "ok",
         "unsupported backup manifest"
     );
     let db = bundle.join("gateway.sqlite3");
@@ -112,6 +127,15 @@ pub fn verify(bundle: &Path) -> Result<Manifest> {
         "backup checksum mismatch"
     );
     let (v, id) = storage::validate_database(&db)?;
+    let copied = Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let expected = list_content(&copied)?;
+    ensure!(
+        expected == manifest.content,
+        "backup content manifest does not match database"
+    );
+    for item in &manifest.content {
+        verify_content(bundle, item)?;
+    }
     ensure!(
         v == manifest.schema_version && id == manifest.instance_uuid,
         "backup identity mismatch"
@@ -138,6 +162,9 @@ pub fn restore(cfg: &Config, config_path: &Path, bundle: &Path) -> Result<String
             &serde_json::json!({"restore_id":restore_id,"instance_uuid":instance,"state_dir":cfg.storage.state_dir,"backup_id":m.backup_id}),
         )?,
     )?;
+    for item in &m.content {
+        restore_content(bundle, &cfg.storage.state_dir, item)?;
+    }
     // Online Backup API into the offline destination avoids mixing an old WAL with a replacement DB.
     let source = Connection::open_with_flags(
         bundle.join("gateway.sqlite3"),
@@ -230,6 +257,133 @@ fn rename_new(from: &Path, to: &Path) -> Result<()> {
         } == 0,
         "backup publish failed or destination exists"
     );
+    Ok(())
+}
+
+fn list_content(db: &Connection) -> Result<Vec<ContentManifest>> {
+    let schema: i64 = db.query_row("SELECT schema_version FROM schema_meta", [], |r| r.get(0))?;
+    if schema < 10 {
+        return Ok(vec![]);
+    }
+    let mut stmt =
+        db.prepare("SELECT relative_path,bytes,sha256 FROM direct_answers ORDER BY relative_path")?;
+    let rows = stmt.query_map([], |r| {
+        Ok(ContentManifest {
+            relative_path: r.get(0)?,
+            bytes: r.get::<_, i64>(1)? as u64,
+            sha256: r.get(2)?,
+        })
+    })?;
+    let mut result = Vec::new();
+    for row in rows {
+        let item = row?;
+        content_path(Path::new("/"), &item.relative_path)?;
+        result.push(item);
+    }
+    Ok(result)
+}
+
+fn content_path(root: &Path, relative: &str) -> Result<PathBuf> {
+    let path = Path::new(relative);
+    ensure!(
+        path.parent() == Some(Path::new("direct-answers")) && path.components().count() == 2,
+        "invalid backup content path"
+    );
+    let file = path
+        .file_name()
+        .and_then(|v| v.to_str())
+        .context("invalid content filename")?;
+    let id = file
+        .strip_suffix(".txt")
+        .context("invalid content extension")?;
+    ensure!(
+        uuid::Uuid::parse_str(id)?.to_string() == id,
+        "invalid content identity"
+    );
+    Ok(root.join(path))
+}
+
+fn copy_content(from: &Path, to: &Path, item: &ContentManifest) -> Result<()> {
+    let source = content_path(from, &item.relative_path)?;
+    let destination = content_path(to, &item.relative_path)?;
+    storage::private_dir(destination.parent().unwrap())?;
+    let mut input = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(source)?;
+    ensure!(
+        input.metadata()?.is_file() && input.metadata()?.len() == item.bytes,
+        "source content identity changed"
+    );
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&destination)?;
+    let copied = std::io::copy(&mut input, &mut output)?;
+    ensure!(
+        copied == item.bytes,
+        "source content size changed during backup"
+    );
+    output.sync_all()?;
+    verify_content(to, item)?;
+    fs::File::open(destination.parent().unwrap())?.sync_all()?;
+    Ok(())
+}
+
+fn verify_content(root: &Path, item: &ContentManifest) -> Result<()> {
+    let path = content_path(root, &item.relative_path)?;
+    let (bytes, hash) = hash_file(&path)?;
+    ensure!(
+        bytes == item.bytes && hash == item.sha256,
+        "backup content checksum mismatch"
+    );
+    Ok(())
+}
+
+fn restore_content(bundle: &Path, state_dir: &Path, item: &ContentManifest) -> Result<()> {
+    let source = content_path(bundle, &item.relative_path)?;
+    let destination = content_path(state_dir, &item.relative_path)?;
+    let parent = destination.parent().unwrap();
+    storage::private_dir(state_dir)?;
+    storage::private_dir(parent)?;
+    if destination.exists() {
+        verify_content(state_dir, item)?;
+        return Ok(());
+    }
+    let temp = parent.join(format!(".restore-{}", domain::id()));
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+    let _cleanup = Cleanup(temp.clone());
+    let mut input = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(source)?;
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&temp)?;
+    let copied = std::io::copy(&mut input, &mut output)?;
+    ensure!(copied == item.bytes, "restore content size changed");
+    output.sync_all()?;
+    let (bytes, hash) = hash_file(&temp)?;
+    ensure!(
+        bytes == item.bytes && hash == item.sha256,
+        "restore content checksum mismatch"
+    );
+    match fs::hard_link(&temp, &destination) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => verify_content(state_dir, item)?,
+        Err(e) => return Err(e.into()),
+    }
+    fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
 
