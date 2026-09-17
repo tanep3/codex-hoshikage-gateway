@@ -1,6 +1,6 @@
 # Codex Hoshikage Gateway システム設計書
 
-> **目標構成を変更中（2026-09-18）：** [Gateway専属App Serverの方針](architecture-direction-direct-app-server.ja.md)を採用。以下のProxy API v2依存の記述は現行運用と既存設計を示す。全面改定と稼働環境の切替は未完了。
+> **目標要件・設計（2026-09-18）：** [Gateway専属App Serverの要件](requirements-direct-app-server.ja.md)と[内部システム設計](system-design-direct-app-server.ja.md)を作成。以下は常駐中のProxy経由構成の要件・設計履歴。新方式の実装・切替は未完了。
 
 > 追加設計中：[意味ベース承認委任の調整案](proxy-semantic-approval-delegation-proposal.ja.md)についてProxy回答0.3と方向性を照合し、双方で詳細設計・実現性検証へ進む。[Gateway詳細設計・接続実証計画](mcp-semantic-approval-gateway-design.ja.md)を追加。具体API・製品実装Goは未確定であり、現行実装を置換しない。
 

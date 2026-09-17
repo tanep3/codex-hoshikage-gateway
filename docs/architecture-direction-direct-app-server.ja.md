@@ -2,7 +2,7 @@
 
 2026-09-18 / Tane Channel Technology
 
-状態：目標構成として採用。詳細設計・移行方式・実装・稼働環境の切替は未完了。現行の常駐Gatewayは引き続きProxy API v2を使用する。
+状態：目標構成として採用。内部の責務境界も維持する。[目標要件](requirements-direct-app-server.ja.md)・[内部設計](system-design-direct-app-server.ja.md)は作成済み。具体schema・移行方式・実装・稼働環境の切替は未完了。現行の常駐Gatewayは引き続きProxy API v2を使用する。
 
 ## 判断の理由
 
@@ -22,6 +22,8 @@ systemd --user
 codex-hoshikage-proxy（別製品として独立稼働可能）
   └─ 必要に応じて自身の Codex App Server
 ```
+
+Codex App ServerはGatewayが所有する子プロセスであり、独立した外部サービスやHTTP APIの境界としては扱わない。Gateway内部ではCodex通信、実行、承認、保存、Discord表示を別の責務として実装する。
 
 GatewayがApp Serverの子プロセスとその入出力を所有する。Gatewayの動作にProxyのHTTP APIや常駐サービスを必須としない。別のアプリは自身の実行環境を持てる。両製品が同じホストにあっても、同一のApp ServerプロセスやDBを暗黙に共有しない。
 
