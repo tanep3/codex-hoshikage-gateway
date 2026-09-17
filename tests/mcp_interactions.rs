@@ -26,6 +26,15 @@ struct Mock {
     operation: Value,
     turn_caps: bool,
     inline_caps: bool,
+    v06_caps: bool,
+    private_pages: Vec<Value>,
+    response: Option<Value>,
+    reply_reject: bool,
+    reject_code: Option<&'static str>,
+    loading_gets: usize,
+    fail_grants: bool,
+    lost_display: bool,
+    presentation_gets: usize,
     presentation: Value,
     grants: Vec<Value>,
     revoke_keys: Vec<String>,
@@ -59,21 +68,23 @@ async fn setup() -> (
         ..Default::default()
     }));
     let router = Router::new()
- .route("/v2/codex/responses/resp_a/mcp-grants",get(|State(m):State<Arc<Mutex<Mock>>>|async move{bound(json!({"response_id":"resp_a","data":m.lock().unwrap().grants}))}))
+ .route("/v2/codex/responses/resp_a/mcp-grants",get(|State(m):State<Arc<Mutex<Mock>>>|async move{let m=m.lock().unwrap();if m.fail_grants{return StatusCode::SERVICE_UNAVAILABLE.into_response();}bound(json!({"response_id":"resp_a","data":m.grants}))}))
  .route("/v2/codex/mcp-grants/grant1/revoke",post(|State(m):State<Arc<Mutex<Mock>>>,h:HeaderMap|async move{
  let mut m=m.lock().unwrap();m.revoke_keys.push(h["Idempotency-Key"].to_str().unwrap().to_owned());m.grants[0]["state"]=json!("revoked");m.grants[0]["reason"]=json!("operator_revoked");
  StatusCode::SERVICE_UNAVAILABLE
  }))
 
- .route("/v2/codex/interactions/{id}/presentation",get(|State(m):State<Arc<Mutex<Mock>>>|async move{bound(m.lock().unwrap().presentation.clone())}))
+ .route("/v2/codex/interactions/{id}/presentation",get(|State(m):State<Arc<Mutex<Mock>>>,axum::extract::Query(q):axum::extract::Query<std::collections::HashMap<String,String>>|async move{let mut m=m.lock().unwrap();m.presentation_gets+=1;if m.loading_gets>0 {m.loading_gets-=1;let mut p=m.presentation.clone();p["state"]=json!("unavailable");p["reason"]=json!("catalog_loading");p["diagnostic"]=json!({"code":"catalog_loading","retryable":true,"retry_after_ms":2000});p["actions"]["allow_once"]=json!(false);p["actions"]["allow_turn_tool"]=json!(false);p["actions"]["retry"]=json!(true);for k in ["presentation_id","presentation_fingerprint","page","expires_at"] {p[k]=Value::Null;}codex_hoshikage_gateway::mcp_v06::Presentation::parse(p.clone()).expect("loading fixture");return bound(p);}
+ if q.get("audience").is_some_and(|s|s=="requester"){let page=q.get("page").and_then(|s|s.parse::<usize>().ok()).unwrap_or(0);return bound(m.private_pages.get(page).cloned().unwrap_or(Value::Null));}bound(m.presentation.clone())}))
  .route("/v2/codex/interactions/{id}/operation",get(|State(m):State<Arc<Mutex<Mock>>>|async move{bound(m.lock().unwrap().operation.clone())}))
  .route("/users/@me",get(||async{Json(json!({"id":"9","bot":true}))}))
  .route("/readyz",get(||async{Json(json!({"status":"ready"}))}))
  .route("/v2/codex/capabilities",get(|State(m):State<Arc<Mutex<Mock>>>|async move{let mut c=mcp_caps(); if m.lock().unwrap().turn_caps {c["mcp_operation_details"]=json!({"enabled":true,"profile":"native-item-id-v1","max_argument_bytes":65536,"disclosure":"requester_only"});c["mcp_turn_approval"]=json!({"enabled":true,"profile":"native-item-id-v1","max_grants":16,"ttl_seconds":600,"max_records":256});}
- if m.lock().unwrap().inline_caps {c["mcp_inline_approval"]=inline_capability();}Json(c)}))
+ if m.lock().unwrap().inline_caps {c["mcp_inline_approval"]=inline_capability();}
+ if m.lock().unwrap().v06_caps {c["mcp_approval_v06"]=v06_examples()["capability"]["mcp_approval_v06"].clone();}Json(c)}))
  .route("/v2/codex/conversations/conv_a/responses",post(|State(m):State<Arc<Mutex<Mock>>>,Json(v):Json<Value>|async move{m.lock().unwrap().posts.push(v);bound(json!({"response_id":"resp_a"}))}))
  .route("/v2/codex/conversations/conv_a",get(||async{bound(json!({"conversation_id":"conv_a","workspace_id":"ws_a","state":"ready"}))}))
- .route("/v2/codex/responses/resp_a",get(||async{bound(json!({"response_id":"resp_a","conversation_id":"conv_a","workspace_id":"ws_a","execution_status":"interrupted","error":{"code":"unsupported_interaction"}}))}))
+ .route("/v2/codex/responses/resp_a",get(|State(m):State<Arc<Mutex<Mock>>>|async move{bound(m.lock().unwrap().response.clone().unwrap_or(json!({"response_id":"resp_a","conversation_id":"conv_a","workspace_id":"ws_a","execution_status":"interrupted","error":{"code":"unsupported_interaction"}})))}))
         .route(
             "/channels/4",
             get(|| async { Json(json!({"id":"4","guild_id":"1","type":0})) }),
@@ -111,6 +122,7 @@ async fn setup() -> (
                     assert_eq!(h["X-Proxy-Recovery-Generation"], "gen_test");
                     assert_eq!(h["authorization"], "Bearer key");
                     let mut m = m.lock().unwrap();
+                    if m.reply_reject {m.reply_reject=false;return (StatusCode::CONFLICT,[("X-Proxy-Instance-Id","pxy_test"),("X-Proxy-Recovery-Generation","gen_test")],Json(json!({"error":{"code":m.reject_code.unwrap_or("presentation_stale")}}))).into_response();}
                     m.keys.push(h["Idempotency-Key"].to_str().unwrap().into());
                     m.posts.push(v.clone());
                     m.targets.push(id.clone());
@@ -151,7 +163,8 @@ async fn setup() -> (
                     v["channel_id"] = json!("4");
                     v["author"] = json!({"id":"9","bot":true});
                     m.messages.push(v.clone());
-                    Json(v)
+                    if m.lost_display {m.lost_display=false;return StatusCode::SERVICE_UNAVAILABLE.into_response();}
+                    Json(v).into_response()
                 },
             ),
         )
@@ -194,8 +207,8 @@ async fn setup() -> (
             "/webhooks/9/token/messages/@original",
             patch(
                 |State(m): State<Arc<Mutex<Mock>>>, Json(v): Json<Value>| async move {
-                    m.lock().unwrap().private.push(v);
-                    Json(json!({}))
+                    let mut v=v;v["id"]=json!("999");m.lock().unwrap().private.push(v.clone());
+                    Json(v)
                 },
             ),
         )
@@ -204,8 +217,8 @@ async fn setup() -> (
             post(
                 |State(m): State<Arc<Mutex<Mock>>>, Json(v): Json<Value>| async move {
                     assert_eq!(v["flags"], 64);
-                    m.lock().unwrap().private.push(v);
-                    Json(json!({}))
+                    let mut m=m.lock().unwrap();let mut v=v;v["id"]=json!((9000+m.private.len()).to_string());m.private.push(v.clone());
+                    Json(v)
                 },
             ),
         )
@@ -598,7 +611,7 @@ async fn schema_five_upgrade_preserves_requests_and_checks_new_migration() {
     let cfg = common::config(&tmp);
     let (store, _lock) = common::store(&cfg).await;
     let id = common::queued(&store, &cfg, "10").await;
-    store.call(true,|c|{c.execute_batch("DROP TABLE mcp_inline_views;DROP TABLE mcp_inline_runs;DELETE FROM schema_migrations WHERE version=8;DROP TABLE mcp_grant_revokes; DROP TABLE mcp_grant_records; DROP TABLE mcp_detail_views; DROP TABLE mcp_run_context; DELETE FROM schema_migrations WHERE version=7; ALTER TABLE requests DROP COLUMN interaction_scan_done; DROP TABLE mcp_interactions; DELETE FROM schema_migrations WHERE version=6; UPDATE schema_meta SET schema_version=5;")?;Ok(())}).await.unwrap();
+    store.call(true,|c|{c.execute_batch("DROP TABLE mcp_v06_decisions;DROP TABLE mcp_v06_parts;DROP TABLE mcp_v06_pages;DROP TABLE mcp_v06_views;DROP TABLE mcp_v06_runs;DELETE FROM schema_migrations WHERE version=9;DROP TABLE mcp_inline_views;DROP TABLE mcp_inline_runs;DELETE FROM schema_migrations WHERE version=8;DROP TABLE mcp_grant_revokes; DROP TABLE mcp_grant_records; DROP TABLE mcp_detail_views; DROP TABLE mcp_run_context; DELETE FROM schema_migrations WHERE version=7; ALTER TABLE requests DROP COLUMN interaction_scan_done; DROP TABLE mcp_interactions; DELETE FROM schema_migrations WHERE version=6; UPDATE schema_meta SET schema_version=5;")?;Ok(())}).await.unwrap();
     drop(store);
     let (store, _) = Store::open(&cfg).unwrap();
     assert_eq!(
@@ -1139,7 +1152,7 @@ async fn schema_six_upgrade_preserves_existing_interaction() {
     let (app, _m, _tmp, _lock, server, rid) = setup().await;
     app.scan_mcp(&rid).await.unwrap();
     let cfg = app.settings().await.cfg;
-    app.store.call(true,|c|{c.execute_batch("DROP TABLE mcp_inline_views;DROP TABLE mcp_inline_runs;DELETE FROM schema_migrations WHERE version=8;DROP TABLE mcp_grant_revokes;DROP TABLE mcp_grant_records;DROP TABLE mcp_detail_views;DROP TABLE mcp_run_context;ALTER TABLE mcp_interactions DROP COLUMN grant_scope;DELETE FROM schema_migrations WHERE version=7;UPDATE schema_meta SET schema_version=6;")?;Ok(())}).await.unwrap();
+    app.store.call(true,|c|{c.execute_batch("DROP TABLE mcp_v06_decisions;DROP TABLE mcp_v06_parts;DROP TABLE mcp_v06_pages;DROP TABLE mcp_v06_views;DROP TABLE mcp_v06_runs;DELETE FROM schema_migrations WHERE version=9;DROP TABLE mcp_inline_views;DROP TABLE mcp_inline_runs;DELETE FROM schema_migrations WHERE version=8;DROP TABLE mcp_grant_revokes;DROP TABLE mcp_grant_records;DROP TABLE mcp_detail_views;DROP TABLE mcp_run_context;ALTER TABLE mcp_interactions DROP COLUMN grant_scope;DELETE FROM schema_migrations WHERE version=7;UPDATE schema_meta SET schema_version=6;")?;Ok(())}).await.unwrap();
     drop(app);
     let (store, _) = Store::open(&cfg).unwrap();
     assert_eq!(
@@ -1455,7 +1468,7 @@ async fn schema_seven_upgrade_keeps_approval_context_and_old_requests_private() 
     use codex_hoshikage_gateway::storage::{self, Store};
     let (app, _m, _tmp, _lock, server, rid) = turn_setup().await;
     let s = app.settings().await;
-    app.store.call(true,|c|{c.execute_batch("DROP TABLE mcp_inline_views;DROP TABLE mcp_inline_runs;DELETE FROM schema_migrations WHERE version=8;UPDATE schema_meta SET schema_version=7;")?;Ok(())}).await.unwrap();
+    app.store.call(true,|c|{c.execute_batch("DROP TABLE mcp_v06_decisions;DROP TABLE mcp_v06_parts;DROP TABLE mcp_v06_pages;DROP TABLE mcp_v06_views;DROP TABLE mcp_v06_runs;DELETE FROM schema_migrations WHERE version=9;DROP TABLE mcp_inline_views;DROP TABLE mcp_inline_runs;DELETE FROM schema_migrations WHERE version=8;UPDATE schema_meta SET schema_version=7;")?;Ok(())}).await.unwrap();
     drop(app);
     let (store, _) = Store::open(&s.cfg).unwrap();
     assert_eq!(
@@ -1495,4 +1508,614 @@ async fn inline_unknown_proxy_does_not_advertise_inline_on_existing_requests() {
             .contains("mi:")
     );
     server.abort();
+}
+
+fn v06_examples() -> Value {
+    serde_json::from_str(include_str!("fixtures/mcp_v06_examples.json")).unwrap()
+}
+fn v06_page(key: &str, rid: &str) -> Value {
+    let mut p = v06_examples()[key].clone();
+    p["interaction_id"] = json!("int_a");
+    p["response_id"] = json!("resp_a");
+    p["turn_id"] = json!("turn_a");
+    p["expires_at"] = json!("2099-01-01T00:00:00Z");
+    p["audience"]["channel_id"] = json!("channel");
+    if p["audience"]["kind"] == "requester" {
+        p["audience"]["principal_id"] = json!("principal");
+    }
+    if p["scope"].is_object() {
+        p["scope"]["instance_id"] = json!("pxy_test");
+        p["scope"]["recovery_generation"] = json!("gen_test");
+        p["scope"]["context"] =
+            json!({"principal_id":"principal","channel_id":"channel","run_id":rid});
+        p["scope"]["response_id"] = json!("resp_a");
+        p["scope"]["turn_id"] = json!("turn_a");
+        p["scope"]["conversation_id"] = json!("conv_a");
+        p["scope"]["workspace_id"] = json!("ws_a");
+    }
+    p
+}
+async fn enable_v06(app: &App, m: &Arc<Mutex<Mock>>, rid: &str, key: &str) {
+    let mut p = v06_page(key, rid);
+    if key == "presentation_unreviewed" {
+        p["audience"]["kind"] = json!("source_conversation");
+        p["audience"]["principal_id"] = Value::Null;
+        p["display"]["disclosure"] = json!("source_conversation");
+    }
+    let selection = serde_json::to_string(&p["execution_policy"]["selection"]).unwrap();
+    {
+        let mut m = m.lock().unwrap();
+        m.v06_caps = true;
+        m.turn_caps = false;
+        m.inline_caps = false;
+        m.presentation = p;
+    }
+    app.settings().await.proxy.check().await.unwrap();
+    let rid = rid.to_owned();
+    app.store.call(true,move|c|{c.execute("INSERT INTO mcp_v06_runs(request_id,profile,selection_json) VALUES(?1,'source-conversation-v3',?2)",rusqlite::params![rid,selection])?;c.execute("INSERT OR IGNORE INTO mcp_run_context VALUES(?1,'principal','channel',?1)",[rid])?;Ok(())}).await.unwrap();
+    app.scan_mcp(&app.store.active("4").await.unwrap().unwrap().id)
+        .await
+        .unwrap();
+}
+fn v06_event(m: &Arc<Mutex<Mock>>, action: &str, private: bool) -> Value {
+    let m = m.lock().unwrap();
+    let messages = if private { &m.private } else { &m.messages };
+    let (msg, custom) = messages
+        .iter()
+        .rev()
+        .find_map(|msg| {
+            msg["components"]
+                .as_array()?
+                .iter()
+                .flat_map(|r| r["components"].as_array().into_iter().flatten())
+                .find_map(|c| {
+                    c["custom_id"]
+                        .as_str()
+                        .filter(|id| id.starts_with(&format!("ma6:{action}:")))
+                        .map(|id| (msg, id.to_owned()))
+                })
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "v06 button {action}: {}",
+                serde_json::to_string(messages).unwrap()
+            )
+        });
+    let mut e = turn_event(custom);
+    e["message"] = json!({"id":msg["id"]});
+    e
+}
+#[tokio::test]
+async fn v06_public_once_turn_and_duplicate_click_are_bound() {
+    for turn in [false, true] {
+        let (app, m, _tmp, _lock, server, rid) = setup().await;
+        enable_v06(
+            &app,
+            &m,
+            &rid,
+            if turn {
+                "presentation_turn_eligible"
+            } else {
+                "presentation_unreviewed"
+            },
+        )
+        .await;
+        let event = v06_event(&m, if turn { "turn" } else { "once" }, false);
+        {
+            let m = m.lock().unwrap();
+            assert!(m.messages.iter().any(|v| {
+                v["content"]
+                    .as_str()
+                    .is_some_and(|s| s.contains("action") || s.contains("操作"))
+            }));
+            assert!(
+                !m.messages
+                    .iter()
+                    .any(|v| v["components"].to_string().contains("ma6:private:"))
+            );
+        }
+        let (a, b) = tokio::join!(app.handle_v06_mcp(&event), app.handle_v06_mcp(&event));
+        a.unwrap();
+        b.unwrap();
+        let m = m.lock().unwrap();
+        assert_eq!(m.posts.len(), 1);
+        assert_eq!(m.posts[0]["approval_view"], "source_conversation");
+        assert_eq!(
+            m.posts[0]["expected_policy_binding_id"],
+            m.presentation["execution_policy"]["binding_id"]
+        );
+        assert_eq!(
+            m.posts[0]["expected_page_tokens"],
+            json!([m.presentation["page"]["token"]])
+        );
+        assert_eq!(
+            m.posts[0]["grant_scope"],
+            if turn {
+                json!("turn_tool")
+            } else {
+                Value::Null
+            }
+        );
+        server.abort();
+    }
+}
+#[tokio::test]
+async fn v06_stale_card_display_audience_and_stop_cannot_permit() {
+    for case in 0..7 {
+        let (app, m, _tmp, _lock, server, rid) = setup().await;
+        enable_v06(&app, &m, &rid, "presentation_turn_eligible").await;
+        let mut event = v06_event(&m, "once", false);
+        match case {
+            0 => event["message"]["id"] = json!("99999"),
+            1 => event["member"]["user"]["id"] = json!("3"),
+            2 => m.lock().unwrap().presentation["presentation_fingerprint"] = json!("other"),
+            3 => m.lock().unwrap().presentation["display"]["title"] = json!("別の内容"),
+            4 => m.lock().unwrap().presentation["audience"]["channel_id"] = json!("other"),
+            5 => {
+                let id = rid.clone();
+                app.store
+                    .call(true, move |c| {
+                        c.execute("UPDATE requests SET stop_requested=1 WHERE id=?1", [id])?;
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+            }
+            _ => {
+                m.lock().unwrap().presentation["scope"]["execution_policy_binding_id"] =
+                    json!("other")
+            }
+        }
+        let _ = app.handle_v06_mcp(&event).await;
+        assert!(m.lock().unwrap().posts.is_empty(), "case {case}");
+        server.abort();
+    }
+}
+#[tokio::test]
+async fn v06_decline_does_not_need_presentation_or_schema() {
+    let (app, m, _tmp, _lock, server, rid) = setup().await;
+    enable_v06(&app, &m, &rid, "presentation_turn_eligible").await;
+    let event = v06_event(&m, "decline", false);
+    {
+        let mut m = m.lock().unwrap();
+        m.presentation = Value::Null;
+        m.items[0]["request"]["requestedSchema"] = Value::Null;
+    }
+    app.handle_v06_mcp(&event).await.unwrap();
+    assert_eq!(
+        m.lock().unwrap().posts,
+        vec![json!({"expected_revision":1,"response":{"action":"decline"}})]
+    );
+    server.abort();
+}
+#[tokio::test]
+async fn v06_public_restart_recovers_receipts_and_unknown_reply_is_not_resent() {
+    let (app, m, _tmp, _lock, server, rid) = setup().await;
+    enable_v06(&app, &m, &rid, "presentation_turn_eligible").await;
+    let s = app.settings().await;
+    let fresh = App::new(s.cfg, app.store.clone(), app.discord.clone(), s.proxy).unwrap();
+    let before = m.lock().unwrap().messages.len();
+    fresh.scan_mcp(&rid).await.unwrap();
+    assert_eq!(m.lock().unwrap().messages.len(), before);
+    let event = v06_event(&m, "once", false);
+    m.lock().unwrap().lost = true;
+    fresh.handle_v06_mcp(&event).await.unwrap();
+    fresh.handle_v06_mcp(&event).await.unwrap();
+    fresh.scan_mcp(&rid).await.unwrap();
+    assert_eq!(m.lock().unwrap().posts.len(), 1);
+    server.abort();
+}
+#[tokio::test]
+async fn v06_private_pages_are_explicit_and_require_all_receipts() {
+    let (app, m, _tmp, _lock, server, rid) = setup().await;
+    enable_v06(&app, &m, &rid, "presentation_private_entry").await;
+    let mut p = v06_page("presentation_unreviewed", &rid);
+    p["audience"]["kind"] = json!("requester");
+    p["audience"]["principal_id"] = json!("principal");
+    p["display"]["disclosure"] = json!("requester_only");
+    p["page"]["count"] = json!(2);
+    p["display"]["fields"][0]["value"] = json!("SECRET_TEXT_ONLY_PRIVATE");
+    let mut second = p.clone();
+    second["page"]["index"] = json!(1);
+    second["page"]["token"] = json!("second-page");
+    m.lock().unwrap().private_pages = vec![p, second];
+    app.handle_v06_mcp(&v06_event(&m, "private", false))
+        .await
+        .unwrap();
+    {
+        let m = m.lock().unwrap();
+        assert!(
+            !serde_json::to_string(&m.messages)
+                .unwrap()
+                .contains("SECRET_TEXT_ONLY_PRIVATE")
+        );
+        assert!(
+            !m.private
+                .iter()
+                .any(|v| v["components"].to_string().contains("ma6:once:"))
+        );
+    }
+    let page = v06_event(&m, "page1", true);
+    app.handle_v06_mcp(&page).await.unwrap();
+    let event = v06_event(&m, "once", true);
+    app.handle_v06_mcp(&event).await.unwrap();
+    assert_eq!(m.lock().unwrap().posts.len(), 1);
+    assert_eq!(
+        m.lock().unwrap().posts[0]["expected_page_tokens"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let bytes = std::fs::read(&app.store.path).unwrap();
+    assert!(!String::from_utf8_lossy(&bytes).contains("SECRET_TEXT_ONLY_PRIVATE"));
+    server.abort();
+}
+
+#[tokio::test]
+async fn v06_start_and_grant_menu_work_without_legacy_switches() {
+    let (app, m, _tmp, _lock, server, rid) = setup().await;
+    enable_v06(&app, &m, &rid, "presentation_turn_eligible").await;
+    let proxy = app.settings().await.proxy;
+    proxy
+        .start_v2(
+            &app.store.request(&rid).await.unwrap(),
+            "conv_a",
+            json!("test"),
+        )
+        .await
+        .unwrap();
+    {
+        let m = m.lock().unwrap();
+        assert_eq!(
+            m.posts[0]["approval_presentation"]["profile"],
+            "source-conversation-v3"
+        );
+        assert_eq!(
+            m.posts[0]["approval_policy"]["id"],
+            "evaluated-turn-notion-guard"
+        );
+    }
+    let mut grant = v06_examples()
+        .as_object()
+        .unwrap()
+        .values()
+        .find_map(|v| {
+            v["data"]
+                .as_array()
+                .and_then(|a| a.iter().find(|g| g.get("grant_policy").is_some()))
+                .cloned()
+        })
+        .unwrap();
+    grant["grant_id"] = json!("grant1");
+    grant["scope"] = m.lock().unwrap().presentation["scope"].clone();
+    grant["availability"] =
+        json!({"state":"refreshing","reason":"catalog_loading","retry_after_ms":2000});
+    m.lock().unwrap().grants = vec![grant];
+    app.handle_mcp_turn(&turn_event(format!("mt:grants:{rid}")))
+        .await
+        .unwrap();
+    let rendered = serde_json::to_string(&m.lock().unwrap().private).unwrap();
+    assert!(rendered.contains("定義を更新中"), "{rendered}");
+    m.lock().unwrap().v06_caps = false;
+    proxy.check().await.unwrap();
+    assert!(
+        proxy
+            .start_v2(
+                &app.store.request(&rid).await.unwrap(),
+                "conv_a",
+                json!("test")
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(m.lock().unwrap().posts.len(), 1);
+    server.abort();
+}
+#[tokio::test]
+async fn v06_private_old_buttons_after_restart_require_redisplay() {
+    let (app, m, _tmp, _lock, server, rid) = setup().await;
+    enable_v06(&app, &m, &rid, "presentation_private_entry").await;
+    m.lock().unwrap().private_pages = vec![v06_page("presentation_unreviewed", &rid)];
+    app.handle_v06_mcp(&v06_event(&m, "private", false))
+        .await
+        .unwrap();
+    let event = v06_event(&m, "once", true);
+    let s = app.settings().await;
+    let fresh = App::new(s.cfg, app.store.clone(), app.discord.clone(), s.proxy).unwrap();
+    fresh.handle_v06_mcp(&event).await.unwrap();
+    assert!(m.lock().unwrap().posts.is_empty());
+    fresh
+        .handle_v06_mcp(&v06_event(&m, "private", false))
+        .await
+        .unwrap();
+    fresh
+        .handle_v06_mcp(&v06_event(&m, "once", true))
+        .await
+        .unwrap();
+    assert_eq!(m.lock().unwrap().posts.len(), 1);
+    server.abort();
+}
+
+#[tokio::test]
+async fn v06_definitively_rejected_permission_keeps_decline_available() {
+    let (app, m, _tmp, _lock, server, rid) = setup().await;
+    enable_v06(&app, &m, &rid, "presentation_turn_eligible").await;
+    let approve = v06_event(&m, "once", false);
+    let mut decline = v06_event(&m, "decline", false);
+    decline["id"] = json!("989898");
+    m.lock().unwrap().reply_reject = true;
+    app.handle_v06_mcp(&approve).await.unwrap();
+    assert!(m.lock().unwrap().posts.is_empty());
+    app.handle_v06_mcp(&decline).await.unwrap();
+    assert_eq!(m.lock().unwrap().posts.len(), 1);
+    assert_eq!(m.lock().unwrap().posts[0]["response"]["action"], "decline");
+    server.abort();
+}
+#[tokio::test]
+async fn v06_reconciliation_holds_configuration_unknown_until_isolated() {
+    let (app, m, _tmp, _lock, server, rid) = setup().await;
+    enable_v06(&app, &m, &rid, "presentation_turn_eligible").await;
+    let id = rid.clone();
+    app.store
+        .call(true, move |c| {
+            c.execute(
+                "UPDATE requests SET state='SENDING',turn_id=NULL WHERE id=?1",
+                [id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let mut p = v06_examples()["response_policy_pending"]["approval_policy"].clone();
+    let mut response = json!({"response_id":"resp_a","conversation_id":"conv_a","workspace_id":"ws_a","turn_id":null,"phase":"dispatching","execution_status":"not_started","approval_policy":p});
+    m.lock().unwrap().response = Some(response.clone());
+    let proxy = app.settings().await.proxy;
+    assert_eq!(
+        proxy.reconcile_v2(&app.store, &rid).await.unwrap(),
+        RequestState::Sending
+    );
+    assert!(
+        app.store
+            .v06_status(&rid)
+            .await
+            .unwrap()
+            .unwrap()
+            .contains("準備中")
+    );
+    p["state"] = json!("failed");
+    p["reason"] = json!("policy_setup_unknown");
+    p["preparation"]["configuration_isolation"] = json!("pending");
+    response["approval_policy"] = p.clone();
+    response["phase"] = json!("unknown");
+    m.lock().unwrap().response = Some(response.clone());
+    assert_eq!(
+        proxy.reconcile_v2(&app.store, &rid).await.unwrap(),
+        RequestState::Unknown
+    );
+    assert!(app.store.active("4").await.unwrap().is_some());
+    assert!(
+        app.store
+            .v06_status(&rid)
+            .await
+            .unwrap()
+            .unwrap()
+            .contains("AIはまだ開始していません")
+    );
+    p["preparation"]["configuration_isolation"] = json!("confirmed");
+    response["approval_policy"] = p;
+    response["phase"] = json!("rejected");
+    m.lock().unwrap().response = Some(response);
+    assert_eq!(
+        proxy.reconcile_v2(&app.store, &rid).await.unwrap(),
+        RequestState::Failed
+    );
+    assert!(app.store.active("4").await.unwrap().is_none());
+    assert!(m.lock().unwrap().posts.is_empty());
+    server.abort();
+}
+
+#[tokio::test]
+async fn v06_display_timeout_is_finite_and_retry_only_reads() {
+    let (app, m, _tmp, _lock, server, rid) = setup().await;
+    enable_v06(&app, &m, &rid, "presentation_turn_eligible").await;
+    m.lock().unwrap().presentation = Value::Null;
+    let s = app.settings().await;
+    let fresh = App::new(
+        s.cfg.clone(),
+        app.store.clone(),
+        app.discord.clone(),
+        s.proxy.clone(),
+    )
+    .unwrap();
+    fresh.scan_mcp(&rid).await.unwrap();
+    app.store
+        .call(true, |c| {
+            c.execute(
+                "UPDATE mcp_v06_views SET poll_deadline_ms=0 WHERE active=1",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let fresh = App::new(s.cfg, app.store.clone(), app.discord.clone(), s.proxy).unwrap();
+    let count = m.lock().unwrap().presentation_gets;
+    fresh.scan_mcp(&rid).await.unwrap();
+    assert_eq!(m.lock().unwrap().presentation_gets, count);
+    fresh
+        .handle_v06_mcp(&v06_event(&m, "retry", false))
+        .await
+        .unwrap();
+    assert_eq!(m.lock().unwrap().presentation_gets, count + 1);
+    assert!(m.lock().unwrap().posts.is_empty());
+    server.abort();
+}
+#[tokio::test]
+async fn v06_uncertain_display_post_is_not_duplicated_after_restart() {
+    let (app, m, _tmp, _lock, server, rid) = setup().await;
+    m.lock().unwrap().lost_display = true;
+    enable_v06(&app, &m, &rid, "presentation_turn_eligible").await;
+    let count = m.lock().unwrap().messages.len();
+    let s = app.settings().await;
+    let fresh = App::new(s.cfg, app.store.clone(), app.discord.clone(), s.proxy).unwrap();
+    fresh.expire_mcp_ui().await.unwrap();
+    fresh.scan_mcp(&rid).await.unwrap();
+    assert_eq!(m.lock().unwrap().messages.len(), count);
+    assert!(m.lock().unwrap().posts.is_empty());
+    assert!(
+        !m.lock().unwrap().messages.last().unwrap()["components"]
+            .to_string()
+            .contains("ma6:once:")
+    );
+    server.abort();
+}
+#[tokio::test]
+async fn v06_saved_grant_cancel_survives_list_outage() {
+    let (app, m, _tmp, _lock, server, rid) = setup().await;
+    enable_v06(&app, &m, &rid, "presentation_turn_eligible").await;
+    let mut grant = v06_examples()
+        .as_object()
+        .unwrap()
+        .values()
+        .find_map(|v| {
+            v["data"]
+                .as_array()
+                .and_then(|a| a.iter().find(|g| g.get("grant_policy").is_some()))
+                .cloned()
+        })
+        .unwrap();
+    grant["grant_id"] = json!("grant1");
+    grant["scope"] = m.lock().unwrap().presentation["scope"].clone();
+    m.lock().unwrap().grants = vec![grant];
+    app.handle_mcp_turn(&turn_event(format!("mt:grants:{rid}")))
+        .await
+        .unwrap();
+    m.lock().unwrap().fail_grants = true;
+    app.handle_mcp_turn(&turn_event(format!("mt:grants:{rid}")))
+        .await
+        .unwrap();
+    let control = m
+        .lock()
+        .unwrap()
+        .private
+        .iter()
+        .rev()
+        .find_map(|v| {
+            v["components"][0]["components"][0]["options"][0]["value"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .unwrap();
+    assert!(m.lock().unwrap().private.iter().any(|v| {
+        v["content"]
+            .as_str()
+            .is_some_and(|s| s.contains("現在の許可一覧を取得できません"))
+    }));
+    let event = turn_event(format!("mt:revoke:{control}"));
+    app.handle_mcp_turn(&event).await.unwrap();
+    app.handle_mcp_turn(&event).await.unwrap();
+    assert_eq!(m.lock().unwrap().revoke_keys.len(), 1);
+    server.abort();
+}
+
+#[tokio::test]
+async fn v06_failed_private_open_finishes_deferred_message() {
+    let (app, m, _tmp, _lock, server, rid) = setup().await;
+    enable_v06(&app, &m, &rid, "presentation_private_entry").await;
+    app.handle_v06_mcp(&v06_event(&m, "private", false))
+        .await
+        .unwrap();
+    let m = m.lock().unwrap();
+    assert_eq!(m.callbacks.last().unwrap()["type"], 5);
+    assert_eq!(m.private.last().unwrap()["id"], "999");
+    assert!(
+        m.private.last().unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .contains("開き直してください")
+    );
+    assert!(m.posts.is_empty());
+    server.abort();
+}
+
+#[tokio::test]
+async fn v06_decline_survives_execution_monitor_uncertainty() {
+    let (app, m, _tmp, _lock, server, rid) = setup().await;
+    enable_v06(&app, &m, &rid, "presentation_turn_eligible").await;
+    let event = v06_event(&m, "decline", false);
+    app.store
+        .observe(rid, RequestState::Unknown, "transport_unknown", false)
+        .await
+        .unwrap();
+    app.handle_v06_mcp(&event).await.unwrap();
+    assert_eq!(m.lock().unwrap().posts.len(), 1);
+    assert_eq!(m.lock().unwrap().posts[0]["response"]["action"], "decline");
+    server.abort();
+}
+
+#[tokio::test]
+async fn v06_catalog_refresh_preserves_explicit_click_without_reposting() {
+    let (app, m, _tmp, _lock, server, rid) = setup().await;
+    enable_v06(&app, &m, &rid, "presentation_turn_eligible").await;
+    let click = v06_event(&m, "turn", false);
+    m.lock().unwrap().loading_gets = 1;
+    app.handle_v06_mcp(&click).await.unwrap();
+    assert_eq!(m.lock().unwrap().posts.len(), 1);
+    assert_eq!(m.lock().unwrap().posts[0]["grant_scope"], "turn_tool");
+    server.abort();
+}
+
+#[tokio::test]
+async fn v06_catalog_wait_is_finite_and_does_not_send_permission() {
+    let (app, m, _tmp, _lock, server, rid) = setup().await;
+    enable_v06(&app, &m, &rid, "presentation_turn_eligible").await;
+    let click = v06_event(&m, "turn", false);
+    let before = m.lock().unwrap().presentation_gets;
+    m.lock().unwrap().loading_gets = 10;
+    app.handle_v06_mcp(&click).await.unwrap();
+    let m = m.lock().unwrap();
+    assert!(m.posts.is_empty());
+    assert_eq!(m.presentation_gets - before, 3);
+    assert!(m.private.iter().any(|v| {
+        v["content"]
+            .as_str()
+            .unwrap_or("")
+            .contains("許可は送っていません")
+    }));
+    server.abort();
+}
+
+#[tokio::test]
+async fn v06_catalog_post_rejections_do_not_block_decline() {
+    for code in ["catalog_loading", "catalog_failed"] {
+        let (app, m, _tmp, _lock, server, rid) = setup().await;
+        enable_v06(&app, &m, &rid, "presentation_turn_eligible").await;
+        let click = v06_event(&m, "turn", false);
+        let mut decline = v06_event(&m, "decline", false);
+        decline["id"] = json!("989898");
+        {
+            let mut m = m.lock().unwrap();
+            m.reply_reject = true;
+            m.reject_code = Some(code);
+        }
+        app.handle_v06_mcp(&click).await.unwrap();
+        assert!(m.lock().unwrap().posts.is_empty());
+        let rejected: String = app
+            .store
+            .call(true, |c| {
+                Ok(
+                    c.query_row("SELECT state FROM mcp_v06_decisions LIMIT 1", [], |r| {
+                        r.get(0)
+                    })?,
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(rejected, "REJECTED");
+        app.handle_v06_mcp(&decline).await.unwrap();
+        assert_eq!(m.lock().unwrap().posts.len(), 1);
+        assert_eq!(m.lock().unwrap().posts[0]["response"]["action"], "decline");
+        server.abort();
+    }
 }

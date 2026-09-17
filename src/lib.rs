@@ -37,3 +37,7 @@ pub mod mcp_ui;
 pub mod mcp_grants;
 
 pub mod mcp_inline;
+
+pub mod mcp_v06;
+
+mod mcp_v06_ui;

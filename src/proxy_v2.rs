@@ -23,6 +23,7 @@ pub struct V2State {
     pub mcp_form: std::sync::atomic::AtomicBool,
     pub store: RwLock<Option<Store>>,
     pub mcp_caps: RwLock<crate::mcp_grants::Capabilities>,
+    pub mcp_v06_caps: RwLock<Option<crate::mcp_v06::Capabilities>>,
 }
 #[derive(Debug)]
 pub struct ApiError {
@@ -36,6 +37,14 @@ impl std::fmt::Display for ApiError {
     }
 }
 impl std::error::Error for ApiError {}
+#[derive(Debug)]
+pub struct RetryAfter(pub u64);
+impl std::fmt::Display for RetryAfter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Proxy requested delayed retry")
+    }
+}
+impl std::error::Error for RetryAfter {}
 
 pub fn validate(c: &Value) -> Result<()> {
     ensure!(c["contract_version"] == "2.0", "Proxy API v2 required");
@@ -171,22 +180,44 @@ impl Proxy {
         key: Option<&str>,
         body: Option<&Value>,
     ) -> Result<Value> {
-        let limit =
-            if path.starts_with("/v2/codex/interactions/") && path.ends_with("/presentation") {
-                32768
-            } else if path.ends_with("/interactions") {
-                if self.v2.mcp_caps.read().unwrap().turn {
-                    64 * 1024 * 1024
-                } else {
-                    65536
-                }
-            } else if path.starts_with("/v2/codex/interactions/") {
-                262144
-            } else if path.ends_with("/mcp-grants") {
-                1048576
+        let limit = if path.starts_with("/v2/codex/operations/")
+            || path.starts_with("/v2/codex/stops")
+            || (path.starts_with("/v2/codex/mcp-grants/") && path.ends_with("/revoke"))
+        {
+            65536
+        } else if path.starts_with("/v2/codex/interactions/") && path.ends_with("/presentation") {
+            32768
+        } else if path.ends_with("/interactions") {
+            if self.v2.mcp_caps.read().unwrap().turn
+                || self
+                    .v2
+                    .mcp_v06_caps
+                    .read()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|c| c.enabled)
+            {
+                64 * 1024 * 1024
             } else {
-                4 * 1024 * 1024
-            };
+                65536
+            }
+        } else if path.starts_with("/v2/codex/interactions/") {
+            262144
+        } else if path.ends_with("/mcp-grants") {
+            1048576
+        } else {
+            4 * 1024 * 1024
+        };
+        self.v2_json_limited(method, path, key, body, limit).await
+    }
+    pub(crate) async fn v2_json_limited(
+        &self,
+        method: Method,
+        path: &str,
+        key: Option<&str>,
+        body: Option<&Value>,
+        limit: usize,
+    ) -> Result<Value> {
         ensure!(path.starts_with("/v2/codex/"), "invalid v2 endpoint");
         let mut request = self.bound(
             self.control
@@ -208,6 +239,12 @@ impl Proxy {
             .context("Proxy operation result unknown")?;
         self.check_response_binding(&response)?;
         let status = response.status();
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+            .and_then(|n| n.checked_mul(1000));
         let mut bytes = Vec::new();
         while let Some(chunk) = response.chunk().await.context("Proxy JSON read failure")? {
             ensure!(
@@ -250,12 +287,16 @@ impl Proxy {
                 })
                 .unwrap_or("none")
                 .to_owned();
-            return Err(ApiError {
+            let error = anyhow::Error::new(ApiError {
                 status: status.as_u16(),
                 code: token("code"),
                 retry,
-            }
-            .into());
+            });
+            return Err(if status.as_u16() == 429 {
+                error.context(RetryAfter(retry_after.unwrap_or(60_000)))
+            } else {
+                error
+            });
         }
         Ok(value)
     }
@@ -373,6 +414,11 @@ impl Proxy {
         let mut body = json!({"input":input,"model":r.model,"interaction_capabilities":if self.v2.mcp_form.load(std::sync::atomic::Ordering::SeqCst) {vec!["mcp_form"]}else{vec![]},"metadata":{"codex.approval_capability":"interactive","codex.auto_approve_workspace":"false"}});
         let caps = *self.v2.mcp_caps.read().unwrap();
         let saved_store = self.v2.store.read().unwrap().clone();
+        let modern = if let Some(store) = &saved_store {
+            store.v06_selection(&r.id).await?
+        } else {
+            None
+        };
         if let Some(store) = saved_store {
             let id = r.id.clone();
             let declared: bool = store
@@ -389,7 +435,7 @@ impl Proxy {
                 "inline capability changed after declaration"
             );
         }
-        if caps.details || caps.turn {
+        if modern.is_some() || caps.details || caps.turn {
             let store = self
                 .v2
                 .store
@@ -419,6 +465,21 @@ impl Proxy {
                 );
                 body["approval_presentation"] = json!({"mode":"source_conversation"});
             }
+        }
+        if let Some(selection) = modern {
+            ensure!(
+                self.v2
+                    .mcp_v06_caps
+                    .read()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|c| c.supports(selection.as_ref())),
+                "selected approval policy is no longer available"
+            );
+            ensure!(body["approval_context"].is_object(), "v06 context missing");
+            body["approval_presentation"] =
+                json!({"mode":"source_conversation","profile":crate::mcp_v06::PROFILE});
+            body["approval_policy"] = serde_json::to_value(selection)?;
         }
         self.v2_json(
             Method::POST,
@@ -461,6 +522,10 @@ impl Proxy {
                 ensure!(old.is_none_or(|old|old==resp),"response identity changed");
                 c.execute("UPDATE requests SET response_id=?2,turn_id=coalesce(turn_id,?3) WHERE id=?1",params![rid,resp,turn])?;Ok(())
             }).await?;
+            if store.v06_selection(&r.id).await?.is_some() {
+                store.observe_v06_policy(&r.id, &v["approval_policy"]).await?;
+                crate::mcp_v06::validate_response_policy(&v)?;
+            }
             let state=match (v["phase"].as_str(),v["execution_status"].as_str()) {
                 (Some("cancelled"),Some("not_started"))=>S::Cancelled,
                 (Some("rejected"),_)=>S::Failed,
@@ -484,7 +549,7 @@ impl Proxy {
                 let t=r.thread_id.clone();
                 store.call(true,move|c|{c.execute("UPDATE conversations SET continuation='NEW_CONVERSATION_REQUIRED',paused=1 WHERE thread_id=?1",[t])?;Ok(())}).await?;
             }
-            Ok::<_,anyhow::Error>((state,cv["state"]=="ready",v["error"]["code"].as_str().map(str::to_owned)))
+            Ok::<_,anyhow::Error>((state,cv["state"]=="ready",v["error"]["code"].as_str().or(v["approval_policy"]["reason"].as_str()).map(str::to_owned)))
         }.await;
         let (next, ready, code) = result.unwrap_or((S::Unknown, false, None));
         let rid = r.id.clone();

@@ -36,6 +36,7 @@ The administrator chooses whether the Bot responds to all authorized posts or on
 | `/status` | Check conversation, model, pause, and Proxy connection state |
 | `/steer text:INSTRUCTION` | Add an instruction to the current Turn; ordinary messages queue the next request |
 | `/stop` | Pause the queue and stop the accepted request, including before Turn start |
+| `/cancel` | Cancel the latest queued request, or interrupt the active request if nothing is queued. Does not pause or resume the queue. |
 | `/resume` | Resume the queue, without rerunning a cancelled request |
 | `/new title:NAME` | Start a new thread or forum post |
 | `/mcp` | Inspect/revoke MCP permissions for this task. Use `/stop` to stop the whole task |
@@ -123,3 +124,5 @@ Request-scoped permission includes **changed arguments to the same tool**; it is
 Use `/mcp` to inspect and revoke permissions for the latest request. Revocation stops future permission applications; it cannot undo completed operations. If confirmation is uncertain, reopen the list to check the original revocation without sending a new request.
 
 This feature requires an administrator to enable it and configure eligible tools on the Proxy; updating binaries alone does not enable it. Users do not need to edit configuration. If an option is missing, ask your administrator to check the [Gateway installation guide](installation.md) and the Proxy's [user and administrator guide (Japanese)](https://github.com/tanep3/codex-hoshikage-proxy/blob/main/docs/mcp-turn-approval-guide.ja.md). Unsupported or disabled environments retain individual confirmations.
+
+`/cancel` links to the original request. Multiple queued requests are cancelled one at a time, newest first. An active request remains held until the Proxy confirms it has stopped; cancellation does not undo changes already made. If you previously paused the queue with `/stop`, use `/resume` when you want remaining requests to proceed.

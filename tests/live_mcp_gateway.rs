@@ -27,6 +27,9 @@ struct Wire {
 }
 type Shared = Arc<Mutex<Wire>>;
 fn input(id: &str) -> Value {
+    if std::env::var("HOSHIKAGE_MCP_TOOL").as_deref() == Ok("tabs") {
+        return json!({"id":id,"channel_id":"4","guild_id":"1","author":{"id":"2","bot":false},"attachments":[],"content":"Gateway API 0.6 結合試験です。playwright MCPの browser_tabs を action=list で必ず別々に5回、順番に呼んでください。他の引数は指定しないでください。タブの作成・選択・閉じる操作、移動、検索、ページ内容の取得、他のMCP、ファイル操作は禁止です。ツールの発見は必要なら行ってください。一覧の内容は回答に含めず、5回完了したら mcp acceptance done とだけ答えてください。"});
+    }
     json!({"id":id,"channel_id":"4","guild_id":"1","author":{"id":"2","bot":false},"attachments":[],"content":"Gateway MCP結合試験です。playwright MCPのみ使用してください。最初に browser_navigate で https://example.com/ を開いてください。その後 browser_find で Example Domain を検索する呼出しを必ず別々に5回、順番に行ってください。検索条件は5回とも同じです。browser_findの引数はtextだけを指定し、その値をExample Domainにしてください。regexや他の引数を追加しないでください。browser_evaluate、コード実行、ファイル操作、他のサイトへのアクセスは使わないでください。MCPツールの発見は必要なら行ってください。5回終わったら mcp acceptance done とだけ答えてください。"})
 }
 fn event(custom: String) -> Value {
@@ -89,7 +92,7 @@ async fn gateway_real_mcp_single_and_turn_grants() -> Result<()> {
             "/channels/4/messages/{id}",
             get(
                 |State(w): State<Shared>, Path(id): Path<String>| async move {
-                    Json(if id == "10" || id == "11" || id == "12" {
+                    Json(if id == "10" || id == "11" || id == "12" || id == "13" {
                         input(&id)
                     } else {
                         w.lock()
@@ -162,6 +165,11 @@ async fn gateway_real_mcp_single_and_turn_grants() -> Result<()> {
             jobs.push(tokio::spawn(async move { a.$method().await }));
         };
     }
+    let (control_tx, control_rx) = tokio::sync::mpsc::channel(8);
+    let controller = app.clone();
+    jobs.push(tokio::spawn(async move {
+        controller.control_loop(control_rx).await
+    }));
     run!(scheduler_loop);
     run!(monitor_loop);
     run!(resource_loop);
@@ -171,7 +179,7 @@ async fn gateway_real_mcp_single_and_turn_grants() -> Result<()> {
     let result=tokio::time::timeout(Duration::from_secs(540),async{
         // Turn grant first, then next Run must ask again for every call.
         let mut handled=HashSet::new();
-        let cases=if std::env::var("HOSHIKAGE_MCP_CASE").as_deref()==Ok("revoke"){vec![("12",true)]}else{vec![("10",true),("11",false)]};
+        let cases=match std::env::var("HOSHIKAGE_MCP_CASE").as_deref(){Ok("revoke")=>vec![("12",true)],Ok("cancel")=>vec![("13",false)],_=>vec![("10",true),("11",false)]};
         for (message,turn) in cases {
             tx.send(Incoming::Message(input(message))).await?;
             let mut find_count=0;let mut nav_count=0;let mut revoked=false;
@@ -181,11 +189,15 @@ async fn gateway_real_mcp_single_and_turn_grants() -> Result<()> {
                     let desired=if turn && !revoked {":turn"}else{":once"};
                     let inline=buttons(m,"mi:");
                     if let Some(button)=inline.iter().find(|s|s.ends_with(desired)).or_else(||inline.iter().find(|s|s.ends_with(":once"))){controls.push(button.clone());}
+                    let modern=buttons(m,"ma6:");
+                    let action=if turn && !revoked {"ma6:turn:"} else {"ma6:once:"};
+                    if let Some(button)=modern.iter().find(|s|s.starts_with(action)).or_else(||modern.iter().find(|s|s.starts_with("ma6:once:"))){controls.push(button.clone());}
                     controls
                 }).collect();
                 for custom in detail_buttons {
                     let parts:Vec<_>=custom.split(':').collect();
                     let inline=parts[0]=="mi";
+                    let modern=parts[0]=="ma6";
                     let local=if inline{let view=parts[1].to_owned();app.store.call(false,move|c|Ok(c.query_row("SELECT interaction_local_id FROM mcp_inline_views WHERE id=?1",[view],|r|r.get::<_,String>(0))?)).await?}else{parts[2].to_owned()};
                     // Once/turn are two buttons for the same approval request.
                     // After revocation, do not select its other button while the
@@ -199,6 +211,11 @@ async fn gateway_real_mcp_single_and_turn_grants() -> Result<()> {
                         let confirmed:bool=app.store.call(false,move|c|Ok(c.query_row("SELECT EXISTS(SELECT 1 FROM deliveries d JOIN mcp_inline_views v ON d.target_id=v.interaction_local_id WHERE v.id=?1 AND v.active=1 AND d.kind='mcp_action' AND d.state='CONFIRMED' AND d.message_id IS NOT NULL)",[view],|r|r.get(0))?)).await?;
                         if !confirmed {continue;}
                     }
+                    if modern {
+                        let view=parts[4].to_owned();
+                        let confirmed:bool=app.store.call(false,move|c|Ok(c.query_row("SELECT EXISTS(SELECT 1 FROM mcp_v06_views WHERE id=?1 AND active=1 AND state='READY')",[view],|r|r.get(0))?)).await?;
+                        if !confirmed {continue;}
+                    }
                     let interaction_local=local.clone();
                     let remote:String=app.store.call(false,move|c|Ok(c.query_row("SELECT interaction_id FROM mcp_interactions WHERE id=?1",[local],|r|r.get(0))?)).await?;
                     let op=app.settings().await.proxy.v2_json(reqwest::Method::GET,&format!("/v2/codex/interactions/{remote}/operation"),None,None).await?;
@@ -209,10 +226,38 @@ async fn gateway_real_mcp_single_and_turn_grants() -> Result<()> {
                     let turn_this=match tool {
                         "browser_navigate"=>{ensure!(args["url"]=="https://example.com/","unexpected URL");nav_count+=1;false},
                         "browser_find"=>{ensure!(args["text"]=="Example Domain" && args.as_object().is_some_and(|o| o.keys().all(|k| k=="text")),"unexpected search (text_matches={}, keys={:?})",args["text"]=="Example Domain",args.as_object().map(|o|o.keys().collect::<Vec<_>>()));find_count+=1;turn && !revoked},
+                        "browser_tabs" if std::env::var("HOSHIKAGE_MCP_TOOL").as_deref()==Ok("tabs") => {
+                            ensure!(args==&json!({"action":"list"}),"unexpected tabs operation");
+                            find_count+=1;turn && !revoked
+                        },
                         _=>anyhow::bail!("unexpected tool: {tool}"),
                     };
                     eprintln!("message={message} operation={tool} eligible={} action={}",op["turn_grant_eligible"],if turn_this{"turn"}else{"once"});
-                    if inline {
+                    if find_count == 1 && let Ok(delay)=std::env::var("HOSHIKAGE_MCP_REVIEW_DELAY_SECS") {
+                        let delay: u64=delay.parse()?;
+                        ensure!(delay<=120,"review delay must be at most 120 seconds");
+                        eprintln!("waiting {delay}s before explicit user decision");
+                        tokio::time::sleep(Duration::from_secs(delay)).await;
+                    }
+                    if message == "13" {
+                        let mut e=event(String::new());e["type"]=json!(2);e["data"]=json!({"name":"cancel"});
+                        control_tx.send(Incoming::Interaction(e)).await?;
+                        handled.insert(handled_id);
+                        continue;
+                    }
+                    if modern {
+                        ensure!(custom.starts_with(if turn_this{"ma6:turn:"}else{"ma6:once:"}),"v06 permission selection mismatch");
+                        let msg=wire.lock().unwrap().messages.values().find(|m|buttons(m,"ma6:").contains(&custom)).cloned().context("v06 card missing")?;
+                        let labels:Vec<String>=msg["components"].as_array().into_iter().flatten().flat_map(|r|r["components"].as_array().into_iter().flatten()).filter_map(|b|b["label"].as_str().map(str::to_owned)).collect();
+                        ensure!(labels.contains(&"今回だけ許可".into())&&labels.contains(&"拒否".into()),"v06 choices missing");
+                        if turn_this {ensure!(labels.contains(&"この依頼中、このツールを許可".into()),"v06 turn choice missing");}
+                        ensure!(msg["content"].as_str().unwrap_or("").contains(&tool.replace('_', "\\_")),"tool missing from initial card");
+                        let mut e=event(custom.clone());e["message"]=json!({"id":msg["id"]});
+                        app.handle_v06_mcp(&e).await?;
+                        let accepted:bool=app.store.call(false,move|c|Ok(c.query_row("SELECT operation_key IS NOT NULL AND action='accept' FROM mcp_interactions WHERE id=?1",[interaction_local],|r|r.get(0))?)).await?;
+                        ensure!(accepted,"v06 approval did not record acceptance");
+                        eprintln!("message={message} v06 initial card and explicit permission confirmed");
+                    } else if inline {
                         ensure!(custom.ends_with(if turn_this{":turn"}else{":once"}),"inline permission selection mismatch");
                         let msg=wire.lock().unwrap().messages.values().find(|m|buttons(m,"mi:").contains(&custom)).cloned().context("inline card missing")?;
                         ensure!(msg["content"].as_str().unwrap_or("").contains(if tool=="browser_find"{"Example Domain"}else{"https://example.com/"}),"inline target missing");
@@ -249,12 +294,20 @@ async fn gateway_real_mcp_single_and_turn_grants() -> Result<()> {
                 if let Some((id,state,Some(response)))=rows.first()
                     && matches!(state.as_str(),"COMPLETED"|"FAILED"|"CANCELLED") {
                         eprintln!("message={message} request={id} response={response} terminal={state} navigate_prompts={nav_count} find_prompts={find_count}");
+                    if message == "13" {
+                            ensure!(state=="CANCELLED","cancel did not confirm interruption");
+                            ensure!(!app.store.conversation("4").await?.paused,"cancel paused the queue");
+                            ensure!(app.store.active("4").await?.is_none(),"cancel retained execution hold after confirmation");
+                            ensure!(find_count==1,"unexpected operation count before cancel");
+                            eprintln!("message={message} slash cancel confirmed by real Proxy; queue not paused; hold released");
+                            break;
+                        }
                         ensure!(state=="COMPLETED","execution did not complete");
                         ensure!(nav_count<=1 && (if message=="12" {find_count>=2} else {find_count==if turn{1}else{5}}),"unexpected prompt count");
                         app.handle_mcp_turn(&event(format!("mt:grants:{id}"))).await?;
                         let list=app.settings().await.proxy.v2_json(reqwest::Method::GET,&format!("/v2/codex/responses/{response}/mcp-grants"),None,None).await?;
                         let grants=list["data"].as_array().context("grant list")?;
-                        if revoked {ensure!(grants.len()==1 && grants[0]["state"]=="revoked","grant not revoked");ensure!(grants[0]["reason"]=="operator_revoked","revoke reason");ensure!(grants[0]["application_count"].as_u64().context("count")? + find_count - 1 == 5,"call counts after revoke");}else if turn {ensure!(grants.len()==1,"grant count");ensure!(grants[0]["state"]=="expired","grant not expired");ensure!(grants[0]["application_count"]==5,"expected five uses");}else{ensure!(grants.is_empty(),"grant leaked into next Run");}
+                        if revoked {ensure!(grants.len()==1 && grants[0]["state"]=="revoked","grant not revoked");ensure!(grants[0]["reason"]=="operator_revoked","revoke reason");ensure!(grants[0]["application_count"].as_u64().context("count")? + find_count - 1 == 5,"call counts after revoke");}else if turn {ensure!(grants.len()==1,"grant count");ensure!(matches!(grants[0]["state"].as_str(),Some("expired"|"revoked")) && grants[0]["reason"]=="scope_ended","grant not invalidated at Run end");ensure!(grants[0]["application_count"]==5,"expected five uses");}else{ensure!(grants.is_empty(),"grant leaked into next Run");}
                         eprintln!("message={message} grants checked; no cross-Run permission reuse");
                         break;
                 }

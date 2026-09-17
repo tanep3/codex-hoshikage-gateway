@@ -101,10 +101,26 @@ impl App {
         s: &crate::application::Settings,
     ) -> Result<()> {
         let caps = *s.proxy.v2.mcp_caps.read().unwrap();
-        if !caps.details && !caps.turn {
+        let modern_caps = s.proxy.v2.mcp_v06_caps.read().unwrap().clone();
+        let modern = modern_caps.as_ref().is_some_and(|c| c.enabled);
+        ensure!(
+            !modern
+                || modern_caps
+                    .as_ref()
+                    .is_some_and(|c| c.supports(Some(&crate::mcp_v06::Selection::guard()))),
+            "選択したMCPポリシーを利用できません。Proxyの設定を確認してください"
+        );
+        let fixed = self.store.v06_selection(&r.id).await?;
+        if modern || fixed.is_some() {
+            ensure!(modern, "0.6 capability or selected policy is unavailable");
+            self.store
+                .fix_v06_selection(&r.id, Some(crate::mcp_v06::Selection::guard()))
+                .await?;
+        }
+        if !modern && !caps.details && !caps.turn {
             return Ok(());
         }
-        let inline = caps.inline && caps.details;
+        let inline = !modern && caps.inline && caps.details;
         let (id, thread, user, guild) = (
             r.id.clone(),
             r.thread_id.clone(),
@@ -593,12 +609,13 @@ impl App {
         let r = self.store.request(request).await?;
         ensure!(r.thread_id == thread, "作業が一致しません");
         let s = self.settings().await;
+        let modern = self.store.v06_selection(request).await?.is_some();
         ensure!(
-            s.proxy.v2.mcp_caps.read().unwrap().turn,
+            modern || s.proxy.v2.mcp_caps.read().unwrap().turn,
             "ターン許可は現在利用できません"
         );
         let response = r.response_id.as_ref().context("Response missing")?;
-        let list = s
+        let result = s
             .proxy
             .v2_json(
                 Method::GET,
@@ -606,7 +623,12 @@ impl App {
                 None,
                 None,
             )
-            .await?;
+            .await;
+        let list = match result {
+            Ok(v) => v,
+            Err(_) if modern => return self.saved_v06_grants(request, thread, app, token).await,
+            Err(error) => return Err(error),
+        };
         ensure!(
             list["response_id"] == *response,
             "grant list response mismatch"
@@ -636,7 +658,18 @@ impl App {
                 ensure!(
                     matches!(
                         grant["reason"].as_str(),
-                        Some("operator_revoked" | "scope_ended" | "run_ended")
+                        Some(
+                            "operator_revoked"
+                                | "scope_ended"
+                                | "run_ended"
+                                | "catalog_failed"
+                                | "catalog_changed"
+                                | "policy_changed"
+                                | "config_changed"
+                                | "input_changed"
+                                | "expired"
+                                | "runtime_restarted"
+                        )
                     ),
                     "grant reason missing"
                 );
@@ -648,9 +681,25 @@ impl App {
                 .as_i64()
                 .filter(|n| *n >= 0)
                 .context("count missing")?;
+            if modern {
+                crate::mcp_v06::validate_grant(grant)?;
+                ensure!(
+                    self.store
+                        .v06_selection(request)
+                        .await?
+                        .context("missing v06 selection")?
+                        == crate::mcp_v06::ExecutionPolicy::parse(&grant["execution_policy"])?
+                            .selection,
+                    "grant selection mismatch"
+                );
+            }
             let (req, scope, st, expiry) = (
                 request.to_owned(),
-                serde_json::to_string(&canonical_scope(&grant["scope"]))?,
+                serde_json::to_string(&if modern {
+                    json!({"scope":grant["scope"],"execution_policy":grant["execution_policy"],"grant_policy":grant["grant_policy"]})
+                } else {
+                    canonical_scope(&grant["scope"])
+                })?,
                 state.to_owned(),
                 field(grant, "expires_at")?,
             );
@@ -666,6 +715,17 @@ impl App {
                 "revoked" => "取消済み",
                 _ => "失効",
             };
+            if modern {
+                lines.push(match grant["availability"]["state"].as_str() {
+                    Some("refreshing") => {
+                        "定義を更新中です。同じ定義の確認後に適用を再評価します。".into()
+                    }
+                    Some("inactive") => {
+                        "この許可は現在、自動適用しません。取消は引き続き利用できます。".into()
+                    }
+                    _ => "適用時に対象・引数・期限を再確認します。".into(),
+                });
+            }
             let server = safe(text(&grant["scope"], "server")?);
             let tool = safe(text(&grant["scope"], "tool")?);
             let name = format!("{server} / {tool}");
@@ -675,6 +735,27 @@ impl App {
                 short,
                 grant["expires_at"].as_str().unwrap()
             ));
+            if modern {
+                let operations = grant["grant_policy"]["eligible_operations"]
+                    .as_array()
+                    .context("grant operations")?
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(safe)
+                    .collect::<Vec<_>>()
+                    .join(" / ");
+                let confirm = grant["grant_policy"]["always_confirm_operations"]
+                    .as_array()
+                    .context("confirm operations")?
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(safe)
+                    .collect::<Vec<_>>()
+                    .join(" / ");
+                lines.push(format!(
+                    "依頼中の許可対象: {operations}\n毎回確認する操作: {confirm}"
+                ));
+            }
             self.refresh_mcp_revoke(&local, &grant["grant_id"]).await?;
             let lookup = local.clone();
             let outcome: Option<(String,Option<i64>)> = self.store.call(false, move |c| Ok(c.query_row("SELECT state,in_flight_count FROM mcp_grant_revokes WHERE grant_local_id=?1",[lookup],|r|Ok((r.get(0)?,r.get(1)?))).optional()?)).await?;
@@ -742,11 +823,20 @@ impl App {
             .await?;
         let r = self.store.request(&request).await?;
         ensure!(r.thread_id == thread, "許可の会話が一致しません");
-        self.scope_matches(&r, &serde_json::from_str(&scope)?)
-            .await?;
+        let saved: Value = serde_json::from_str(&scope)?;
+        self.scope_matches(
+            &r,
+            if saved.get("scope").is_some() {
+                &saved["scope"]
+            } else {
+                &saved
+            },
+        )
+        .await?;
         let s = self.settings().await;
         ensure!(
-            s.proxy.v2.mcp_caps.read().unwrap().turn,
+            self.store.v06_selection(&request).await?.is_some()
+                || s.proxy.v2.mcp_caps.read().unwrap().turn,
             "ターン許可は現在利用できません"
         );
         let id = local.to_owned();
@@ -826,6 +916,38 @@ impl App {
         } else {
             Ok("この会話にはまだ作業がありません。".into())
         }
+    }
+}
+
+impl App {
+    async fn saved_v06_grants(
+        &self,
+        request: &str,
+        thread: &str,
+        app: &str,
+        token: &str,
+    ) -> Result<()> {
+        let rid = request.to_owned();
+        let rows:Vec<(String,String)>=self.store.call(false,move|c|{let mut q=c.prepare("SELECT id,scope_json FROM mcp_grant_records WHERE request_id=?1 ORDER BY id LIMIT 16")?;Ok(q.query_map([rid],|r|Ok((r.get(0)?,r.get(1)?)))?.collect::<rusqlite::Result<_>>()?)}).await?;
+        let mut options = vec![];
+        let req = self.store.request(request).await?;
+        ensure!(req.thread_id == thread, "grant conversation mismatch");
+        for (id, scope) in rows {
+            let scope: Value = serde_json::from_str(&scope)?;
+            self.scope_matches(&req, &scope["scope"]).await?;
+            let name = format!(
+                "{} / {}",
+                safe(text(&scope["scope"], "server")?),
+                safe(text(&scope["scope"], "tool")?)
+            );
+            options.push(json!({"label":name.chars().take(80).collect::<String>(),"value":id}));
+        }
+        let controls = if options.is_empty() {
+            json!([])
+        } else {
+            json!([{"type":1,"components":[{"type":3,"custom_id":format!("mt:revoke-menu:{request}"),"placeholder":"保存済みの許可を取り消す","options":options}]}])
+        };
+        self.mcp_private(app,token,"現在の許可一覧を取得できません。許可がないという意味ではありません。保存済みの許可は下から取消できます。すべての操作を止める場合は /stop を使ってください。状態を読み直すには /mcp を実行してください。",controls).await
     }
 }
 

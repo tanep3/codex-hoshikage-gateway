@@ -106,7 +106,7 @@ impl App {
             .call(false, move |c| Ok(c.query_row(SELECT, [id], row)?))
             .await
     }
-    async fn mcp_current(&self, r: &Record) -> Result<Value> {
+    pub(crate) async fn mcp_current(&self, r: &Record) -> Result<Value> {
         let s = self.settings().await;
         ensure!(
             !self.recovery.load(Ordering::SeqCst) && !self.reloading.load(Ordering::SeqCst),
@@ -222,6 +222,7 @@ impl App {
         }
     }
     pub async fn expire_mcp_ui(&self) -> Result<()> {
+        self.sweep_v06_views().await?;
         let ids = self
             .store
             .call(false, |c| {
@@ -296,12 +297,13 @@ impl App {
             list["response_id"] == *response,
             "interaction response mismatch"
         );
+        let modern = self.store.v06_selection(id).await?.is_some();
         let data = list["data"]
             .as_array()
             .context("interaction list invalid")?;
         ensure!(
             data.len()
-                <= if s.proxy.v2.mcp_caps.read().unwrap().turn {
+                <= if modern || s.proxy.v2.mcp_caps.read().unwrap().turn {
                     256
                 } else {
                     16
@@ -343,7 +345,12 @@ impl App {
             let local=self.store.call(true,move|c|{let tx=c.transaction()?;let old:Option<String>=tx.query_row("SELECT id FROM mcp_interactions WHERE instance_id=?1 AND generation=?2 AND interaction_id=?3",params![b.instance_id,b.generation,remote],|r|r.get(0)).optional()?;
         let id=old.unwrap_or_else(domain::id);
         tx.execute("INSERT OR IGNORE INTO mcp_interactions(id,interaction_id,request_id,response_id,conversation_id,workspace_id,instance_id,generation,base_url,revision,request_digest,expires_at,state) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",params![id,remote,rid,resp,cv,ws,b.instance_id,b.generation,b.base_url,rev,digest,expiry,state])?;
-        let existing=tx.query_row(SELECT,[&id],row)?;ensure!(existing.request==rid&&existing.response==resp&&existing.binding==b,"interaction identity reused");tx.commit()?;Ok(id)
+        let existing=tx.query_row(SELECT,[&id],row)?;ensure!(existing.request==rid&&existing.response==resp&&existing.binding==b,"interaction identity reused");
+        if modern && state=="pending" && rev>existing.revision && existing.key.is_none() {
+            tx.execute("UPDATE mcp_interactions SET revision=?2,request_digest=?3,expires_at=?4,closed=0 WHERE id=?1",params![id,rev,digest,expiry])?;
+            tx.execute("UPDATE mcp_v06_views SET state='STALE',active=0 WHERE interaction_local_id=?1",[&id])?;
+        }
+        tx.commit()?;Ok(id)
       }).await?;
             self.render_mcp(&local, v).await?;
         }
@@ -384,6 +391,7 @@ impl App {
         Ok(())
     }
     async fn close_mcp(&self, r: &Record, thread: &str, text: &str) -> Result<()> {
+        self.close_v06_posts(&r.id, thread, false).await?;
         if self
             .delivery
             .text(&r.id, thread, "mcp_action", 0, text, json!([]))
@@ -408,6 +416,7 @@ impl App {
     }
 
     async fn compact_resolved_mcp(&self, rec: &Record, thread: &str) -> Result<()> {
+        self.close_v06_posts(&rec.id, thread, true).await?;
         // A previously closed UNKNOWN card may now have a verified resolution.
         // Keep recovery polling until the entire UI cleanup is confirmed.
         let local_id = rec.id.clone();
@@ -520,6 +529,7 @@ impl App {
                         "UPDATE mcp_interactions SET operation_state=?2 WHERE id=?1",
                         params![id, st],
                     )?;
+                    c.execute("UPDATE mcp_v06_decisions SET state=?2 WHERE interaction_local_id=?1 AND active=1",params![id,match st.as_str(){"succeeded"=>"RESOLVED","accepted"|"running"=>"ACCEPTED",_=>"UNKNOWN"}])?;
                     Ok(())
                 })
                 .await?;
@@ -569,6 +579,11 @@ impl App {
             "interaction changed without new UI"
         );
         let form = &v["request"];
+        if form["_meta"]["codex_approval_kind"] == "mcp_tool_call"
+            && self.store.v06_selection(&rec.request).await?.is_some()
+        {
+            return self.render_v06_mcp(&rec, &req.thread_id).await;
+        }
         let valid = mcp_form::validate_schema(&form["requestedSchema"]);
         let detailed = s.proxy.v2.mcp_caps.read().unwrap().details
             && form["_meta"]["codex_approval_kind"] == "mcp_tool_call";
@@ -676,6 +691,11 @@ impl App {
         ensure!(matches!(action, "accept" | "decline"), "invalid action");
         let rec = self.mcp_record(id).await?;
         let v = self.mcp_pending(&rec, thread, revision).await?;
+        ensure!(
+            !(self.store.v06_selection(&rec.request).await?.is_some()
+                && v["request"]["_meta"]["codex_approval_kind"] == "mcp_tool_call"),
+            "0.6の現在の確認画面から操作してください"
+        );
         if action == "accept"
             && scope.is_none()
             && self

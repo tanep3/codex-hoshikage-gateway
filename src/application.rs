@@ -35,6 +35,7 @@ pub struct App {
     pub config_mutation: Arc<Mutex<()>>,
     pub(crate) resource_mutation: Arc<RwLock<()>>,
     pub(crate) pending_projects: Arc<Mutex<HashMap<String, crate::projects::PendingProject>>>,
+    pub(crate) mcp_v06: Arc<crate::mcp_v06_ui::Runtime>,
     pub(crate) mcp_scan_lock: Arc<Mutex<()>>,
     pub(crate) mcp_drafts: Arc<Mutex<HashMap<String, crate::mcp_ui::Draft>>>,
     pub store: Store,
@@ -72,6 +73,7 @@ impl App {
         let cfg = cfg.with_registered_projects(&store.path)?;
         let workspaces = cfg.validate()?;
         Ok(Self {
+            mcp_v06: Arc::new(crate::mcp_v06_ui::Runtime::default()),
             mcp_scan_lock: Arc::new(Mutex::new(())),
             mcp_drafts: Arc::new(Mutex::new(HashMap::new())),
             config_mutation: Arc::new(Mutex::new(())),
@@ -196,9 +198,10 @@ impl App {
                         let result=async{
                             let cv=app.authorized_thread(&m.thread_id).await?;
                             let prepared=app.files.prepare(&m,&s.cfg.limits).await?;
-                            let waiting=cv.paused || app.store.active(&m.thread_id).await?.is_some();
+                            let active=app.store.active(&m.thread_id).await?;
+                            let waiting=cv.paused || active.is_some();
                             app.store.finalize(id.clone(),prepared.metadata_digest,prepared.digest,prepared.attachments).await?;
-                            if waiting {app.notice(format!("queued-{id}"),m.thread_id.clone(),if cv.paused {"受け付けました。一時停止中のため待機します。/resume で再開できます。"}else{"受け付けました。先の作業が終わるまで待機します。"}).await?;}
+                            if waiting {app.notice(format!("queued-{id}"),m.thread_id.clone(),if cv.paused {"受け付けました。一時停止中のため待機します。/resume で再開、/cancel で直近の待機依頼を取り消せます。"}else if active.is_some_and(|r|r.state==RequestState::Unknown){"受け付けましたが、前の作業の状態を確認できず待機しています。/cancel で直近の待機依頼を取消、/status で状態確認ができます。前の作業を止める場合は /stop を使ってください。"}else{"受け付けました。先の作業が終わるまで待機します。/cancel で直近の待機依頼を取り消せます。"}).await?;}
                             Ok::<(),anyhow::Error>(())
                         }.await;
                         if result.is_err(){let _=app.store.reject_admission(id,"input_validation_failed").await;}
@@ -455,11 +458,14 @@ impl App {
                     }
                     let message=match state.as_str(){
                         "FAILED"=>failure_message(error.as_deref()),
+                        "CANCELLED" if error.as_deref()==Some("user_cancel_before_send")=>continue,
                         "CANCELLED"=>interruption_with_evidence(error.as_deref(),stopped,declined),
                         "CANCEL_REQUESTED"=>"中断を要求しました。停止の確認を待っています。",
                         "UNKNOWN"=>"作業の状態を確認できません。再実行せず保留しています。/status で確認してください。",
                         _=>continue,
                     };
+                    let policy_status = self.store.v06_status(&id).await?;
+                    let message = policy_status.as_deref().unwrap_or(message);
                     let _=self.delivery.text(&id,&thread,"status",0,message,json!([])).await?;
                 }
                 let expired:Vec<_>=self.output.lock().await.iter().filter(|(_,o)|o.done&&o.created.elapsed()>=o.retention).map(|(id,_)|id.clone()).collect();

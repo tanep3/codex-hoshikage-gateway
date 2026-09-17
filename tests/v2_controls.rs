@@ -119,6 +119,23 @@ async fn workspace_paging_selection_and_forum_creation_through_discord_control()
     wait(&replies, 5).await;
     assert!(replies.lock().unwrap()[4].contains("<#6>"));
     assert!(app.store.conversation("6").await.is_ok());
+    let queued_first = common::queued(&app.store, &app.settings().await.cfg, "200").await;
+    let queued_latest = common::queued(&app.store, &app.settings().await.cfg, "201").await;
+    tx.send(send(105, json!({"name":"cancel"}))).await.unwrap();
+    wait(&replies, 6).await;
+    assert!(replies.lock().unwrap()[5].contains("待機中の依頼を1件取り消しました"));
+    assert!(replies.lock().unwrap()[5].contains("https://discord.com/channels/1/4/201"));
+    assert_eq!(
+        app.store.request(&queued_latest).await.unwrap().state,
+        codex_hoshikage_gateway::domain::RequestState::Cancelled
+    );
+    tx.send(send(105, json!({"name":"cancel"}))).await.unwrap();
+    wait(&replies, 7).await;
+    assert_eq!(
+        app.store.request(&queued_first).await.unwrap().state,
+        codex_hoshikage_gateway::domain::RequestState::Queued
+    );
+    assert!(!app.store.conversation("4").await.unwrap().paused);
     app.cancel.cancel();
     job.await.unwrap().unwrap();
     server.abort();

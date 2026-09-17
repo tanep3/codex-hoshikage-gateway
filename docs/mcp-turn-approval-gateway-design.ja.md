@@ -1,5 +1,7 @@
 # MCP許可 Gateway詳細設計（合意API 0.3／インライン0.4）
 
+> 0.3／0.4互換Response専用。新規0.5の設計は [内部詳細設計](mcp-approval-v05-gateway-design.ja.md) に置換する。旧renderer制限・本文digest経路を0.5へ流用しない。
+
 2026-09-16。実装基準はProxy mcp-turn-approval-api.ja.md 0.3とmcp-inline-approval-api.ja.md 0.4。工程は本文・DB・受入の確定後に実装、モック受入、実Proxy/Discord受入。常駐有効化は別工程。
 
 ## 元の会話で承認するUI：追加契約の接続設計

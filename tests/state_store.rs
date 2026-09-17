@@ -280,3 +280,148 @@ async fn existing_discord_place_initializes_missing_proxy_conversation_without_r
         assert_eq!(s.request(&old).await.unwrap().state, state);
     }
 }
+
+#[tokio::test]
+async fn cancel_latest_is_idempotent_and_preserves_pause_and_other_requests() {
+    let t = tempfile::tempdir().unwrap();
+    let c = common::config(&t);
+    let (s, _lock) = common::store(&c).await;
+    let first = common::queued(&s, &c, "10").await;
+    let latest = common::queued(&s, &c, "11").await;
+    s.stop("100".into(), "4".into()).await.unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            s.cancel_latest("101".into(), "4".into()).await.unwrap(),
+            ("waiting".into(), Some(latest.clone()))
+        );
+    }
+    assert!(s.conversation("4").await.unwrap().paused);
+    assert_eq!(s.request(&first).await.unwrap().state, S::Queued);
+    assert_eq!(s.request(&latest).await.unwrap().state, S::Cancelled);
+    assert!(s.begin_send(latest).await.is_err());
+    assert!(
+        s.reserve("11".into(), "4".into(), "meta".into(), c.limits)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(s.cancel_latest("101".into(), "other".into()).await.is_err());
+}
+
+#[tokio::test]
+async fn cancel_validation_prevents_late_worker_and_unblocks_earlier_queue() {
+    let t = tempfile::tempdir().unwrap();
+    let c = common::config(&t);
+    let (s, _lock) = common::store(&c).await;
+    let first = common::queued(&s, &c, "10").await;
+    let validating = s
+        .reserve("11".into(), "4".into(), "meta".into(), c.limits.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        s.cancel_latest("100".into(), "4".into()).await.unwrap().1,
+        Some(validating.clone())
+    );
+    assert!(
+        s.finalize(validating, "meta".into(), "input".into(), vec![])
+            .await
+            .is_err()
+    );
+    assert!(!s.conversation("4").await.unwrap().paused);
+    assert_eq!(s.candidates().await.unwrap()[0].id, first);
+}
+
+#[tokio::test]
+async fn cancel_sending_and_unknown_keeps_hold_and_persists_stop_intent() {
+    let t = tempfile::tempdir().unwrap();
+    let c = common::config(&t);
+    let (s, _lock) = common::store(&c).await;
+    let active = common::queued(&s, &c, "10").await;
+    s.begin_send(active.clone()).await.unwrap();
+    assert_eq!(
+        s.cancel_latest("100".into(), "4".into()).await.unwrap(),
+        ("active".into(), Some(active.clone()))
+    );
+    s.observe(active.clone(), S::Unknown, "offline", false)
+        .await
+        .unwrap();
+    let later = common::queued(&s, &c, "11").await;
+    // Duplicate must never retarget the later queued message.
+    assert_eq!(
+        s.cancel_latest("100".into(), "4".into()).await.unwrap().1,
+        Some(active.clone())
+    );
+    assert_eq!(s.request(&later).await.unwrap().state, S::Queued);
+    s.startup_recover().await.unwrap();
+    let held = s.active("4").await.unwrap().unwrap();
+    assert!(held.stop_requested);
+    assert_eq!(held.state, S::Unknown);
+    assert!(s.candidates().await.unwrap().is_empty());
+    s.observe(active, S::Cancelled, "v2_stop_observed", true)
+        .await
+        .unwrap();
+    assert_eq!(s.candidates().await.unwrap()[0].id, later);
+}
+
+#[tokio::test]
+async fn cancel_and_dispatch_race_never_resurrects_instruction() {
+    for _ in 0..10 {
+        let t = tempfile::tempdir().unwrap();
+        let c = common::config(&t);
+        let (s, _lock) = common::store(&c).await;
+        let id = common::queued(&s, &c, "10").await;
+        let (sent, cancel) = tokio::join!(
+            s.begin_send(id.clone()),
+            s.cancel_latest("100".into(), "4".into())
+        );
+        let (kind, target) = cancel.unwrap();
+        assert_eq!(target, Some(id.clone()));
+        let r = s.request(&id).await.unwrap();
+        if sent.is_ok() {
+            assert_eq!(kind, "active");
+            assert_eq!(r.state, S::Sending);
+            assert!(r.stop_requested);
+        } else {
+            assert_eq!(kind, "waiting");
+            assert_eq!(r.state, S::Cancelled);
+            assert!(r.client_request_id.is_none());
+        }
+        assert!(!s.conversation("4").await.unwrap().paused);
+    }
+}
+
+#[tokio::test]
+async fn completed_history_cannot_starve_current_unknown_monitor() {
+    let t = tempfile::tempdir().unwrap();
+    let c = common::config(&t);
+    let (s, _lock) = common::store(&c).await;
+    for i in 0..45 {
+        let id = common::queued(&s, &c, &(1000 + i).to_string()).await;
+        s.begin_send(id.clone()).await.unwrap();
+        s.identify(
+            id.clone(),
+            format!("resp_{i}"),
+            "thread_test".into(),
+            format!("turn_{i}"),
+        )
+        .await
+        .unwrap();
+        s.observe(id, S::Completed, "done", true).await.unwrap();
+    }
+    let active = common::queued(&s, &c, "2000").await;
+    s.begin_send(active.clone()).await.unwrap();
+    s.observe(active.clone(), S::Unknown, "disconnected", false)
+        .await
+        .unwrap();
+    assert_eq!(s.conversation("4").await.unwrap().continuation, "VERIFYING");
+    let pending = s.pending().await.unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, active);
+    s.observe(active, S::Cancelled, "v2_stop_observed", true)
+        .await
+        .unwrap();
+    assert!(s.pending().await.unwrap().is_empty());
+    let next = common::queued(&s, &c, "2001").await;
+    assert_eq!(s.candidates().await.unwrap()[0].id, next);
+}

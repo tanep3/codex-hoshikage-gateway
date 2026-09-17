@@ -28,7 +28,9 @@ impl App {
                         let app=self.clone();
                             // Stop can save pause even when other control workers are occupied.
                             let stop=v["data"]["name"]=="stop"||v["data"]["custom_id"].as_str().is_some_and(|x|x.starts_with("stop:"));
-                            if jobs.len()>=8&&!stop{continue;}
+                            let cancel=v["data"]["name"]=="cancel";
+                            let urgent=stop||cancel||v["data"]["custom_id"].as_str().is_some_and(|x|x.starts_with("ma6:decline:")||x.starts_with("mt:revoke")||x.ends_with(":decline"));
+                            if jobs.len()>=8&&!urgent{continue;}
                             if stop{
                                 let Some(thread)=v["channel_id"].as_str() else{continue};let Some(id)=v["id"].as_str() else{continue};
                                 if app.store.conversation(thread).await.is_err(){continue;}
@@ -37,9 +39,15 @@ impl App {
                                 let expected=v["data"]["custom_id"].as_str().and_then(|s|s.strip_prefix("stop:")).map(str::to_owned);
                             if app.store.stop_target(id.into(),thread.into(),expected).await.is_err(){continue;}
                             }
+                            if cancel {
+                                let Some(thread)=v["channel_id"].as_str() else{continue};
+                                let Some(id)=v["id"].as_str() else{continue};
+                                if app.store.conversation(thread).await.is_ok() && app.store.cancel_latest(id.into(),thread.into()).await.is_err(){continue;}
+                            }
                             if jobs.len()>=10{continue;}
                             jobs.spawn(async move{
                                 let Some(id)=v["id"].as_str() else{return};let Some(token)=v["token"].as_str() else{return};let Some(application)=v["application_id"].as_str() else{return};
+                                if v["data"]["custom_id"].as_str().is_some_and(|x|x.starts_with("ma6:")) {let _=app.handle_v06_mcp(&v).await;return;}
                                 if v["data"]["custom_id"].as_str().is_some_and(|x|x.starts_with("mi:")) {let _=app.handle_inline_mcp(&v).await;return;}
                                 if v["data"]["custom_id"].as_str().is_some_and(|x|x.starts_with("mt:")) {let _=app.handle_mcp_turn(&v).await;return;}
                                 if v["data"]["custom_id"].as_str().is_some_and(|x|x.starts_with("mcp:")) {
@@ -113,7 +121,7 @@ impl App {
         let thread = v["channel_id"].as_str().context("missing channel")?;
         let iid = v["id"].as_str().context("missing interaction")?;
         let name = v["data"]["name"].as_str().unwrap_or("");
-        if !matches!(name, "status" | "stop") && !stopped {
+        if !matches!(name, "status" | "stop" | "cancel") && !stopped {
             ensure!(
                 !self.recovery.load(Ordering::SeqCst) && !self.reloading.load(Ordering::SeqCst),
                 "recovery or reload pending"
@@ -265,13 +273,22 @@ impl App {
                             .join(" / ")
                     )
                 };
+                let preparation_status = if let Some(r) = &active {
+                    self.store
+                        .v06_status(&r.id)
+                        .await?
+                        .map(|s| format!("\n{s}"))
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
                 let recovery_help = if cv.continuation == "NEW_CONVERSATION_REQUIRED" {
                     "\n会話の接続状態を確認する必要があります。実行中・結果不明の依頼がある場合は、その確認が終わるまで新しい実行を保留します。"
                 } else {
                     ""
                 };
                 let text = format!(
-                    "{rejection}状態: {state}\n待機列: {}\n会話継続: {}\n選択モデル: {}\n実行モデル: {}\nProxy: {}\n確定回答と成果物はProxyの保存期限内に再取得します。{delivery_status}{image_status}{mcp_status}{recovery_help}",
+                    "{rejection}状態: {state}\n待機列: {}\n会話継続: {}\n選択モデル: {}\n実行モデル: {}\nProxy: {}\n確定回答と成果物はProxyの保存期限内に再取得します。{delivery_status}{image_status}{mcp_status}{preparation_status}{recovery_help}",
                     if cv.paused {
                         "停止中"
                     } else {
@@ -287,6 +304,47 @@ impl App {
                     }
                 );
                 Ok(self.redact(&s, &text))
+            }
+            "cancel" => {
+                let (decision, target) =
+                    self.store.cancel_latest(iid.into(), thread.into()).await?;
+                let Some(target) = target else {
+                    return Ok("取り消せる依頼はありません。".into());
+                };
+                let id = target.clone();
+                let message: String = self
+                    .store
+                    .call(true, move |c| {
+                        Ok(c.query_row(
+                            "SELECT message_id FROM admissions WHERE request_id=?1",
+                            [id],
+                            |r| r.get(0),
+                        )?)
+                    })
+                    .await?;
+                let link = format!(
+                    "https://discord.com/channels/{}/{}/{}",
+                    s.cfg.discord.guild_id, thread, message
+                );
+                let result = if decision == "waiting" {
+                    "待機中の依頼を1件取り消しました。Codexには実行させません。".to_owned()
+                } else {
+                    let request = self.store.request(&target).await?;
+                    if !request.state.terminal() {
+                        let _ = self.interrupt(&request).await;
+                    }
+                    match self.store.request(&target).await?.state {
+                        RequestState::Cancelled => "依頼の停止を確認しました。".into(),
+                        RequestState::Completed | RequestState::Failed => "依頼はすでに終了していました。実行済みの変更は元に戻りません。".into(),
+                        _ => "取消要求を保存しました。停止の確認が取れるまで後続を保留します。/status で確認してください。".into(),
+                    }
+                };
+                let paused = if cv.paused {
+                    "\n待機列は一時停止中です。残った依頼を進めるには /resume を使ってください。"
+                } else {
+                    ""
+                };
+                Ok(format!("{result}\n対象: {link}{paused}"))
             }
             "resume" => {
                 let Some((op, _)) = self.store.reserve_resume(iid.into(), thread.into()).await?
@@ -572,6 +630,7 @@ pub(crate) fn is_text_control(text: &str) -> bool {
                 | "/new"
                 | "/status"
                 | "/stop"
+                | "/cancel"
                 | "/resume"
                 | "/steer"
                 | "/get"

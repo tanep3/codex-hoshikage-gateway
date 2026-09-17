@@ -15,7 +15,8 @@ use std::{
 };
 use tokio::sync::{mpsc, oneshot};
 
-pub const SCHEMA: i64 = 8;
+pub const SCHEMA: i64 = 9;
+pub const MIGRATION_V9: &str = include_str!("../migrations/009_mcp_v06.sql");
 pub const MIGRATION_V8: &str = include_str!("../migrations/008_mcp_inline.sql");
 pub const MIGRATION_V7: &str = include_str!("../migrations/007_mcp_turn_grants.sql");
 pub const MIGRATION_V6: &str = include_str!("../migrations/006_interactions.sql");
@@ -123,7 +124,7 @@ fn migrate_v2(c: &mut Connection, quarantine: bool) -> Result<()> {
     if version == SCHEMA {
         return Ok(());
     }
-    ensure!((1..=7).contains(&version), "unsupported schema migration");
+    ensure!((1..=8).contains(&version), "unsupported schema migration");
     if version == 1 {
         let tx = c.transaction()?;
         tx.execute_batch(MIGRATION_V2)?;
@@ -150,6 +151,7 @@ fn migrate_v2(c: &mut Connection, quarantine: bool) -> Result<()> {
         (6, MIGRATION_V6),
         (7, MIGRATION_V7),
         (8, MIGRATION_V8),
+        (9, MIGRATION_V9),
     ] {
         if version >= target {
             continue;
@@ -202,6 +204,7 @@ pub fn validate_database(path: &Path) -> Result<(i64, String)> {
         (6, MIGRATION_V6),
         (7, MIGRATION_V7),
         (8, MIGRATION_V8),
+        (9, MIGRATION_V9),
     ] {
         if v < version {
             continue;
@@ -503,11 +506,54 @@ impl Store {
     }).await
     }
     pub async fn pending(&self) -> Result<Vec<Request>> {
-        self.call(true,|c|{let mut st=c.prepare(&format!("{REQUEST_SELECT} WHERE (r.state NOT IN ('COMPLETED','FAILED','CANCELLED','QUEUED','RECEIVED') AND EXISTS(SELECT 1 FROM holds h WHERE h.request_id=r.id AND (h.released=0 OR r.state='UNKNOWN'))) OR (r.state='COMPLETED' AND cv.continuation='VERIFYING') ORDER BY r.updated_at ASC LIMIT 40"))?;Ok(st.query_map([],request_row)?.collect::<rusqlite::Result<Vec<_>>>()?)}).await
+        self.call(true,|c|{let mut st=c.prepare(&format!("{REQUEST_SELECT} WHERE (r.state NOT IN ('COMPLETED','FAILED','CANCELLED','QUEUED','RECEIVED') AND EXISTS(SELECT 1 FROM holds h WHERE h.request_id=r.id AND (h.released=0 OR r.state='UNKNOWN'))) ORDER BY r.updated_at ASC LIMIT 40"))?;Ok(st.query_map([],request_row)?.collect::<rusqlite::Result<Vec<_>>>()?)}).await
     }
     pub async fn active(&self, thread: &str) -> Result<Option<Request>> {
         let t = thread.to_owned();
         self.call(true,move|c|{let mut st=c.prepare(&format!("{REQUEST_SELECT} JOIN holds h ON h.request_id=r.id WHERE r.thread_id=?1 AND h.released=0 ORDER BY r.sequence DESC LIMIT 1"))?;Ok(st.query_row([t],request_row).optional()?)}).await
+    }
+    /// Cancel one instruction without changing conversation pause state.
+    /// Repeated delivery of the same interaction returns its original target.
+    pub async fn cancel_latest(
+        &self,
+        interaction: String,
+        thread: String,
+    ) -> Result<(String, Option<String>)> {
+        self.call(true, move |c| {
+            let tx = c.transaction()?;
+            let existing: Option<(String, String, Option<String>)> = tx.query_row(
+                "SELECT thread_id,decision,target_request_id FROM operations WHERE interaction_id=?1 AND kind='cancel'",
+                [&interaction], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            ).optional()?;
+            if let Some((saved_thread, decision, target)) = existing {
+                ensure!(saved_thread == thread, "cancel conversation mismatch");
+                return Ok((decision, target));
+            }
+            read_conversation(&tx, &thread)?;
+            let waiting: Option<(String, String)> = tx.query_row(
+                "SELECT a.request_id,a.status FROM admissions a LEFT JOIN requests r ON r.id=a.request_id WHERE a.thread_id=?1 AND (a.status='VALIDATING' OR (a.status='ACCEPTED' AND r.state IN ('RECEIVED','QUEUED') AND r.dispatch_started_at IS NULL)) ORDER BY a.sequence DESC LIMIT 1",
+                [&thread], |r| Ok((r.get(0)?, r.get(1)?)),
+            ).optional()?;
+            let (decision, target) = if let Some((id, status)) = waiting {
+                if status == "VALIDATING" {
+                    tx.execute("UPDATE admissions SET status='REJECTED',version=version+1,error_code='user_cancel_before_send' WHERE request_id=?1", [&id])?;
+                } else {
+                    let r = read_request(&tx, &id)?;
+                    tx.execute("UPDATE requests SET state='CANCELLED',version=version+1,dispatch_eligible=0,error_code='user_cancel_before_send',updated_at=?2 WHERE id=?1", params![id,domain::now_ms()])?;
+                    event(&tx,&id,Some(r.state.as_str()),"CANCELLED","user_cancel_before_send")?;
+                }
+                ("waiting", Some(id))
+            } else {
+                let active: Option<String> = tx.query_row("SELECT r.id FROM requests r JOIN holds h ON h.request_id=r.id WHERE r.thread_id=?1 AND h.released=0 ORDER BY r.sequence DESC LIMIT 1", [&thread], |r| r.get(0)).optional()?;
+                if let Some(id) = &active {
+                    tx.execute("UPDATE requests SET stop_requested=1 WHERE id=?1", [id])?;
+                }
+                (if active.is_some() { "active" } else { "empty" }, active)
+            };
+            tx.execute("INSERT INTO operations(id,interaction_id,thread_id,kind,decision,target_request_id,state,created_at) VALUES(?1,?2,?3,'cancel',?4,?5,'APPLIED',?6)",params![domain::id(),interaction,thread,decision,target,domain::now_ms()])?;
+            tx.commit()?;
+            Ok((decision.into(), target))
+        }).await
     }
     pub async fn stop(&self, interaction: String, thread: String) -> Result<Option<Request>> {
         self.stop_target(interaction, thread, None).await

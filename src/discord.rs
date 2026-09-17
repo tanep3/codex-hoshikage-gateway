@@ -11,6 +11,15 @@ use std::{sync::Arc, time::Duration};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+#[derive(Debug)]
+pub struct HttpStatus(pub u16);
+impl std::fmt::Display for HttpStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Discord HTTP {}", self.0)
+    }
+}
+impl std::error::Error for HttpStatus {}
+
 #[derive(Clone)]
 pub struct Discord {
     client: reqwest::Client,
@@ -104,7 +113,9 @@ impl Discord {
                 tokio::time::sleep(Duration::from_secs_f64(delay.max(0.05))).await;
                 continue;
             }
-            ensure!(status.is_success(), "Discord HTTP {}", status.as_u16());
+            if !status.is_success() {
+                return Err(HttpStatus(status.as_u16()).into());
+            }
             return if bytes.is_empty() {
                 Ok(Value::Null)
             } else {
@@ -332,6 +343,7 @@ impl Discord {
             {"name":"mcp","description":"この作業のMCP許可を確認・取消"},
             {"name":"status","description":"実行・配信・会話の状態を表示"},
             {"name":"stop","description":"待ち行列を停止し、実行中の依頼へ中断を要求"},
+            {"name":"cancel","description":"直近の待機依頼1件を取消。待機がなければ実行中の依頼を中断"},
             {"name":"resume","description":"一時停止した待ち行列の自動開始を再開"},
             {"name":"models","description":"利用可能なモデルを一覧表示"},
             {"name":"model","description":"選択中モデルの確認／次の依頼のモデル変更","options":[opt("id","ProxyのモデルID",false)]},

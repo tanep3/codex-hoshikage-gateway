@@ -112,7 +112,12 @@ impl Proxy {
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.context("Proxy GET read failure")?;
             ensure!(
-                bytes.len() + chunk.len() <= 4 * 1024 * 1024,
+                bytes.len() + chunk.len()
+                    <= if path == "/v2/codex/capabilities" {
+                        1024 * 1024
+                    } else {
+                        4 * 1024 * 1024
+                    },
                 "Proxy response too large"
             );
             bytes.extend_from_slice(&chunk);
@@ -133,6 +138,12 @@ impl Proxy {
             crate::proxy_v2::validate(&caps)?;
             self.bind_v2(&caps).await?;
             *self.v2.mcp_caps.write().unwrap() = crate::mcp_grants::Capabilities::parse(&caps);
+            // Malformed advertised 0.6 must not silently downgrade new executions.
+            let modern = caps
+                .get("mcp_approval_v06")
+                .map(crate::mcp_v06::Capabilities::parse)
+                .transpose()?;
+            *self.v2.mcp_v06_caps.write().unwrap() = modern;
             self.v2
                 .mcp_form
                 .store(crate::mcp_form::supported(&caps), Ordering::SeqCst);

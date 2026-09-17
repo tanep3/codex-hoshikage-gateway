@@ -1,7 +1,9 @@
 # Codex Hoshikage Gateway システム設計書
 
-版: 1.5 / 2026-09-16 / Tane Channel Technology / MIT
-基準: [要件2.5](requirements.ja.md)、[Proxy API v2 契約案0.2](../../codex-hoshikage-proxy/docs/workspace-artifact-api-v2.ja.md)。設計は実装・配備済みの宣言ではない。
+> 2026-09-17 責務再整理を適用。[後継Gateway内部設計](mcp-approval-layered-gateway-design.ja.md)を現行の設計方針とする。汎用表示・単発承認と明示ポリシーを分離し、全342ツールの意味評価を汎用機能の着手条件から外す。API 0.6第12〜13節まで接続合意済み。具体的な型・DB・処理順序は[0.6実装詳細](mcp-approval-v06-implementation.ja.md)を正本とする。旧0.5のwireを黙って変更せず、以下の旧版固有部分は互換仕様・履歴として扱う。
+
+版: 1.10 / 2026-09-17 / Tane Channel Technology / MIT
+基準: [要件2.10](requirements.ja.md)、[Proxy API v2 契約案0.2](../../codex-hoshikage-proxy/docs/workspace-artifact-api-v2.ja.md)。設計は実装・配備済みの宣言ではない。
 
 ## 1. 構成と境界
 
@@ -61,7 +63,19 @@ Proxy rejectedは開始拒否、cancelled/not_startedは開始前取消、interr
 
 Steer・承認はv2対象のTurnを既存v1制御APIに渡すが、instance/generationヘッダーも付ける。期待Turn／Thread／承認期限を照合し、v1の非冪等な操作を無条件再送しない。制御操作は実行枠・コピー枠に依存しない。
 
+### 6.1 `/cancel` の対象確定と永続化
+
+Storeの優先制御キューでtransactionを開始し、operations.interaction_idで重複を検出する。同じ操作なら保存済み対象・判定を返し、再選択しない。現在会話のadmissionsをsequence降順に検索し、VALIDATINGまたは未送信RECEIVED/QUEUEDの最新1件を選ぶ。VALIDATINGはREJECTED・version増加・user_cancel_before_send、確定済み待機はCANCELLED・dispatch_eligible=0・イベント記録とする。finalizeは既存status検証、begin_sendは既存state検証で後着処理を拒否する。
+
+未送信がなければ未解放holdの対象にstop_requestedを保存する。対象なしも含めoperations(kind=cancel, decision=waiting/active/empty, target_request_id)を同じtransactionで保存する。スキーマ追加は不要。pauseとpause_revisionは変更しない。
+
+Discordの取消は実行枠の外側の優先制御として扱い、worker待ちの前に取消意思を保存する。処理workerは同じ操作IDから結果を取得し、activeの場合だけ既存interruptへ接続する。再起動時は既存stop_requested監視で継続する。送信境界以降は単にCANCELLEDへ書き換えず、Proxyの確定結果を照合する。取消操作が再送されても別のTurnへ転送しない。
+
+2026-09-17 検証: 取消の重複・検証中取消・送信境界競合・UNKNOWN保持と再起動・Discord制御経路・完了履歴45件後の監視を自動試験で確認。全134件成功、実環境用6件は未実行。Clippy（警告をエラー扱い）、format、差分検査も通過。当時は常駐未反映。同日20:04 JSTに常駐反映し、実Proxy＋模擬Discordのcancel試験と、常駐DB上の実Discord cancel受付・中断完了も確認。[統合記録](mcp-approval-v06-implementation.ja.md)を参照。
+
 ## 7. SSEと確定回答
+
+状態監視は未終端の実行だけを選ぶ。会話がVERIFYINGになっても過去のCOMPLETEDは監視対象に戻さない。会話状態は複数依頼で共有されるため、過去の完了記録が監視batch上限を占有して現行UNKNOWNを飢餓状態にしないことを受入条件とする。v2はResponseと会話の照合後に終端状態を保存し、確定回答・画像・配信の復旧は別監視を継続する。
 
 `/responses/{id}/events`を独立監視し、snapshot、delta、gap、terminal、output_ready/failedを処理する。ID不一致やgap後のdeltaは最終正本にしない。監視が落ちてもResponse照会を継続し、対象をRUNNINGのまま放置しない。
 
@@ -161,7 +175,7 @@ MCPカードの集約完了は本文・操作カードの削除確認まで閉�
 
 ### Proxy合意契約0.3の反映
 
-### 最初の承認カード（要件UI-01〜UI-06）
+### 0.4互換Responseの承認カード（0.5は次節の詳細設計へ置換）
 
 1. Proxy adapterが公開用表示を取得し、interaction・Response/Turn・実行範囲・表示の版を検証する。本人限定operation.argumentsとは別の型で扱い、公開カードrendererへ生引数を渡さない。公開APIは合意0.4のGET presentation、追加Capability、approval_presentationと返信用の表示トークンに対応する。具体境界は [接続レビュー](mcp-inline-approval-api-review.ja.md) に記録し、検索語・アクセス先URL等の操作対象を元会話へ表示することは利用者承認済み。認証情報・秘密入力・任意コードを除外した3種類のrendererとツール別規則を0.4のR-01対応版で確認し、Gateway接続レビューを完了した。
 2. Rendererは公開用の操作・対象・制限、許可範囲の説明、選択肢を同じカードに組み立てる。直接承認可能で表示が省略なしに収まる場合だけ許可ボタンを付ける。ターン限定適格性と公開可能性は別条件。長文・秘匿・未知形式は理由と補足確認／拒否へ切り替える。本文だけ先に送り後から許可ボタンを別投稿しない。
@@ -175,3 +189,39 @@ MCPカードの集約完了は本文・操作カードの削除確認まで閉�
 契約書：`../codex-hoshikage-proxy/docs/mcp-turn-approval-api.ja.md`。操作詳細はGET interaction/operationで取得し、本人限定画面へ表示する。公開確認カードにコードを埋め込まない。approval_contextのprincipal/channelはGateway側で不透明識別子へ写像し、run_idは既存の永続依頼IDを使う。新しい操作は既存reply + grant_scope/expected_scope_fingerprint、一覧はResponseのmcp-grants、取消はgrantのrevokeという境界に合わせる。Capabilityの具体キー・完全な応答型・表示版の照合・取消照会・一覧件数は [接続レビュー](mcp-turn-approval-api-review.ja.md) で解消し、schema 7と接続コードへ反映する。現Gatewayのv1 SteerにもProxyの許可失効が適用されることを接続Gateとする。
 
 API 0.3の [Gateway詳細設計・DB・受入](mcp-turn-approval-gateway-design.ja.md) を接続実装の基準とする。文書上の旧「API待ち」は経緯であり、この合意版の未決事項ではない。
+
+## MCP承認0.5 内部設計（2026-09-17）
+
+[内部詳細設計1.1](mcp-approval-v05-gateway-design.ja.md)を新profileの正本とする。型付き全scope、共通renderer、ページと投稿の二段階配信確認、schema9の表示・返信証跡、最新presentationでの押下検証、有界workerと独立sweeper、公開再照合と本人向け再表示を定義した。旧3renderer whitelist、本文digest、部分表示でも許可可能な経路を0.5で再利用しない。
+
+新しい状態はCodex実行状態と独立させる。表示が失敗してもAIを再実行せず、許可返信結果不明はoperation照会を優先する。grantのactiveとavailabilityを分離し、カタログ正常更新は既存許可をProxyが再評価する。Gatewayは自動acceptを発行しない。
+
+要件UI-01〜12と受入G05-01〜12を実装単位へ対応付けた。schema9は設計のみで適用前。後継契約と機能単位の詳細設計・受入条件が揃った範囲から実装する。全ツールの意味評価完了を一括の開始条件としない。実Discord受入とマニュアル更新は後工程とし、設計完成を動作確認済みと扱わない。
+
+ProxyレビューGD-01〜03を反映：公開1ページのDiscord分割と、Proxy指定display_too_largeによるrequester全ページ表示を分離する。拒否はinteraction/revisionを正本とする独立分岐であり、scope・表示token・全ページ確認を前提にしない。許可bodyはexpected_scope_fingerprint／expected_presentation_fingerprintを正式名とし、詳細設計1.1の完全例から構成する。案内ボタンは「自分だけに表示して確認」。
+
+## 責務分離後の内部構成
+
+[後継内部設計1.0](mcp-approval-layered-gateway-design.ja.md)に従い、ExecutionBinding・DisplaySnapshot・PolicySelection・EffectivePolicy・ApprovalEligibilityを独立した内部型とする。表示先、単発可否、依頼中可否を一つのbooleanに統合しない。未評価操作の汎用表示を、ツール別説明registryの完成に依存させない。
+
+schema9は[0.6実装詳細](mcp-approval-v06-implementation.ja.md)のmcp_v06_runs/views/pages/parts/decisionsとして確定した。旧0.5のschema9案は使用しない。要求profile・要求ポリシー・実効ポリシー・作成grantを別に保持し、未選択の世代を捏造しない。既存DBと旧Responseの意味を維持する。配信証跡、拒否独立、結果不明の照会、Supervisorの保証は継承する。
+
+
+### API 0.6 実装との対応
+
+- `mcp_v06`：版別契約型、nullable scope、選択と実効policy、presentation/全ページ証跡、endpoint別容量制限、schema9 Store。
+- `mcp_v06_ui`：公開投稿と本人向けページの配信、許可・拒否の独立検証、ACK先行、返信意思のtransaction、固定キーの照会、古い投稿の閉鎖。通常は操作内容の最後の投稿へボタンを付ける。
+- `proxy_v2`/`mcp_grants`：送信前のprofile・policy固定、要求body、Responseの準備結果照会、既存stop-by-request、許可範囲の保存・一覧・取消。
+- `application`/`commands`：0.6ボタンのControl経路、設定準備・設定隔離待ちの利用者向け案内。停止・拒否・取消は新規Turn枠を使用しない。
+
+`mcp_approval_v06` が利用可能な場合、新しいRunだけ0.6を使用する。既存Runの形式をcapability更新だけで変更しない。広告された0.6の型が不正なら新規実行の準備確認を失敗させ、旧形式へ黙って変更しない。選択済みpolicyが利用不能なら外して再実行しない。
+
+実装詳細・受入記録は [0.6実装詳細](mcp-approval-v06-implementation.ja.md)。0.5文書中の旧schema案・wire・本人向け前後移動方式は同書で置換し、汎用表示に意味評価を必須とする制約は採用しない。
+
+## 承認待機時間の補正（2026-09-17、Proxy調整中）
+
+カタログのTTLと利用者の承認待機を分離する。カタログの更新中状態を、公開不能や恒久的な未評価へ置換しない。押下時の現在照合と送信意思の永続化は維持する。表示tokenの期限とinteraction本体の保持期限は別管理し、長時間離席後は元操作がまだ待機中であることを確認して再表示へ導く。許可未送信・送信結果不明を区別するエラー案内と再表示操作は、[Proxy修正依頼](proxy-mcp-v06-review-delay-fix.ja.md)で契約を調整してから実装する。現行の30秒キャッシュ挙動に合わせて利用者へ即時押下を要求しない。
+
+### API 0.6第14節への接続補正（2026-09-17）
+
+カタログ更新中／取得失敗のGETはcatalog_loading/catalog_failedとして表示し、通常監視で2秒以降に再照会する。押下直前のGETは最大3回、2秒間隔で再取得し、同じ表示証拠が復元された場合だけ元の明示選択を続行する。許可POSTの自動再送はしない。409 catalog_loading/catalog_failedは許可未送信が確定しているため、決定記録をREJECTEDとして旧送信意思を閉じ、新たな明示選択・拒否を可能にする。結果不明の操作と混同しない。エラー表示には許可未送信と、元の画面の「再確認」または更新後のボタンを選ぶ手順を示す。
