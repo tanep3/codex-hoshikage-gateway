@@ -282,10 +282,10 @@ impl DirectCoordinator {
                             Ok(DirectAdmission::Accepted(id)) => {
                                 let request = this.app.store.request(&id).await?;
                                 let conversation = this.app.store.conversation(&request.thread_id).await?;
-                                if conversation.paused {
+                                if this.app.store.direct_unknown_blocker(&request.thread_id).await? {
+                                    this.notice(&id, &request.thread_id, "前の作業の結果を確認できず、この依頼はまだCodexへ送っていません。/recover で内容を確認して会話を復旧できます。復旧時に未送信依頼は取り消されるため、必要な指示を改めて投稿してください。").await?;
+                                } else if conversation.paused {
                                     this.notice(&id, &request.thread_id, "受け付けました。待機列は停止中です。/resume で再開、/cancel でこの待機依頼を取り消せます。").await?;
-                                } else if this.app.store.direct_unknown_blocker(&request.thread_id).await? {
-                                    this.notice(&id, &request.thread_id, "前の作業の結果を確認できず、この依頼はまだCodexへ送っていません。運用者による復旧が必要です。/status で状態を確認してください。依頼を取り消す場合は /cancel を使えます。").await?;
                                 }
                             }
                             Ok(DirectAdmission::Ignored | DirectAdmission::Duplicate) => {}
@@ -649,6 +649,11 @@ impl DirectCoordinator {
                     .model_selection(id, token, app_id, thread, custom, &value)
                     .await;
             }
+            if custom.starts_with("direct:recover:") {
+                return self
+                    .recovery_button(id, token, app_id, thread, custom)
+                    .await;
+            }
             return self
                 .approval_button(id, token, app_id, thread, custom)
                 .await;
@@ -663,6 +668,21 @@ impl DirectCoordinator {
             let (text, components) = result.unwrap_or_else(|_| {
                 (
                     "モデル候補を取得できませんでした。少し待って /model を開き直してください。"
+                        .into(),
+                    json!([]),
+                )
+            });
+            return self
+                .app
+                .discord
+                .reply_components(app_id, token, &text, components)
+                .await;
+        }
+        if value["data"]["name"] == "recover" {
+            self.app.discord.acknowledge(id, token).await?;
+            let (text, components) = self.recovery_menu(thread).await.unwrap_or_else(|_| {
+                (
+                    "復旧対象を確認できませんでした。少し待って /recover を開き直してください。"
                         .into(),
                     json!([]),
                 )
@@ -702,6 +722,98 @@ impl DirectCoordinator {
         .list()
         .await?;
         Ok(model_menu(&catalog, &current, interaction))
+    }
+
+    async fn recovery_menu(&self, thread: &str) -> Result<(String, Value)> {
+        self.app.verify_location(thread).await?;
+        if self.active.lock().await.contains_key(thread) {
+            return Ok(("この会話ではまだ作業が動いています。/status で確認し、必要なら /stop を使ってください。".into(),json!([])));
+        }
+        let Some(offer) = self.app.store.direct_recovery_offer(thread).await? else {
+            return Ok(("この会話に安全に解除できる結果不明の依頼はありません。/status で状態を確認してください。".into(),json!([])));
+        };
+        let text = format!(
+            "この会話の前の作業は結果を確認できず、次の依頼が止まっています。\n復旧すると、前の作業は再実行せず記録を残し、Codexの会話文脈を新しくします。未送信の待機依頼{}件は取り消します。Discordの履歴と作業ファイルは残ります。\n続ける場合は確認ボタンを押してください。次の新しい投稿から作業できます。",
+            offer.waiting
+        );
+        let components = json!([{"type":1,"components":[
+            {"type":2,"style":4,"label":"新しい文脈で会話を再開","custom_id":format!("direct:recover:{}:{}:{}:{}",offer.request_id,offer.generation,offer.pause_revision,offer.next_sequence)}
+        ]}]);
+        Ok((text, components))
+    }
+
+    async fn recovery_button(
+        &self,
+        id: &str,
+        token: &str,
+        app_id: &str,
+        thread: &str,
+        custom: &str,
+    ) -> Result<()> {
+        self.app.discord.acknowledge_update(id, token).await?;
+        let outcome = async {
+            self.app.verify_location(thread).await?;
+            let identity = custom
+                .strip_prefix("direct:recover:")
+                .context("recovery identity missing")?;
+            let fields = identity.split(':').collect::<Vec<_>>();
+            ensure!(fields.len() == 4, "recovery identity invalid");
+            let request_id = fields[0];
+            let generation = fields[1].parse::<i64>()?;
+            let pause_revision = fields[2].parse::<i64>()?;
+            let next_sequence = fields[3].parse::<i64>()?;
+            ensure!(
+                !request_id.is_empty() && generation >= 0,
+                "recovery identity invalid"
+            );
+            ensure!(
+                !self.active.lock().await.contains_key(thread),
+                "direct run still active"
+            );
+            let offer = self
+                .app
+                .store
+                .direct_recovery_offer(thread)
+                .await?
+                .context("recovery no longer available")?;
+            ensure!(
+                offer.request_id == request_id
+                    && offer.generation == generation
+                    && offer.pause_revision == pause_revision
+                    && offer.next_sequence == next_sequence,
+                "recovery offer changed"
+            );
+            let backup_dir = self.app.cfg.storage.state_dir.join("recovery-backups");
+            crate::storage::private_dir(&backup_dir)?;
+            let source = self.app.cfg.storage.state_dir.join("gateway.sqlite3");
+            let target = backup_dir.join(format!("discord-{id}"));
+            let backup =
+                tokio::task::spawn_blocking(move || crate::backup::create(&source, &target))
+                    .await??;
+            ensure!(
+                !self.active.lock().await.contains_key(thread),
+                "direct run started during recovery"
+            );
+            self.app
+                .store
+                .recover_direct_unknown(thread.into(), offer, id.into(), backup.backup_id)
+                .await?;
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+        let text = match outcome {
+            Ok(()) => {
+                "この会話を再開しました。前の作業は再実行していません。次の新しい投稿からCodexの文脈で作業できます。Discordの履歴と作業ファイルは残っています。"
+            }
+            Err(error) => {
+                tracing::warn!(event="direct_user_recovery_failed",category=%error.to_string().split(':').next().unwrap_or("unknown"));
+                "復旧を完了できませんでした。前の作業は再実行していません。/status を確認し、/recover を開き直してください。繰り返し失敗する場合はGatewayの運用者に連絡してください。"
+            }
+        };
+        self.app
+            .discord
+            .reply_components(app_id, token, text, json!([]))
+            .await
     }
 
     async fn model_selection(
@@ -773,8 +885,13 @@ impl DirectCoordinator {
                 let cv = self.app.store.conversation(thread).await?;
                 let active = self.app.store.active(thread).await?;
                 let active = active.as_ref().map(|r| r.state.as_str()).unwrap_or("なし");
+                let recovery = if self.app.store.direct_unknown_blocker(thread).await? {
+                    "\n前の作業が結果不明です。/recover で復旧内容を確認できます。/resume だけでは解除されません。"
+                } else {
+                    ""
+                };
                 Ok(format!(
-                    "実行中: {active}\n待機列: {}\n選択モデル: {}\n会話状態: {}",
+                    "実行中: {active}\n待機列: {}\n選択モデル: {}\n会話状態: {}{recovery}",
                     if cv.paused {
                         "停止中"
                     } else {

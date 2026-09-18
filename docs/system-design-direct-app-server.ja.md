@@ -62,6 +62,8 @@ UNKNOWNの占有枠は、後続依頼を黙って待たせる理由にしない�
 
 運用者は `direct holds` を稼働中でも読み取り専用で実行し、依頼ID・会話ID・hold世代・未送信件数を確認する。解除時はサービス停止後、`direct abandon --request-id … --generation … --reason … --backup-to … --accept-risk` を実行する。バックアップ先は新規パスのみ許し、整合したDBと保存物のバックアップが成功しなければ解除しない。サービス再起動後の未送信依頼は従来の受付IDのまま処理し、UNKNOWNの旧依頼を再利用しない。
 
+本人向けの `/recover` は、同じDiscord会話の未解除UNKNOWNが1件あり、実行中のRunと復元隔離がないときだけ確認画面を出す。画面には文脈が新規になること、旧依頼を再実行しないこと、未送信の待機依頼を取消す件数、Discord履歴とワークファイルを残すことを明示する。確認ボタンは対象依頼ID、hold世代、pause revision、受付sequenceを含み、Guild・本人・会話を再認可する。確認後、Gateway稼働中でもSQLite Online Backupと保存物の整合バックアップを一意なprivate pathへ作成し、成功した場合に限りStore transaction内で対象、世代、状態、実行中の有無、待機件数を再検証する。確認画面を開いた後に新しい投稿や停止操作が入ったら、古い確認からは解除しない。同じtransactionで未送信依頼をCANCELLEDにし、旧holdだけ解除、Codex thread bindingを消去、continuationをNEW、pausedを解除し、Discord interaction IDとバックアップIDを監査する。確認の重複・古い画面・競合は再適用しない。バックアップ失敗、検証中の入力、別のhold、送信境界通過済み依頼があるときは解除しない。`/resume`はUNKNOWN解除の代わりにならない。
+
 Discordの `/stop`／`/cancel` はRun actorの送信チャンネルが閉じていた場合、同じ操作IDでStore側の待機列停止／未送信取消へフォールバックする。送信済みか不明な制御を新しいIDで再送しない。`/stop` の応答では待機列を停止できた事実と、旧Turnへのinterruptが確認できない事実を分離する。結果取得の再試行エラーは理由を内部ログへ残し、利用者には「AIの実行状態」と「回答の取得状態」を別々に案内する。
 
 ## 5. 承認と制御

@@ -225,6 +225,132 @@ async fn unknown_hold_requires_explicit_abandon_before_next_direct_turn() {
 }
 
 #[tokio::test]
+async fn user_recovery_keeps_unknown_but_cancels_unsent_work_and_reopens_conversation() {
+    let temp = tempfile::tempdir().unwrap();
+    let cfg = common::config(&temp);
+    let (store, _lock) = common::store(&cfg).await;
+    let old = common::queued(&store, &cfg, "1200").await;
+    let waiting = common::queued(&store, &cfg, "1201").await;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let intent = store
+        .prepare_direct(old.clone(), "4".into(), workspace.clone(), "openai".into())
+        .await
+        .unwrap();
+    store.begin_direct_send(old.clone(), intent).await.unwrap();
+    store.fence_direct_after_restart().await.unwrap();
+    store.stop("stop-1202".into(), "4".into()).await.unwrap();
+    let offer = store.direct_recovery_offer("4").await.unwrap().unwrap();
+    assert_eq!(offer.request_id, old);
+    assert_eq!(offer.waiting, 1);
+    let mut wrong_generation = offer.clone();
+    wrong_generation.generation += 1;
+    assert!(
+        store
+            .recover_direct_unknown(
+                "5".into(),
+                offer.clone(),
+                "confirm-wrong-thread".into(),
+                "backup-1".into()
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .recover_direct_unknown(
+                "4".into(),
+                wrong_generation,
+                "confirm-wrong-generation".into(),
+                "backup-1".into()
+            )
+            .await
+            .is_err()
+    );
+    let extra = common::queued(&store, &cfg, "1205").await;
+    assert!(
+        store
+            .recover_direct_unknown(
+                "4".into(),
+                offer.clone(),
+                "confirm-stale-queue".into(),
+                "backup-1".into()
+            )
+            .await
+            .is_err()
+    );
+    let offer = store.direct_recovery_offer("4").await.unwrap().unwrap();
+    assert_eq!(offer.waiting, 2);
+    let backup = temp.path().join("before-recovery");
+    let manifest = codex_hoshikage_gateway::backup::create(
+        &cfg.storage.state_dir.join("gateway.sqlite3"),
+        &backup,
+    )
+    .unwrap();
+    assert_eq!(
+        codex_hoshikage_gateway::backup::verify(&backup)
+            .unwrap()
+            .backup_id,
+        manifest.backup_id
+    );
+    assert!(
+        store
+            .recover_direct_unknown(
+                "4".into(),
+                offer.clone(),
+                "confirm-1203".into(),
+                manifest.backup_id.clone()
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .recover_direct_unknown(
+                "4".into(),
+                offer.clone(),
+                "confirm-1203".into(),
+                manifest.backup_id.clone()
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .recover_direct_unknown(
+                "4".into(),
+                offer,
+                "confirm-stale".into(),
+                manifest.backup_id.clone()
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store.request(&old).await.unwrap().state,
+        RequestState::Unknown
+    );
+    assert_eq!(
+        store.request(&waiting).await.unwrap().state,
+        RequestState::Cancelled
+    );
+    assert_eq!(
+        store.request(&extra).await.unwrap().state,
+        RequestState::Cancelled
+    );
+    assert!(!store.direct_unknown_blocker("4").await.unwrap());
+    let cv = store.conversation("4").await.unwrap();
+    assert!(!cv.paused);
+    assert_eq!(cv.continuation, "NEW");
+    let next = common::queued(&store, &cfg, "1204").await;
+    let next_intent = store
+        .prepare_direct(next.clone(), "4".into(), workspace, "openai".into())
+        .await
+        .unwrap();
+    store.begin_direct_send(next, next_intent).await.unwrap();
+}
+
+#[tokio::test]
 async fn stop_pauses_an_unknown_run_and_cancel_removes_its_unsent_followup() {
     let temp = tempfile::tempdir().unwrap();
     let cfg = common::config(&temp);

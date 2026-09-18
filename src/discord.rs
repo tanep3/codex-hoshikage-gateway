@@ -375,6 +375,7 @@ impl Discord {
             {"name":"stop","description":"実行中の依頼を中断し、待機列を一時停止"},
             {"name":"cancel","description":"直近の待機依頼を取り消し。なければ実行中を中断"},
             {"name":"resume","description":"一時停止した待機列を再開"},
+            {"name":"recover","description":"結果不明で止まった会話を確認して復旧"},
             {"name":"models","description":"Codexで利用できるモデル一覧","options":[{"type":4,"name":"page","description":"一覧のページ番号（省略で1）","required":false,"min_value":1}]},
             {"name":"model","description":"選択中モデルの確認・変更","options":[option("id","モデルID",false)]},
             {"name":"get","description":"この会話の成果物一覧、またはファイルの保存版を返送","options":[option("path","会話ワーク内の相対パス（省略で一覧）",false)]},

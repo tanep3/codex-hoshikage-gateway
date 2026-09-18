@@ -19,7 +19,111 @@ pub struct DirectDispatch {
     pub selected_model: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectRecoveryOffer {
+    pub request_id: String,
+    pub generation: i64,
+    pub waiting: i64,
+    pub pause_revision: i64,
+    pub next_sequence: i64,
+}
+
 impl Store {
+    pub async fn direct_recovery_offer(
+        &self,
+        discord_thread_id: &str,
+    ) -> Result<Option<DirectRecoveryOffer>> {
+        let thread = discord_thread_id.to_owned();
+        self.call(false, move |c| {
+            let pending_restore: bool = c.query_row(
+                "SELECT recovery_pending!=0 FROM schema_meta WHERE singleton=1", [], |r| r.get(0)
+            )?;
+            if pending_restore { return Ok(None); }
+            let mut holds = c.prepare(
+                "SELECT h.request_id,h.generation FROM holds h JOIN requests r ON r.id=h.request_id JOIN direct_dispatches d ON d.request_id=r.id WHERE r.thread_id=?1 AND r.state='UNKNOWN' AND d.send_state='UNKNOWN' AND h.released=0"
+            )?;
+            let found = holds.query_map([&thread], |r| Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            if found.len()!=1 { return Ok(None); }
+            let held: i64=c.query_row(
+                "SELECT count(*) FROM holds h JOIN requests r ON r.id=h.request_id WHERE r.thread_id=?1 AND h.released=0",
+                [&thread],|r|r.get(0))?;
+            if held!=1 { return Ok(None); }
+            let busy: bool = c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM requests WHERE thread_id=?1 AND state IN ('SENDING','RUNNING','APPROVAL_REQUIRED','CANCEL_REQUESTED')) OR EXISTS(SELECT 1 FROM admissions WHERE thread_id=?1 AND status='VALIDATING')",
+                [&thread], |r| r.get(0)
+            )?;
+            if busy { return Ok(None); }
+            let waiting: i64 = c.query_row(
+                "SELECT count(*) FROM requests WHERE thread_id=?1 AND state IN ('RECEIVED','QUEUED') AND dispatch_started_at IS NULL",
+                [&thread], |r| r.get(0)
+            )?;
+            let (pause_revision,next_sequence):(i64,i64)=c.query_row(
+                "SELECT pause_revision,next_sequence FROM conversations WHERE thread_id=?1",
+                [&thread],|r|Ok((r.get(0)?,r.get(1)?)))?;
+            Ok(Some(DirectRecoveryOffer {request_id:found[0].0.clone(),generation:found[0].1,waiting,pause_revision,next_sequence}))
+        }).await
+    }
+
+    /// User-confirmed, online recovery. The caller has already made a verified
+    /// backup and checked that no live Run actor owns this conversation.
+    pub async fn recover_direct_unknown(
+        &self,
+        discord_thread_id: String,
+        offer: DirectRecoveryOffer,
+        interaction_id: String,
+        backup_id: String,
+    ) -> Result<bool> {
+        self.call(true, move |c| {
+            let tx=c.transaction()?;
+            if tx.prepare("SELECT 1 FROM operations WHERE interaction_id=?1")?.exists([&interaction_id])? {
+                return Ok(false);
+            }
+            let pending_restore: bool=tx.query_row("SELECT recovery_pending!=0 FROM schema_meta WHERE singleton=1",[],|r|r.get(0))?;
+            ensure!(!pending_restore,"restore quarantine is active");
+            let (pause_revision,next_sequence):(i64,i64)=tx.query_row(
+                "SELECT pause_revision,next_sequence FROM conversations WHERE thread_id=?1",
+                [&discord_thread_id],|r|Ok((r.get(0)?,r.get(1)?)))?;
+            ensure!(pause_revision==offer.pause_revision && next_sequence==offer.next_sequence,"conversation changed after recovery confirmation");
+            let match_count: i64=tx.query_row(
+                "SELECT count(*) FROM holds h JOIN requests r ON r.id=h.request_id JOIN direct_dispatches d ON d.request_id=r.id WHERE h.request_id=?1 AND r.thread_id=?2 AND r.state='UNKNOWN' AND d.send_state='UNKNOWN' AND h.released=0 AND h.generation=?3",
+                params![offer.request_id,discord_thread_id,offer.generation],|r|r.get(0))?;
+            ensure!(match_count==1,"unknown recovery target changed");
+            let held: i64=tx.query_row(
+                "SELECT count(*) FROM holds h JOIN requests r ON r.id=h.request_id WHERE r.thread_id=?1 AND h.released=0",
+                [&discord_thread_id],|r|r.get(0))?;
+            ensure!(held==1,"conversation has another execution hold");
+            let active: bool=tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM requests WHERE thread_id=?1 AND state IN ('SENDING','RUNNING','APPROVAL_REQUIRED','CANCEL_REQUESTED')) OR EXISTS(SELECT 1 FROM admissions WHERE thread_id=?1 AND status='VALIDATING')",
+                [&discord_thread_id],|r|r.get(0))?;
+            ensure!(!active,"conversation has an active execution or input validation");
+            let unsafe_waiting: bool=tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM requests WHERE thread_id=?1 AND state IN ('RECEIVED','QUEUED') AND dispatch_started_at IS NOT NULL)",
+                [&discord_thread_id],|r|r.get(0))?;
+            ensure!(!unsafe_waiting,"waiting request crossed the send boundary");
+            let waiting={
+                let mut statement=tx.prepare(
+                    "SELECT id,state FROM requests WHERE thread_id=?1 AND state IN ('RECEIVED','QUEUED') AND dispatch_started_at IS NULL"
+                )?;
+                statement.query_map([&discord_thread_id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            ensure!(waiting.len() as i64==offer.waiting,"waiting requests changed after recovery confirmation");
+            let now=domain::now_ms();
+            for (id,state) in &waiting {
+                tx.execute("UPDATE requests SET state='CANCELLED',dispatch_eligible=0,error_code='user_recovery_before_send',updated_at=?2,version=version+1 WHERE id=?1",params![id,now])?;
+                tx.execute("INSERT INTO request_events(request_id,old_state,new_state,reason,created_at) VALUES(?1,?2,'CANCELLED','user_recovery_before_send',?3)",params![id,state,now])?;
+            }
+            ensure!(tx.execute("UPDATE holds SET released=1,generation=generation+1 WHERE request_id=?1 AND released=0 AND generation=?2",params![offer.request_id,offer.generation])?==1,"unknown hold changed before release");
+            ensure!(tx.execute("UPDATE direct_conversations SET codex_thread_id=NULL WHERE discord_thread_id=?1",[&discord_thread_id])?==1,"direct conversation binding missing");
+            ensure!(tx.execute("UPDATE conversations SET continuation='NEW',paused=0,pause_revision=pause_revision+1 WHERE thread_id=?1",[&discord_thread_id])?==1,"conversation missing");
+            tx.execute("INSERT INTO operations(id,interaction_id,thread_id,kind,target_request_id,decision,state,created_at) VALUES(?1,?2,?3,'direct_recover',?4,'new_context','APPLIED',?5)",params![domain::id(),interaction_id,discord_thread_id,offer.request_id,now])?;
+            tx.execute("INSERT INTO admin_audit(id,uid,kind,target_id,reason,risk_accepted,created_at) VALUES(?1,?2,'direct_user_recovery',?3,?4,1,?5)",params![domain::id(),unsafe{libc::geteuid()},offer.request_id,format!("backup_id={backup_id};interaction_id={interaction_id}"),now])?;
+            tx.commit()?;
+            Ok(true)
+        }).await
+    }
+
     pub async fn direct_unknown_blocker(&self, discord_thread_id: &str) -> Result<bool> {
         let thread = discord_thread_id.to_owned();
         self.call(false, move |connection| {
