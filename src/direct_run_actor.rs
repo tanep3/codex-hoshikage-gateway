@@ -4,7 +4,7 @@ use crate::{
     codex_execution::CodexExecution,
     codex_transport::Event,
     direct_application::{DirectApplication, DirectControlOutcome, DirectDeliveryResult},
-    direct_approval::{DirectInteraction, ManualDecision},
+    direct_approval::{DirectInteraction, ManualDecision, RunGrantAudit},
     direct_run::ActiveRun,
     domain::RequestState,
 };
@@ -12,6 +12,7 @@ use anyhow::{Result, ensure};
 use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
+    path::Path,
     time::{Duration, Instant},
 };
 use tokio::{
@@ -24,17 +25,21 @@ pub enum RunCommand {
         interaction_id: String,
         fingerprint: String,
         decision: ManualDecision,
+        input_generation: u64,
         reply: oneshot::Sender<Result<()>>,
     },
     McpToolApproval {
         interaction_id: String,
         operation: DirectInteraction,
         decision: ManualDecision,
+        run_grant: bool,
+        input_generation: u64,
         reply: oneshot::Sender<Result<()>>,
     },
     RejectUnsupported {
         interaction_id: String,
         fingerprint: String,
+        input_generation: u64,
         reply: oneshot::Sender<Result<()>>,
     },
     Cancel {
@@ -59,9 +64,13 @@ pub enum RunEvent {
     Approval {
         interaction_id: String,
         operation: Box<DirectInteraction>,
+        input_generation: u64,
     },
     ApprovalResolved {
         interaction_id: String,
+    },
+    ApprovalInvalidated {
+        input_generation: u64,
     },
     UnsupportedApproval,
     Terminal(DirectDeliveryResult),
@@ -73,6 +82,24 @@ pub struct RunActor {
     pub commands: mpsc::Sender<RunCommand>,
     pub events: mpsc::Receiver<RunEvent>,
     pub task: JoinHandle<Result<()>>,
+}
+
+struct RunGrant {
+    initial_interaction_id: String,
+    config_fingerprint: String,
+}
+
+fn codex_config_fingerprint(home: &Path) -> Result<String> {
+    let bytes = match std::fs::read(home.join("config.toml")) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok("absent".into()),
+        Err(error) => return Err(error.into()),
+    };
+    ensure!(
+        bytes.len() <= 1024 * 1024,
+        "Codex config exceeds grant check limit"
+    );
+    Ok(crate::domain::digest(&bytes))
 }
 
 pub fn spawn(app: DirectApplication, run: ActiveRun) -> RunActor {
@@ -95,6 +122,8 @@ async fn serve(
     let mut seen_approvals = HashSet::new();
     let mut approval_rpc_ids = HashMap::<String, String>::new();
     let mut mcp_items = HashMap::<String, Option<Value>>::new();
+    let mut run_grants = HashMap::<(String, String), RunGrant>::new();
+    let mut input_generation = 0_u64;
     let mut terminal_seen = None::<Instant>;
     let mut ticker = tokio::time::interval(Duration::from_secs(5));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -104,27 +133,46 @@ async fn serve(
             command=commands.recv(), if !commands.is_closed()=>{
                 if let Some(command)=command {
                     match command {
-                        RunCommand::Approval{interaction_id,fingerprint,decision,reply}=>{
-                            let result=app.runs.reply_manual(&run,interaction_id,fingerprint,decision).await;
+                        RunCommand::Approval{interaction_id,fingerprint,decision,input_generation:expected,reply}=>{
+                            let result=if expected==input_generation {app.runs.reply_manual(&run,interaction_id,fingerprint,decision).await}
+                                else {Err(anyhow::anyhow!("approval belongs to an earlier input generation"))};
                             let _=reply.send(result);
                         }
-                        RunCommand::McpToolApproval{interaction_id,operation,decision,reply}=>{
-                            let result=app.runs.reply_mcp_tool(&run,interaction_id,operation,decision).await;
+                        RunCommand::McpToolApproval{interaction_id,operation,decision,run_grant,input_generation:expected,reply}=>{
+                            let key=if run_grant {operation.run_grant_tool()} else {None};
+                            let config=if run_grant {codex_config_fingerprint(&app.cfg.codex.home)} else {Ok(String::new())};
+                            let result=if expected!=input_generation {
+                                Err(anyhow::anyhow!("approval belongs to an earlier input generation"))
+                            } else if run_grant && (decision!=ManualDecision::AcceptOnce || key.is_none()) {
+                                Err(anyhow::anyhow!("Run grant is not eligible"))
+                            } else if let Err(error)=&config {
+                                Err(anyhow::anyhow!("Codex config cannot be checked: {error}"))
+                            } else {
+                                let audit=key.as_ref().map(|(server,tool)|RunGrantAudit::Selected{server:server.clone(),tool:tool.clone()});
+                                app.runs.reply_mcp_tool(&run,interaction_id.clone(),operation,decision,audit).await
+                            };
+                            if result.is_ok() && let Some(key)=key {run_grants.insert(key,RunGrant{initial_interaction_id:interaction_id,config_fingerprint:config.unwrap()});}
                             let _=reply.send(result);
                         }
-                        RunCommand::RejectUnsupported{interaction_id,fingerprint,reply}=>{
-                            let result=app.runs.reject_unsupported(&run,interaction_id,fingerprint).await;
+                        RunCommand::RejectUnsupported{interaction_id,fingerprint,input_generation:expected,reply}=>{
+                            let result=if expected==input_generation {app.runs.reject_unsupported(&run,interaction_id,fingerprint).await}
+                                else {Err(anyhow::anyhow!("approval belongs to an earlier input generation"))};
                             let _=reply.send(result);
                         }
                         RunCommand::Cancel{interaction_id,discord_thread_id,reply}=>{
+                            run_grants.clear();
                             let result=app.cancel(&interaction_id,&discord_thread_id,Some(&run)).await;
                             let _=reply.send(result);
                         }
                         RunCommand::Stop{interaction_id,discord_thread_id,reply}=>{
+                            run_grants.clear();
                             let result=app.stop(&interaction_id,&discord_thread_id,Some(&run)).await;
                             let _=reply.send(result);
                         }
                         RunCommand::Steer{interaction_id,discord_thread_id,input,reply}=>{
+                            run_grants.clear();
+                            input_generation=input_generation.saturating_add(1);
+                            emit(&events,RunEvent::ApprovalInvalidated{input_generation})?;
                             let result=app.steer(&interaction_id,&discord_thread_id,&run,input).await;
                             let _=reply.send(result);
                         }
@@ -162,15 +210,41 @@ async fn serve(
                     }
                     Ok(event @ Event::ServerRequest{..})=>{
                         let rpc_id=match &event { Event::ServerRequest{id,..}=>id.clone(),_=>unreachable!() };
-                        let evidence=match &event {
-                            Event::ServerRequest{params,..}=>params["itemId"].as_str().and_then(|id|mcp_items.get(id)).and_then(Option::as_ref).cloned(),
+                        let matched_item=match &event {
+                            Event::ServerRequest{method,..} if method=="mcpServer/elicitation/request"=>{
+                                if mcp_items.len()!=1 {None} else {
+                                    mcp_items.iter().find_map(|(id,item)|item.as_ref().filter(|item|
+                                        DirectInteraction::from_event(&event,&run.identity)
+                                            .ok().flatten().is_some_and(|mut interaction|
+                                                interaction.bind_mcp_evidence((*item).clone()).is_ok())
+                                    ).map(|item|(id.clone(),item.clone())))
+                                }
+                            }
+                            Event::ServerRequest{params,..}=>params["itemId"].as_str().and_then(|id|
+                                mcp_items.get(id).and_then(Option::as_ref).map(|item|(id.to_owned(),item.clone()))),
                             _=>None,
                         };
+                        let evidence=matched_item.as_ref().map(|(_,item)|item.clone());
                         match app.runs.register_interaction_with_evidence(&run,&event,evidence).await? {
                             Some((id,operation))=>{
+                                if let Some((item_id,_))=matched_item {mcp_items.remove(&item_id);}
                                 approval_rpc_ids.insert(serde_json::to_string(&operation.rpc_id)?,id.clone());
-                                if seen_approvals.insert(id.clone()) {
-                                    emit(&events,RunEvent::Approval{interaction_id:id,operation:Box::new(operation)})?;
+                                let key=operation.run_grant_tool();
+                                let current_config=codex_config_fingerprint(&app.cfg.codex.home).ok();
+                                if current_config.as_ref().is_none_or(|current|run_grants.values().any(|grant|&grant.config_fingerprint!=current)) {
+                                    run_grants.clear();
+                                }
+                                if let Some((server,tool))=key.as_ref()
+                                    && let Some(grant)=run_grants.get(&(server.clone(),tool.clone())) {
+                                    let audit=RunGrantAudit::Applied{initial_interaction_id:grant.initial_interaction_id.clone(),server:server.clone(),tool:tool.clone()};
+                                    if app.runs.reply_mcp_tool(&run,id.clone(),operation,ManualDecision::AcceptOnce,Some(audit)).await.is_err() {
+                                        run_grants.clear();
+                                        app.store.mark_direct_unknown(run.request_id.clone(),"run_grant_reply_unknown".into()).await?;
+                                        emit(&events,RunEvent::ResultUnknown)?;
+                                        return Ok(());
+                                    }
+                                } else if seen_approvals.insert(id.clone()) {
+                                    emit(&events,RunEvent::Approval{interaction_id:id,operation:Box::new(operation),input_generation})?;
                                 }
                             }
                             None=>{
@@ -202,6 +276,12 @@ async fn serve(
                                 }
                             }
                         }
+                    }
+                    Ok(Event::Notification{method,params}) if method=="item/completed"
+                        && params["threadId"]==run.identity.thread_id
+                        && params["turnId"]==run.identity.turn_id
+                        && params["item"]["type"]=="mcpToolCall"=>{
+                        if let Some(id)=params["item"]["id"].as_str(){mcp_items.remove(id);}
                     }
                     Ok(Event::Notification{method,params}) if method=="serverRequest/resolved"=>{
                         if params["threadId"]==run.identity.thread_id

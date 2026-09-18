@@ -1,6 +1,6 @@
 //! Durable approval send boundary for Gateway-owned App Server requests.
 use crate::{
-    direct_approval::{DirectInteraction, ManualDecision},
+    direct_approval::{DirectInteraction, ManualDecision, RunGrantAudit},
     domain,
     storage::Store,
 };
@@ -80,6 +80,7 @@ impl Store {
             expected_fingerprint,
             decision,
             false,
+            None,
         )
         .await
     }
@@ -90,6 +91,7 @@ impl Store {
         interaction_id: String,
         expected_fingerprint: String,
         decision: ManualDecision,
+        grant_audit: Option<RunGrantAudit>,
     ) -> Result<Value> {
         self.begin_direct_approval_reply_inner(
             request_id,
@@ -97,6 +99,7 @@ impl Store {
             expected_fingerprint,
             decision,
             true,
+            grant_audit,
         )
         .await
     }
@@ -108,16 +111,18 @@ impl Store {
         expected_fingerprint: String,
         decision: ManualDecision,
         mcp: bool,
+        grant_audit: Option<RunGrantAudit>,
     ) -> Result<Value> {
         self.call(true, move |c| {
             let tx = c.transaction()?;
-            let (rpc, fingerprint, state, dispatch, method, offered): (String, String, String, String, String, Option<String>) = tx.query_row(
-                "SELECT i.rpc_id_json,i.fingerprint,i.state,d.send_state,i.method,i.offered_decisions_json FROM direct_interactions i JOIN direct_dispatches d ON d.request_id=i.request_id WHERE i.id=?1 AND i.request_id=?2",
+            let (rpc, fingerprint, state, dispatch, method, offered, request_state): (String, String, String, String, String, Option<String>, String) = tx.query_row(
+                "SELECT i.rpc_id_json,i.fingerprint,i.state,d.send_state,i.method,i.offered_decisions_json,r.state FROM direct_interactions i JOIN direct_dispatches d ON d.request_id=i.request_id JOIN requests r ON r.id=i.request_id WHERE i.id=?1 AND i.request_id=?2",
                 params![interaction_id,request_id],
-                |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)),
+                |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)),
             )?;
             ensure!(
-                fingerprint == expected_fingerprint && state == "PENDING" && dispatch == "ACKED",
+                fingerprint == expected_fingerprint && state == "PENDING" && dispatch == "ACKED"
+                    && matches!(request_state.as_str(),"RUNNING" | "APPROVAL_REQUIRED"),
                 "approval is stale or does not match the displayed operation"
             );
             ensure!(
@@ -145,6 +150,14 @@ impl Store {
                 "UPDATE direct_interactions SET state='SENDING',decision=?2,updated_at=?3 WHERE id=?1 AND state='PENDING'",
                 params![interaction_id,choice,domain::now_ms()],
             )?;
+            if let Some(audit)=grant_audit {
+                ensure!(mcp && choice=="accept" && method=="mcpServer/elicitation/request","invalid Run grant audit");
+                let (kind,reason)=match audit {
+                    RunGrantAudit::Selected{server,tool}=>("direct_mcp_run_grant_selected",serde_json::json!({"request_id":request_id,"server":server,"tool":tool}).to_string()),
+                    RunGrantAudit::Applied{initial_interaction_id,server,tool}=>("direct_mcp_run_grant_applied",serde_json::json!({"request_id":request_id,"initial_interaction_id":initial_interaction_id,"server":server,"tool":tool}).to_string()),
+                };
+                tx.execute("INSERT INTO admin_audit VALUES(?1,?2,?3,?4,?5,0,?6)",params![domain::id(),unsafe{libc::geteuid()},kind,interaction_id,reason,domain::now_ms()])?;
+            }
             tx.commit()?;
             Ok(serde_json::from_str(&rpc)?)
         })

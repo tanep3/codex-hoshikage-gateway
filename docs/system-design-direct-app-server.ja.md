@@ -70,6 +70,8 @@ MCPツール確認が `mcpServer/elicitation/request` の `mode=form`・空のob
 
 未知のApp Server要求methodは、上流RPC IDに対し`-32601`を一度だけ返す。返信結果が不明ならRunをUNKNOWNとして保護する。既知の承認要求をCodexが`serverRequest/resolved`で解決したらDBを更新し、同じ要求のDiscord承認カードを無効化してボタンを除く。画面更新の失敗だけを理由にAIを再実行しない。
 
+依頼中の同種ツール許可は、App Serverのセッション永続許可をそのまま使わず、GatewayがRun actor内で保持する。App Serverのセッション許可は実機で同一ツールの連続確認を減らせると確認したが、同じTurnへのSteer時に取り消す契約がないためである。actorは`item/started`の`mcpToolCall`からサーバー・ツール・実引数・item IDを取り、同一Turnの`mcpServer/elicitation/request`のサーバー・実引数と一意に照合する。確認文面や到着順だけからツールを決めない。選択は永続監査へ記録し、適用中の許可集合は揮発状態とする。後続の各実callは別々の上流RPC IDと送信意思を保存してから`accept`し、再送しない。`browser_run_code_unsafe`、任意コード評価・実行、秘密入力等の個別確認必須操作を候補から除く。Steer・停止・取消をactorが受け付けた時点で許可集合を失効させ、Run終了・プロセス障害では破棄する。証拠が曖昧なら通常の個別確認へ戻す。
+
 動的ツール呼出し`item/tool/call`は現行Codex schemaで`itemId`ではなく`callId`を持つ。上流要求IDと`callId`の両方を照合し、実引数の表示と実行結果の対応付けに使う。methodごとの必須フィールドを共通形と推測せず、稼働バイナリのschemaで確認する。
 
 `direct_interactions`はGateway依頼ID、上流RPC ID、method、thread／turn、表示fingerprint、提示された判断候補、返信状態を保存する。判断を送る前に`PENDING→SENDING`をcommitし、送信結果が不明なら`UNKNOWN`として再送しない。Gateway再起動で旧子プロセスに紐付く`PENDING`は`UNAVAILABLE`、`SENDING`／未解決`SENT`は`UNKNOWN`へ移し、同じ上流RPC IDへの自動再返信を禁止する。上流の`serverRequest/resolved`で同じ要求を照合できた場合だけ解決へ訂正する。完全な実引数は現状メモリ上の表示用データであり、再起動後に古い承認を再表示・再許可する根拠にはしない。

@@ -4,7 +4,7 @@
 use crate::{
     codex_execution::{CodexExecution, ExecutionOptions, TurnIdentity, TurnSnapshot},
     codex_transport::{CodexRuntimePool, Event, RuntimeLease, TransportError},
-    direct_approval::{DirectInteraction, ManualDecision},
+    direct_approval::{DirectInteraction, ManualDecision, RunGrantAudit},
     direct_content::DirectContent,
     direct_image_store::{ImageRecord, ImageRecordState},
     direct_images::{GeneratedImageStatus, inventory},
@@ -177,8 +177,24 @@ impl DirectRunService {
         interaction_id: String,
         interaction: DirectInteraction,
         decision: ManualDecision,
+        grant_audit: Option<RunGrantAudit>,
     ) -> Result<()> {
         let result = interaction.mcp_tool_decision(decision)?;
+        if let Some(audit) = &grant_audit {
+            ensure!(
+                decision == ManualDecision::AcceptOnce && interaction.run_grant_tool().is_some(),
+                "Run grant is not eligible"
+            );
+            let expected = interaction.run_grant_tool().unwrap();
+            ensure!(
+                match audit {
+                    RunGrantAudit::Selected { server, tool }
+                    | RunGrantAudit::Applied { server, tool, .. } =>
+                        server == &expected.0 && tool == &expected.1,
+                },
+                "Run grant tool mismatch"
+            );
+        }
         ensure!(
             interaction.thread_id == run.identity.thread_id
                 && interaction.turn_id == run.identity.turn_id,
@@ -191,6 +207,7 @@ impl DirectRunService {
                 interaction_id.clone(),
                 interaction.fingerprint,
                 decision,
+                grant_audit,
             )
             .await?;
         if let Err(error) = run.transport().respond(rpc_id, result).await {

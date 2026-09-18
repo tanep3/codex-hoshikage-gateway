@@ -113,7 +113,7 @@ Cards with confirmed permission submission and resolution are consolidated into 
 
 With compatible Gateway and Proxy versions and the feature enabled, supported operations such as page searches and navigation show **the operation and its search text or URL on the first card**. Read it and choose:
 
-- **この依頼中、このツールを許可 (Allow this tool during this request):** allow repeated calls to this tool in the same request. This option appears only for eligible tools.
+- **この依頼中、このツールを許可 (Allow this tool during this request):** allow repeated calls to the same tool on the same MCP server during this request. Later calls may have different arguments or targets. The permission expires when you add an instruction, stop the task, or the request ends; it does not carry over to the next request. This option appears only when the gateway can verify the actual tool call.
 - **今回だけ許可 (Allow this call only):** allow the displayed call once. Another call may ask again.
 - **拒否 (Decline):** decline this operation. Use `/stop` to stop the whole request.
 

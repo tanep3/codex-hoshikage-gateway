@@ -90,12 +90,16 @@ impl DirectInteraction {
 
     pub fn bind_mcp_evidence(&mut self, item: Value) -> Result<()> {
         ensure!(
-            self.kind == InteractionKind::UserInput,
+            matches!(
+                self.kind,
+                InteractionKind::UserInput | InteractionKind::McpElicitation
+            ),
             "MCP evidence on another interaction"
         );
         ensure!(
             item["type"] == "mcpToolCall"
-                && item["id"].as_str() == self.item_id.as_deref()
+                && (self.kind == InteractionKind::McpElicitation
+                    || item["id"].as_str() == self.item_id.as_deref())
                 && item["server"]
                     .as_str()
                     .is_some_and(|s| !s.is_empty() && s.len() <= 128)
@@ -105,6 +109,20 @@ impl DirectInteraction {
                 && item["arguments"].is_object(),
             "MCP call evidence does not match the question"
         );
+        if self.kind == InteractionKind::McpElicitation {
+            let expected_message = format!(
+                "Allow the {} MCP server to run tool \"{}\"?",
+                item["server"].as_str().unwrap_or(""),
+                item["tool"].as_str().unwrap_or("")
+            );
+            ensure!(
+                self.params["serverName"] == item["server"]
+                    && self.params["_meta"]["tool_params"] == item["arguments"]
+                    && self.params["message"] == expected_message
+                    && item["id"].as_str().is_some_and(|s| !s.is_empty()),
+                "MCP call evidence does not match the elicitation"
+            );
+        }
         ensure!(
             serde_json::to_vec(&item)?.len() <= MAX_REQUEST_BYTES,
             "MCP call evidence too large"
@@ -113,6 +131,33 @@ impl DirectInteraction {
             domain::digest(serde_json::to_vec(&json!([self.fingerprint, item]))?.as_slice());
         self.mcp_evidence = Some(item);
         Ok(())
+    }
+
+    /// A Run grant is deliberately narrower than Codex's native session
+    /// persistence: the actor can revoke it before a Steer or Stop.
+    pub fn run_grant_tool(&self) -> Option<(String, String)> {
+        if self.kind != InteractionKind::McpElicitation
+            || self.mcp_tool_decision(ManualDecision::AcceptOnce).is_err()
+            || !self.params["_meta"]["persist"]
+                .as_array()
+                .is_some_and(|choices| choices.iter().any(|choice| choice == "session"))
+        {
+            return None;
+        }
+        let evidence = self.mcp_evidence.as_ref()?;
+        let server = evidence["server"].as_str()?;
+        let tool = evidence["tool"].as_str()?;
+        let lower = tool.to_ascii_lowercase();
+        if [
+            "unsafe", "evaluate", "run_code", "execute", "eval", "delete", "remove", "purchase",
+            "payment", "secret", "password",
+        ]
+        .iter()
+        .any(|word| lower.contains(word))
+        {
+            return None;
+        }
+        Some((server.into(), tool.into()))
     }
 
     /// Only the exact upstream command/file-change schema can use this reply.
@@ -249,4 +294,17 @@ pub enum ManualDecision {
     AcceptOnce,
     Decline,
     Cancel,
+}
+
+#[derive(Clone, Debug)]
+pub enum RunGrantAudit {
+    Selected {
+        server: String,
+        tool: String,
+    },
+    Applied {
+        initial_interaction_id: String,
+        server: String,
+        tool: String,
+    },
 }

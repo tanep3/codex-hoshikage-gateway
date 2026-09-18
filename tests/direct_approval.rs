@@ -155,6 +155,34 @@ fn mcp_tool_elicitation_accepts_only_the_exact_empty_form_once() {
 }
 
 #[test]
+fn run_grant_requires_structured_call_evidence_and_excludes_unsafe_code() {
+    for (tool, args, eligible) in [
+        (
+            "browser_click",
+            json!({"element":"Mission","target":"button-1"}),
+            true,
+        ),
+        ("browser_run_code_unsafe", json!({"code":"return 1"}), false),
+    ] {
+        let request = request(
+            "mcpServer/elicitation/request",
+            json!({
+                "threadId":"thread-a","turnId":"turn-a","serverName":"playwright",
+                "mode":"form","message":format!("Allow the playwright MCP server to run tool \"{tool}\"?"),
+                "requestedSchema":{"type":"object","properties":{}},
+                "_meta":{"codex_approval_kind":"mcp_tool_call","persist":["session","always"],"tool_params":args}
+            }),
+        );
+        let mut prompt = DirectInteraction::from_event(&request, &active())
+            .unwrap()
+            .unwrap();
+        assert!(prompt.run_grant_tool().is_none());
+        prompt.bind_mcp_evidence(json!({"type":"mcpToolCall","id":"item-a","server":"playwright","tool":tool,"arguments":args})).unwrap();
+        assert_eq!(prompt.run_grant_tool().is_some(), eligible);
+    }
+}
+
+#[test]
 fn dynamic_tool_uses_call_id_from_the_installed_app_server_schema() {
     let event = request(
         "item/tool/call",

@@ -7,6 +7,11 @@ import time
 
 approval_pending = False
 workspace = None
+
+def send_second_click():
+    print(json.dumps({"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"thread-one","turnId":"turn-one","item":{"type":"mcpToolCall","id":"click-one"}}}),flush=True)
+    print(json.dumps({"jsonrpc":"2.0","method":"item/started","params":{"threadId":"thread-one","turnId":"turn-one","item":{"type":"mcpToolCall","id":"click-two","server":"playwright","tool":"browser_click","arguments":{"element":"Mission","target":"button-2"}}}}),flush=True)
+    print(json.dumps({"jsonrpc":"2.0","id":"mcp-run-two","method":"mcpServer/elicitation/request","params":{"threadId":"thread-one","turnId":"turn-one","serverName":"playwright","mode":"form","message":"Allow the playwright MCP server to run tool \"browser_click\"?","requestedSchema":{"type":"object","properties":{}},"_meta":{"codex_approval_kind":"mcp_tool_call","persist":["session","always"],"tool_params":{"element":"Mission","target":"button-2"}}}}),flush=True)
 for line in sys.stdin:
     msg = json.loads(line)
     method = msg.get("method")
@@ -60,6 +65,10 @@ for line in sys.stdin:
         elif "--request-mcp-form-approval" in sys.argv:
             approval_pending = True
             print(json.dumps({"jsonrpc":"2.0","id":"mcp-form-one","method":"mcpServer/elicitation/request","params":{"threadId":"thread-one","turnId":"turn-one","serverName":"playwright","mode":"form","message":"Allow the playwright MCP server to run tool \"browser_run_code_unsafe\"?","requestedSchema":{"type":"object","properties":{}},"_meta":{"codex_approval_kind":"mcp_tool_call","persist":["session","always"],"tool_params":{"code":"async (page) => await page.title()"}}}}), flush=True)
+        elif "--request-mcp-run-grant" in sys.argv or "--request-mcp-run-grant-steer" in sys.argv:
+            approval_pending = True
+            print(json.dumps({"jsonrpc":"2.0","method":"item/started","params":{"threadId":"thread-one","turnId":"turn-one","item":{"type":"mcpToolCall","id":"click-one","server":"playwright","tool":"browser_click","arguments":{"element":"Mission","target":"button-1"}}}}),flush=True)
+            print(json.dumps({"jsonrpc":"2.0","id":"mcp-run-one","method":"mcpServer/elicitation/request","params":{"threadId":"thread-one","turnId":"turn-one","serverName":"playwright","mode":"form","message":"Allow the playwright MCP server to run tool \"browser_click\"?","requestedSchema":{"type":"object","properties":{}},"_meta":{"codex_approval_kind":"mcp_tool_call","persist":["session","always"],"tool_params":{"element":"Mission","target":"button-1"}}}}),flush=True)
         elif "--request-artifact" in sys.argv:
             assert workspace and os.path.isdir(workspace)
             with open(os.path.join(workspace, "report.txt"), "w", encoding="utf-8") as f:
@@ -84,13 +93,19 @@ for line in sys.stdin:
         print(json.dumps({"jsonrpc":"2.0","id":msg["id"],"result":{"data":[{"id":"gpt-5.6-luna","displayName":"GPT 5.6 Luna"},{"id":"gpt-5.6-terra","displayName":"GPT 5.6 Terra"}],"nextCursor":None}}),flush=True)
     elif method == "turn/steer":
         print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"turnId": msg["params"]["expectedTurnId"]}}), flush=True)
+        if "--request-mcp-run-grant-steer" in sys.argv:
+            approval_pending = True
+            send_second_click()
     elif method == "turn/interrupt":
         print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {}}), flush=True)
-    elif method is None and msg.get("id") in ("approval-one", "mcp-approval-one", "mcp-form-one", "artifact-one", "unsupported-one", "unknown-one"):
+    elif method is None and msg.get("id") in ("approval-one", "mcp-approval-one", "mcp-form-one", "mcp-run-one", "mcp-run-two", "artifact-one", "unsupported-one", "unknown-one"):
         if msg["id"] == "mcp-approval-one":
             assert msg.get("result") == {"answers":{"mcp_tool_call_approval_item-one":{"answers":["Allow"]}}}
         if msg["id"] == "mcp-form-one":
             assert msg.get("result") in ({"action":"accept","content":{}}, {"action":"decline","content":None})
+        if msg["id"] in ("mcp-run-one", "mcp-run-two"):
+            expected = {"action":"decline","content":None} if msg["id"] == "mcp-run-two" and "--request-mcp-run-grant-steer" in sys.argv else {"action":"accept","content":{}}
+            assert msg.get("result") == expected
         if msg["id"] == "artifact-one":
             assert msg.get("result",{}).get("success") is True
         if msg["id"] == "unsupported-one":
@@ -99,3 +114,6 @@ for line in sys.stdin:
             assert msg.get("error",{}).get("code") == -32601
         approval_pending = False
         print(json.dumps({"jsonrpc":"2.0","method":"serverRequest/resolved","params":{"threadId":"thread-one","requestId":msg["id"]}}), flush=True)
+        if msg["id"] == "mcp-run-one" and "--request-mcp-run-grant-steer" not in sys.argv:
+            approval_pending = True
+            send_second_click()

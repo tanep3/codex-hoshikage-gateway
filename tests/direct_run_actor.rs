@@ -36,11 +36,30 @@ async fn actor_routes_mcp_tool_confirmation_with_its_own_reply_schema() {
 }
 
 #[tokio::test]
+async fn actor_applies_explicit_run_grant_to_second_verified_call_only() {
+    actor_accepts(
+        "--request-mcp-run-grant",
+        Some(InteractionKind::McpElicitation),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn actor_invalidates_run_grant_before_steer() {
+    actor_accepts(
+        "--request-mcp-run-grant-steer",
+        Some(InteractionKind::McpElicitation),
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn actor_rejects_unknown_server_request_without_hanging_the_turn() {
     actor_accepts("--request-unknown-method", None).await;
 }
 
 async fn actor_accepts(flag: &str, expected_kind: Option<InteractionKind>) {
+    let steer_invalidates_grant = flag == "--request-mcp-run-grant-steer";
     let temp = tempfile::tempdir().unwrap();
     let legacy = common::config(&temp);
     let home = temp.path().join("codex-home");
@@ -162,6 +181,7 @@ async fn actor_accepts(flag: &str, expected_kind: Option<InteractionKind>) {
     let RunEvent::Approval {
         interaction_id,
         operation,
+        input_generation,
     } = event
     else {
         panic!("expected approval")
@@ -169,30 +189,28 @@ async fn actor_accepts(flag: &str, expected_kind: Option<InteractionKind>) {
     assert_eq!(Some(operation.kind.clone()), expected_kind);
     if expected_kind == Some(InteractionKind::CommandApproval) {
         assert_eq!(operation.params["command"], "cat report.txt");
-    } else {
+    } else if expected_kind == Some(InteractionKind::UserInput) {
         assert_eq!(
             operation.params["questions"][0]["id"],
             "mcp_tool_call_approval_item-one"
         );
+    } else {
+        assert_eq!(
+            operation.run_grant_tool(),
+            Some(("playwright".into(), "browser_click".into()))
+        );
     }
-    let (steer_reply, steer_result) = tokio::sync::oneshot::channel();
-    actor
-        .commands
-        .send(RunCommand::Steer {
-            interaction_id: "902".into(),
-            discord_thread_id: "4".into(),
-            input: vec![json!({"type":"text","text":"follow up"})],
-            reply: steer_reply,
-        })
-        .await
-        .unwrap();
-    steer_result.await.unwrap().unwrap();
     let (reply, result) = tokio::sync::oneshot::channel();
-    let command = if expected_kind == Some(InteractionKind::UserInput) {
+    let command = if matches!(
+        expected_kind,
+        Some(InteractionKind::UserInput | InteractionKind::McpElicitation)
+    ) {
         RunCommand::McpToolApproval {
             interaction_id,
             operation: *operation,
             decision: ManualDecision::AcceptOnce,
+            run_grant: expected_kind == Some(InteractionKind::McpElicitation),
+            input_generation,
             reply,
         }
     } else {
@@ -200,6 +218,7 @@ async fn actor_accepts(flag: &str, expected_kind: Option<InteractionKind>) {
             interaction_id,
             fingerprint: operation.fingerprint,
             decision: ManualDecision::AcceptOnce,
+            input_generation,
             reply,
         }
     };
@@ -210,6 +229,77 @@ async fn actor_accepts(flag: &str, expected_kind: Option<InteractionKind>) {
         .unwrap()
         .unwrap();
     assert!(matches!(resolved, RunEvent::ApprovalResolved { .. }));
+    if steer_invalidates_grant {
+        let (steer_reply, steer_result) = tokio::sync::oneshot::channel();
+        actor
+            .commands
+            .send(RunCommand::Steer {
+                interaction_id: "902".into(),
+                discord_thread_id: "4".into(),
+                input: vec![json!({"type":"text","text":"follow up"})],
+                reply: steer_reply,
+            })
+            .await
+            .unwrap();
+        steer_result.await.unwrap().unwrap();
+
+        let invalidated = tokio::time::timeout(Duration::from_secs(15), actor.events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            invalidated,
+            RunEvent::ApprovalInvalidated {
+                input_generation: 1
+            }
+        ));
+
+        let second = tokio::time::timeout(Duration::from_secs(15), actor.events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let RunEvent::Approval {
+            interaction_id,
+            operation,
+            input_generation,
+        } = second
+        else {
+            panic!("steer must invalidate the Run grant and require a new approval")
+        };
+        assert_eq!(
+            operation.run_grant_tool(),
+            Some(("playwright".into(), "browser_click".into()))
+        );
+
+        let (reply, result) = tokio::sync::oneshot::channel();
+        actor
+            .commands
+            .send(RunCommand::McpToolApproval {
+                interaction_id,
+                operation: *operation,
+                decision: ManualDecision::Decline,
+                run_grant: false,
+                input_generation,
+                reply,
+            })
+            .await
+            .unwrap();
+        result.await.unwrap().unwrap();
+        let second_resolved = tokio::time::timeout(Duration::from_secs(15), actor.events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(second_resolved, RunEvent::ApprovalResolved { .. }));
+    } else if expected_kind == Some(InteractionKind::McpElicitation) {
+        let second = tokio::time::timeout(Duration::from_secs(15), actor.events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(second, RunEvent::ApprovalResolved { .. }),
+            "second call must be auto-approved without a Discord card"
+        );
+    }
     let event = tokio::time::timeout(Duration::from_secs(15), actor.events.recv())
         .await
         .unwrap()
@@ -229,5 +319,19 @@ async fn actor_accepts(flag: &str, expected_kind: Option<InteractionKind>) {
     assert_eq!(approval_state, "RESOLVED");
     assert_eq!(posts.lock().unwrap().len(), 1);
     assert_eq!(posts.lock().unwrap()[0]["content"], "DONE");
+    if expected_kind == Some(InteractionKind::McpElicitation) {
+        let kinds:Vec<String>=store.call(false,|c|{
+            let mut q=c.prepare("SELECT kind FROM admin_audit WHERE kind LIKE 'direct_mcp_run_grant_%' ORDER BY created_at,id")?;
+            Ok(q.query_map([],|r|r.get(0))?.collect::<rusqlite::Result<Vec<_>>>()?)
+        }).await.unwrap();
+        assert!(kinds.contains(&"direct_mcp_run_grant_selected".into()));
+        if steer_invalidates_grant {
+            assert_eq!(kinds.len(), 1);
+            assert!(!kinds.contains(&"direct_mcp_run_grant_applied".into()));
+        } else {
+            assert_eq!(kinds.len(), 2);
+            assert!(kinds.contains(&"direct_mcp_run_grant_applied".into()));
+        }
+    }
     server.abort();
 }

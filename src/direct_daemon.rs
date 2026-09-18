@@ -43,6 +43,7 @@ struct ApprovalCard {
     thread_id: String,
     fingerprint: String,
     operation: DirectInteraction,
+    input_generation: u64,
 }
 #[derive(Clone)]
 pub struct DirectCoordinator {
@@ -104,10 +105,15 @@ fn approval_detail(operation: &DirectInteraction) -> Result<(String, bool)> {
             .is_ok()
     {
         let args = serde_json::to_string_pretty(&operation.params["_meta"]["tool_params"])?;
+        let tool = operation
+            .mcp_evidence
+            .as_ref()
+            .and_then(|item| item["tool"].as_str())
+            .or_else(|| operation.params["message"].as_str())
+            .unwrap_or("ツール名を確認できません");
         format!(
-            "MCPツール実行の確認（本人限定）\nサーバー: {}\n操作: {}\n実引数（Codexからの原文）:\n```json\n{args}\n```\n「今回だけ許可」は、この操作1件だけです。",
+            "MCPツール実行の確認（本人限定）\nサーバー: {}\nツール: {tool}\n実引数（Codexからの原文）:\n```json\n{args}\n```\n「今回だけ許可」は、この操作1件だけです。",
             operation.params["serverName"].as_str().unwrap_or("不明"),
-            operation.params["message"].as_str().unwrap_or("不明")
         )
     } else {
         let rendered = serde_json::to_string_pretty(&json!({
@@ -117,6 +123,13 @@ fn approval_detail(operation: &DirectInteraction) -> Result<(String, bool)> {
         format!(
             "Codexが求めた操作の実引数（本人限定）:\n```json\n{rendered}\n```\n内容を確認して選んでください。"
         )
+    };
+    let detail = if operation.run_grant_tool().is_some() {
+        format!(
+            "{detail}\n「この依頼中、このツールを許可」は、同じ依頼内の同じサーバー／ツールに限り、引数が変わる後続呼出しも許可します。追加指示・停止・依頼終了で失効します。"
+        )
+    } else {
+        detail
     };
     let complete = detail.chars().count() <= 1900;
     Ok(if complete {
@@ -353,8 +366,8 @@ impl DirectCoordinator {
         let event_result=async {
         while let Some(event) = actor.events.recv().await {
             match event {
-                RunEvent::Approval { interaction_id, operation } => {
-                    self.show_approval(request_id, &thread, interaction_id, *operation).await?;
+                RunEvent::Approval { interaction_id, operation, input_generation } => {
+                    self.show_approval(request_id, &thread, interaction_id, *operation, input_generation).await?;
                 }
                 RunEvent::ApprovalResolved { interaction_id } => {
                     if let Some(card)=self.approvals.lock().await.remove(&interaction_id) {
@@ -362,6 +375,21 @@ impl DirectCoordinator {
                         // the request. Delivery failure affects only the display, not the Run.
                         let _=self.app.delivery.text(&interaction_id,&card.thread_id,"direct-approval",0,
                             "このMCP承認・入力は終了しました。",json!([])).await;
+                    }
+                }
+                RunEvent::ApprovalInvalidated { input_generation } => {
+                    let expired = {
+                        let mut cards = self.approvals.lock().await;
+                        let ids = cards.iter()
+                            .filter(|(_, card)| card.request_id == request_id && card.input_generation < input_generation)
+                            .map(|(id, card)| (id.clone(), card.thread_id.clone()))
+                            .collect::<Vec<_>>();
+                        for (id, _) in &ids { cards.remove(id); }
+                        ids
+                    };
+                    for (id, card_thread) in expired {
+                        let _ = self.app.delivery.text(&id, &card_thread, "direct-approval", 0,
+                            "追加指示を受けたため、この確認は終了しました。新しい確認が届いた場合は、そちらを開いてください。", json!([])).await;
                     }
                 }
                 RunEvent::UnsupportedApproval => {
@@ -439,6 +467,7 @@ impl DirectCoordinator {
         thread: &str,
         id: String,
         operation: DirectInteraction,
+        input_generation: u64,
     ) -> Result<()> {
         let kind = match operation.kind {
             InteractionKind::CommandApproval => "コマンド実行",
@@ -471,6 +500,7 @@ impl DirectCoordinator {
                 thread_id: thread.into(),
                 fingerprint: operation.fingerprint.clone(),
                 operation,
+                input_generation,
             },
         );
         // Arbitrary upstream arguments can contain credentials or code. The
@@ -955,10 +985,14 @@ impl DirectCoordinator {
         if action == "detail" {
             let (detail, complete) = approval_detail(&card.operation)?;
             let choices = if complete && Self::answerable(&card.operation) {
-                json!([{"type":1,"components":[
-                    {"type":2,"style":3,"label":"今回だけ許可","custom_id":format!("direct:accept:{card_id}")},
-                    Self::rejection_button(&card.operation, card_id)
-                ]}])
+                let mut buttons = vec![
+                    json!({"type":2,"style":3,"label":"今回だけ許可","custom_id":format!("direct:accept:{card_id}")}),
+                ];
+                if card.operation.run_grant_tool().is_some() {
+                    buttons.push(json!({"type":2,"style":3,"label":"この依頼中、このツールを許可","custom_id":format!("direct:run:{card_id}")}));
+                }
+                buttons.push(Self::rejection_button(&card.operation, card_id));
+                json!([{"type":1,"components":buttons}])
             } else {
                 json!([{"type":1,"components":[
                     Self::rejection_button(&card.operation, card_id)
@@ -970,6 +1004,7 @@ impl DirectCoordinator {
         self.app.discord.acknowledge(id, token).await?;
         let decision = match action {
             "accept" => ManualDecision::AcceptOnce,
+            "run" => ManualDecision::AcceptOnce,
             "decline" => ManualDecision::Decline,
             "cancel" => ManualDecision::Cancel,
             "reject" => ManualDecision::Decline,
@@ -981,7 +1016,7 @@ impl DirectCoordinator {
                 return Ok(());
             }
         };
-        if action == "accept"
+        if matches!(action, "accept" | "run")
             && (!approval_detail(&card.operation)?.1 || !Self::answerable(&card.operation))
         {
             self.app
@@ -995,6 +1030,7 @@ impl DirectCoordinator {
             return Ok(());
         }
         if (action == "decline" && !Self::declineable(&card.operation))
+            || (action == "run" && card.operation.run_grant_tool().is_none())
             || (action == "cancel" && !Self::cancelable(&card.operation))
             || (action == "reject"
                 && (Self::declineable(&card.operation) || Self::cancelable(&card.operation)))
@@ -1019,6 +1055,7 @@ impl DirectCoordinator {
             RunCommand::RejectUnsupported {
                 interaction_id: card_id.into(),
                 fingerprint: card.fingerprint,
+                input_generation: card.input_generation,
                 reply,
             }
         } else if matches!(
@@ -1029,6 +1066,8 @@ impl DirectCoordinator {
                 interaction_id: card_id.into(),
                 operation: card.operation,
                 decision,
+                run_grant: action == "run",
+                input_generation: card.input_generation,
                 reply,
             }
         } else {
@@ -1036,22 +1075,35 @@ impl DirectCoordinator {
                 interaction_id: card_id.into(),
                 fingerprint: card.fingerprint,
                 decision,
+                input_generation: card.input_generation,
                 reply,
             }
         };
         tokio::time::timeout(Duration::from_secs(5), active.commands.send(command)).await??;
         let result = tokio::time::timeout(Duration::from_secs(20), receiver).await??;
         match result {
-            Ok(())=>{
+            Ok(()) => {
                 let feedback = match action {
-                    "reject" => "この確認形式には対応できないため、Codexへ形式未対応エラーを返しました。/status で作業結果を確認してください。",
+                    "reject" => {
+                        "この確認形式には対応できないため、Codexへ形式未対応エラーを返しました。/status で作業結果を確認してください。"
+                    }
                     "decline" => "この操作を拒否しました。続きの回答はこの会話に届きます。",
                     "cancel" => "この確認を取り消しました。続きの回答はこの会話に届きます。",
+                    "run" => {
+                        "この依頼中、同じMCPツールの後続呼出しを許可しました。引数が変わる操作も対象です。追加指示・停止・依頼終了で失効します。"
+                    }
                     _ => "この操作だけを許可しました。続きの回答はこの会話に届きます。",
                 };
-                self.app.discord.reply(app_id,token,feedback).await?
+                self.app.discord.reply(app_id, token, feedback).await?
             }
-            Err(_)=>self.app.discord.reply(app_id,token,"確認の結果を確定できません。再度押さず、/status で作業状態を確認してください。").await?
+            Err(error) => {
+                let message = if error.to_string().contains("earlier input generation") {
+                    "追加指示の前の確認画面です。このボタンは使えません。新しい確認が届いた場合は、そちらを開いてください。"
+                } else {
+                    "確認の結果を確定できません。再度押さず、/status で作業状態を確認してください。"
+                };
+                self.app.discord.reply(app_id, token, message).await?
+            }
         }
         Ok(())
     }
@@ -1225,38 +1277,43 @@ mod tests {
 
     #[tokio::test]
     async fn raw_message_reaches_direct_child_and_saved_answer_is_delivered_once() {
-        direct_flow(false, false, false, false, None).await;
+        direct_flow(false, false, false, false, None, false).await;
     }
 
     #[tokio::test]
     async fn mcp_approval_button_returns_to_exact_direct_run() {
-        direct_flow(true, false, false, false, None).await;
+        direct_flow(true, false, false, false, None, false).await;
     }
 
     #[tokio::test]
     async fn mcp_empty_form_shows_arguments_and_accepts_only_this_call() {
-        direct_flow(false, false, false, false, Some(true)).await;
+        direct_flow(false, false, false, false, Some(true), false).await;
     }
 
     #[tokio::test]
     async fn mcp_empty_form_decline_uses_the_elicitation_reply() {
-        direct_flow(false, false, false, false, Some(false)).await;
+        direct_flow(false, false, false, false, Some(false), false).await;
+    }
+
+    #[tokio::test]
+    async fn mcp_run_grant_button_skips_second_verified_call() {
+        direct_flow(false, false, false, false, None, true).await;
     }
 
     #[tokio::test]
     async fn artifact_tool_registers_a_conversation_bound_saved_file() {
-        direct_flow(false, false, true, false, None).await;
+        direct_flow(false, false, true, false, None, false).await;
     }
 
     #[tokio::test]
     async fn unsupported_permission_prompt_can_be_rejected_without_opening_detail() {
-        direct_flow(false, false, false, true, None).await;
+        direct_flow(false, false, false, true, None, false).await;
     }
 
     #[tokio::test]
     #[ignore = "requires local Codex login and network; run explicitly for integration acceptance"]
     async fn real_codex_reaches_mock_discord_through_direct_daemon() {
-        direct_flow(false, true, false, false, None).await;
+        direct_flow(false, true, false, false, None, false).await;
     }
 
     async fn direct_flow(
@@ -1265,6 +1322,7 @@ mod tests {
         artifact_tool: bool,
         unsupported_approval: bool,
         mcp_form_approval: Option<bool>,
+        mcp_run_grant: bool,
     ) {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
@@ -1433,6 +1491,9 @@ mod tests {
                         if mcp_form_approval.is_some() {
                             args.push("--request-mcp-form-approval".into());
                         }
+                        if mcp_run_grant {
+                            args.push("--request-mcp-run-grant".into());
+                        }
                         if artifact_tool {
                             args.push("--request-artifact".into());
                         }
@@ -1475,7 +1536,7 @@ mod tests {
         };
         tx.send(Incoming::Message(original.clone())).await.unwrap();
         tx.send(Incoming::Message(original)).await.unwrap();
-        if mcp_approval || unsupported_approval || mcp_form_approval.is_some() {
+        if mcp_approval || unsupported_approval || mcp_form_approval.is_some() || mcp_run_grant {
             let card = tokio::time::timeout(Duration::from_secs(10), async {
                 loop {
                     if let Some(value) = posts
@@ -1507,6 +1568,8 @@ mod tests {
                 ":detail:",
                 if unsupported_approval {
                     ":reject:"
+                } else if mcp_run_grant {
+                    ":run:"
                 } else if mcp_form_approval == Some(false) {
                     ":decline:"
                 } else {
@@ -1525,15 +1588,23 @@ mod tests {
                         .is_some_and(|s| s.contains("mcp_tool_call_approval_item-one"))
                 }));
             }
-            if mcp_form_approval.is_some() {
+            if mcp_form_approval.is_some() || mcp_run_grant {
                 controller
                     .handle_interaction(interaction("1001", detail))
                     .await
                     .unwrap();
                 let view = callbacks.lock().unwrap().last().unwrap().clone();
                 let content = view["data"]["content"].as_str().unwrap();
-                assert!(content.contains("browser_run_code_unsafe"));
-                assert!(content.contains("async (page) => await page.title()"));
+                assert!(content.contains(if mcp_run_grant {
+                    "browser_click"
+                } else {
+                    "browser_run_code_unsafe"
+                }));
+                assert!(content.contains(if mcp_run_grant {
+                    "button-1"
+                } else {
+                    "async (page) => await page.title()"
+                }));
                 let buttons = view["data"]["components"][0]["components"]
                     .as_array()
                     .unwrap();
@@ -1543,6 +1614,12 @@ mod tests {
                         .any(|button| button["label"] == "今回だけ許可")
                 );
                 assert!(buttons.iter().any(|button| button["label"] == "拒否"));
+                assert_eq!(
+                    buttons
+                        .iter()
+                        .any(|button| button["label"] == "この依頼中、このツールを許可"),
+                    mcp_run_grant
+                );
             }
             controller
                 .handle_interaction(interaction("1002", &approval))
@@ -1577,7 +1654,21 @@ mod tests {
         });
         let states = store.status().await.unwrap();
         assert_eq!(states["requests"], json!([["COMPLETED", 1]]));
-        if mcp_approval || unsupported_approval || mcp_form_approval.is_some() {
+        if mcp_run_grant {
+            assert_eq!(
+                posts
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|post| post["content"]
+                        .as_str()
+                        .is_some_and(|text| text.contains("CodexがMCP操作")
+                            && text.contains("確認を求めています")))
+                    .count(),
+                1
+            );
+        }
+        if mcp_approval || unsupported_approval || mcp_form_approval.is_some() || mcp_run_grant {
             let updates = approval_edits.lock().unwrap();
             assert!(updates.iter().any(|body| body["components"] == json!([])));
         }
