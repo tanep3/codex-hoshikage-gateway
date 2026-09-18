@@ -4,7 +4,7 @@
 
 状態：テスト計画・実装中。常駐切替は未実施。[目標要件](requirements-direct-app-server.ja.md)のDA-A01〜DA-A11を、運用とDiscord画面で判定できる形にする。試験場所は利用者が指定済みの[Discordチャンネル](https://discord.com/channels/1547798936167915541/1547877505040654397)。
 
-`direct check/init/cutover/run` の独立CLI入口を実装した。模擬Discordの投稿重複→専属App Server→保存回答1回配信、承認ボタン→実callへの返信→回答配信、MCPの対応する `item/started` と質問の照合は自動試験を通した。U系列の直接接続版実Discord試験は全件未実施。合格表は実行時に証跡とともに更新する。
+`direct check/init/archive-init/cutover/run` の独立CLI入口を実装した。模擬Discordの投稿重複→専属App Server→保存回答1回配信、承認ボタン→実callへの返信→回答配信、MCPの対応する `item/started` と質問の照合は自動試験を通した。2026-09-18には実Codex App Serverを子プロセスにした「投稿→実モデル回答→Gateway保存→模擬Discordへ1回配信」も隔離状態ディレクトリで通した。これは実Discordの表示試験ではない。U系列の直接接続版実Discord試験は全件未実施。合格表は実行時に証跡とともに更新する。
 
 ## 試験開始条件
 
@@ -14,8 +14,10 @@
 2. Discord投稿受付・スケジューラ、基本操作、コマンド／ファイル変更の単発承認、MCPの1問Allow/Cancel確認、回答・生成画像配信を直接接続経路へ接続した。一般の追加質問・権限変更・MCPフォーム、成果物登録／`/get`、実Discord表示、再起動後の配信復旧は引き続き未達。模擬試験の合格だけで常駐切替しない。
 3. Proxyを要求しない[Gateway専用設定例](../config/config.direct.example.toml)は用意した。専属Codex homeの認証・MCP設定、英日導入／利用者向け説明は未整備。
 4. 別のstate_dirとCodex homeで隔離試験し、旧サービスと同じBotがDiscordイベントを二重受信しないようにする。
-5. 旧サービス停止後、DB・保存ファイルの整合バックアップを検証する。未終端の依頼・配信・制御があれば移行を拒否する。2026-09-18の読取検査では旧 `resource_deliveries` にWAITINGが2件ある。Proxyの回答保存は両方 `ready` だが、Discord配信記録は一方 `PATCH_PENDING`、もう一方 `POST_PENDING` であり、移行前検査は通らない。Discord送信結果を照合し、自動放棄・成功化・AI再実行で埋めない。
+5. 旧サービス停止後、DB・保存ファイルの整合バックアップを検証する。同じDBの変換は未終端の依頼・配信・制御があれば拒否する。別state_dirの新DBで開始する場合は、未確定件数と旧バックアップの所在を監査記録し、旧状態を参照用アーカイブとして保持する。2026-09-18の読取検査では旧 `resource_deliveries` にWAITINGが2件ある。Proxyの回答保存は両方 `ready` だが、Discord配信記録は一方 `PATCH_PENDING`、もう一方 `POST_PENDING`。両方のDiscordスレッドをBot認証で読み取り確認したところ `403 Forbidden` で、現権限では送信結果を照合できない。新方式はこれらを自動放棄・成功化・AI再実行・Discord再送しない。アーカイブから後日照合する可能性を残す。
 6. 切替後の既存Discord会話は次の発言から新しいCodex文脈を始める。旧投稿・依頼記録は保持し、旧Codex thread／response IDは引き継がない。
+
+旧配信を確定できない環境では、旧サービス停止後に `direct archive-init --legacy-state <旧state_dir> --backup-to <新しいバックアップ先>` を使う。これは検証済み旧DB・保存物を参照用に保存し、設定済みの別state_dirへ空の直接接続DBを初期化する。旧依頼の状態は一切変更せず、未確定件数とバックアップ先を新DBに監査記録する。同じBotを動かす新旧サービスを並行起動しない。
 
 ## 利用者がDiscordで確認するケース
 
@@ -53,7 +55,7 @@ U-07〜U-11の具体的な安全な依頼文は実施時にこちらで提示す
 | S-09 子プロセス回収 | 正常停止、Gateway異常終了、systemd再起動 | 旧App Serverと子孫PIDが残らず、新旧が同時所有しない |
 | S-10 Proxy非依存 | 隔離環境でProxyを使わず試験 | 基本会話・承認・取得がGatewayだけで動く |
 | S-11 バックアップ | DBと本文・画像・成果物を保存・復元 | 同じハッシュの保存版を読め、未確定Turnを新規実行しない |
-| S-12 移行 | 旧DB複製で安全・未終端・破損を試す | 安全時だけ切替。旧履歴を保持し、不安全時は本番DBに書かず拒否 |
+| S-12 移行 | 旧DB複製で安全・未終端・破損を試す | 同一DB変換は安全時だけ。新DB開始では旧状態を検証済みアーカイブに残し、未確定件数を監査記録。破損バックアップでは切替しない |
 
 ## 切替判定と復旧
 

@@ -53,6 +53,12 @@ enum Command {
 enum DirectCommand {
     Check,
     Init,
+    ArchiveInit {
+        #[arg(long)]
+        legacy_state: PathBuf,
+        #[arg(long)]
+        backup_to: PathBuf,
+    },
     Cutover {
         #[arg(long)]
         backup_to: PathBuf,
@@ -149,6 +155,16 @@ async fn run(cli: Cli) -> Result<()> {
             DirectCommand::Init => {
                 let instance = storage::initialize_direct(&cfg)?;
                 println!("直接接続DBを初期化しました。instance_uuid={instance}");
+                Ok(())
+            }
+            DirectCommand::ArchiveInit {
+                legacy_state,
+                backup_to,
+            } => {
+                let backup = direct_migration::archive_init(&cfg, legacy_state, backup_to)?;
+                println!(
+                    "旧状態を検証済みアーカイブに保存し、新しい直接接続DBを初期化しました。backup_id={backup}"
+                );
                 Ok(())
             }
             DirectCommand::Cutover { backup_to } => {

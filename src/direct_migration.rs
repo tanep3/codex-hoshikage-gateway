@@ -3,8 +3,11 @@
 use crate::{backup, direct_config::DirectConfig, domain, storage};
 use anyhow::{Result, ensure};
 use rusqlite::{Connection, OpenFlags, params};
-use std::path::{Path, PathBuf};
 use std::time::Duration;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 pub fn cutover(cfg: &DirectConfig, backup_dir: &Path) -> Result<String> {
     cfg.validate()?;
@@ -91,6 +94,91 @@ pub fn cutover(cfg: &DirectConfig, backup_dir: &Path) -> Result<String> {
     Ok(backup.backup_id)
 }
 
+/// Start a separate direct instance while preserving the complete legacy
+/// database and content as an offline, verifiable archive. Unresolved legacy
+/// deliveries stay unresolved in that archive; no AI or Discord send is
+/// inferred or retried.
+pub fn archive_init(cfg: &DirectConfig, legacy_state: &Path, backup_dir: &Path) -> Result<String> {
+    cfg.validate()?;
+    let _legacy_lock = storage::StateLock::acquire(legacy_state)?;
+    storage::private_dir(&cfg.storage.state_dir)?;
+    let legacy_canonical = legacy_state.canonicalize()?;
+    let direct_canonical = cfg.storage.state_dir.canonicalize()?;
+    ensure!(
+        !legacy_canonical.starts_with(&direct_canonical)
+            && !direct_canonical.starts_with(&legacy_canonical),
+        "legacy and direct state directories must be separate"
+    );
+    let old_db = legacy_state.join("gateway.sqlite3");
+    storage::validate_database(&old_db)?;
+    let source = Connection::open_with_flags(&old_db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    if source
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='runtime_mode'")?
+        .exists([])?
+    {
+        let mode: String = source.query_row(
+            "SELECT mode FROM runtime_mode WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )?;
+        ensure!(mode == "proxy", "legacy database is not Proxy-backed");
+    }
+    ensure!(
+        !cfg.storage.state_dir.join("gateway.sqlite3").exists(),
+        "direct database already exists"
+    );
+    let unresolved_requests: i64 = source.query_row(
+        "SELECT count(*) FROM requests WHERE state NOT IN ('COMPLETED','FAILED','CANCELLED')",
+        [],
+        |row| row.get(0),
+    )?;
+    let unresolved_resources: i64 = source.query_row(
+        "SELECT count(*) FROM resource_deliveries WHERE state NOT IN ('DELIVERED','SUPERSEDED')",
+        [],
+        |row| row.get(0),
+    )?;
+    drop(source);
+    let backup = backup::create(&old_db, backup_dir)?;
+    let checked = backup::verify(backup_dir)?;
+    ensure!(
+        backup.backup_id == checked.backup_id,
+        "archive verification changed"
+    );
+    let pending = cfg.storage.state_dir.join("archive-init-pending.json");
+    crate::backup::atomic_new(
+        &pending,
+        &serde_json::to_vec(&serde_json::json!({
+            "backup_id": backup.backup_id,
+            "archive": backup_dir,
+            "legacy_state": legacy_state,
+        }))?,
+    )?;
+    let instance = storage::initialize_direct(cfg)?;
+    let direct_db = cfg.storage.state_dir.join("gateway.sqlite3");
+    let connection = Connection::open(&direct_db)?;
+    connection.execute(
+        "INSERT INTO admin_audit(id,uid,kind,target_id,reason,risk_accepted,created_at) VALUES(?1,?2,'direct_codex_archived_start',?3,?4,0,?5)",
+        params![
+            domain::id(),
+            unsafe { libc::geteuid() },
+            instance,
+            serde_json::json!({
+                "backup_id": backup.backup_id,
+                "archive": backup_dir,
+                "unresolved_requests": unresolved_requests,
+                "unresolved_resources": unresolved_resources,
+                "legacy_replay": false
+            })
+            .to_string(),
+            domain::now_ms()
+        ],
+    )?;
+    connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+    fs::remove_file(&pending)?;
+    fs::File::open(&cfg.storage.state_dir)?.sync_all()?;
+    Ok(backup.backup_id)
+}
+
 fn assert_quiescent(connection: &Connection) -> Result<()> {
     for (table, condition, label) in [
         (
@@ -124,6 +212,13 @@ fn assert_quiescent(connection: &Connection) -> Result<()> {
 
 pub fn direct_database(cfg: &DirectConfig) -> Result<PathBuf> {
     cfg.validate()?;
+    ensure!(
+        !cfg.storage
+            .state_dir
+            .join("archive-init-pending.json")
+            .exists(),
+        "archived direct initialization is incomplete"
+    );
     let path = cfg.storage.state_dir.join("gateway.sqlite3");
     storage::validate_database(&path)?;
     let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;

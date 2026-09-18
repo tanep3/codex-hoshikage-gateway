@@ -115,6 +115,64 @@ async fn cutover_rejects_queued_requests_without_replaying_them() {
 }
 
 #[tokio::test]
+async fn archive_init_keeps_unfinished_legacy_request_without_replay() {
+    let temp = tempfile::tempdir().unwrap();
+    let old = common::config(&temp);
+    let (store, lock) = common::store(&old).await;
+    let request = common::queued(&store, &old, "123").await;
+    drop(store);
+    drop(lock);
+    let mut next = direct(&temp);
+    next.storage.state_dir = temp.path().join("new-direct-state");
+    let bundle = temp.path().join("legacy-archive");
+    let backup_id = direct_migration::archive_init(&next, &old.storage.state_dir, &bundle).unwrap();
+    assert_eq!(backup::verify(&bundle).unwrap().backup_id, backup_id);
+    assert!(direct_migration::direct_database(&next).is_ok());
+    let archived = Connection::open(bundle.join("gateway.sqlite3")).unwrap();
+    let state: String = archived
+        .query_row("SELECT state FROM requests WHERE id=?1", [request], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(state, "QUEUED");
+    let new_db = Connection::open(next.storage.state_dir.join("gateway.sqlite3")).unwrap();
+    let count: i64 = new_db
+        .query_row("SELECT count(*) FROM requests", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
+    let audit: String = new_db
+        .query_row(
+            "SELECT reason FROM admin_audit WHERE kind='direct_codex_archived_start'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(audit.contains("\"unresolved_requests\":1"));
+    let pending = next.storage.state_dir.join("archive-init-pending.json");
+    fs::write(&pending, b"pending").unwrap();
+    assert!(direct_migration::direct_database(&next).is_err());
+    fs::remove_file(pending).unwrap();
+    assert!(
+        direct_migration::archive_init(&next, &old.storage.state_dir, &temp.path().join("again"))
+            .is_err()
+    );
+}
+
+#[test]
+fn archive_init_rejects_nested_state_directories() {
+    let temp = tempfile::tempdir().unwrap();
+    let old = common::config(&temp);
+    storage::initialize(&old).unwrap();
+    let mut next = direct(&temp);
+    next.storage.state_dir = old.storage.state_dir.join("nested");
+    assert!(
+        direct_migration::archive_init(&next, &old.storage.state_dir, &temp.path().join("backup"))
+            .is_err()
+    );
+    assert!(!temp.path().join("backup").exists());
+}
+
+#[tokio::test]
 async fn fresh_direct_database_never_requires_proxy_configuration() {
     let temp = tempfile::tempdir().unwrap();
     let cfg = direct(&temp);

@@ -86,7 +86,12 @@ impl DirectCoordinator {
             tokio::select! {
                 _ = self.cancel.cancelled() => { workers.shutdown().await; return Ok(()); }
                 joined = workers.join_next(), if !workers.is_empty() => {
-                    if joined.is_some_and(|result|result.is_err()) { anyhow::bail!("direct admission worker exited unexpectedly"); }
+                    match joined {
+                        Some(Ok(Ok(()))) => {}
+                        Some(Ok(Err(_))) | Some(Err(_)) =>
+                            anyhow::bail!("direct admission worker exited unexpectedly"),
+                        None => {}
+                    }
                 }
                 event = input.recv() => {
                     let Some(Incoming::Message(message)) = event else {
@@ -95,6 +100,19 @@ impl DirectCoordinator {
                     };
                     if !self.connected.load(Ordering::Acquire) { continue; }
                     if workers.len() >= self.app.cfg.limits.queue_global {
+                        if message["guild_id"] == self.app.cfg.discord.guild_id
+                            && message["author"]["id"] == self.app.cfg.discord.allowed_user_id
+                            && let (Some(thread), Some(id)) =
+                                (message["channel_id"].as_str(), message["id"].as_str())
+                        {
+                            let _ = self
+                                .notice(
+                                    id,
+                                    thread,
+                                    "受付処理が混み合っています。この投稿はAIへ送っていません。少し待ってから新しい投稿で依頼してください。",
+                                )
+                                .await;
+                        }
                         continue;
                     }
                     let this = self.clone();
@@ -162,6 +180,45 @@ impl DirectCoordinator {
         }
     }
 
+    async fn typing_loop(&self) -> Result<()> {
+        let mut tick = tokio::time::interval(Duration::from_secs(7));
+        loop {
+            tokio::select! {_=self.cancel.cancelled()=>return Ok(()),_=tick.tick()=>{}}
+            if !self.connected.load(Ordering::Acquire) {
+                continue;
+            }
+            let approving = self
+                .approvals
+                .lock()
+                .await
+                .values()
+                .map(|card| card.thread_id.clone())
+                .collect::<HashSet<_>>();
+            let threads = self
+                .active
+                .lock()
+                .await
+                .keys()
+                .filter(|thread| !approving.contains(*thread))
+                .cloned()
+                .collect::<Vec<_>>();
+            for thread in threads {
+                if self.app.verify_location(&thread).await.is_err() {
+                    continue;
+                }
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(3),
+                    self.app.discord.api(
+                        reqwest::Method::POST,
+                        &format!("/channels/{}/typing", crate::discord::snowflake(&thread)?),
+                        None,
+                    ),
+                )
+                .await;
+            }
+        }
+    }
+
     async fn drive(&self, request_id: &str) -> Result<()> {
         let run = match self.app.start_queued(request_id).await {
             Ok(run) => run,
@@ -217,8 +274,26 @@ impl DirectCoordinator {
             .lock()
             .await
             .retain(|_, card| card.request_id != request_id);
+        let actor_result = task
+            .context("direct run actor panicked")
+            .and_then(|result| result);
+        if event_result.is_err() || actor_result.is_err() {
+            let state = self.app.store.request(request_id).await?.state;
+            if matches!(
+                state,
+                RequestState::Sending
+                    | RequestState::Running
+                    | RequestState::ApprovalRequired
+                    | RequestState::CancelRequested
+            ) {
+                self.app
+                    .store
+                    .mark_direct_unknown(request_id.into(), "direct_actor_failed".into())
+                    .await?;
+            }
+        }
         event_result?;
-        task.context("direct run actor panicked")?
+        actor_result
     }
 
     async fn show_approval(
@@ -280,7 +355,11 @@ impl DirectCoordinator {
             tokio::select! {
                 _=self.cancel.cancelled()=>{workers.shutdown().await;return Ok(());}
                 joined=workers.join_next(),if !workers.is_empty()=>{
-                    if joined.is_some_and(|result|result.is_err()){anyhow::bail!("direct control worker panicked");}
+                    match joined {
+                        Some(Ok(())) => {}
+                        Some(Err(_)) => anyhow::bail!("direct control worker panicked"),
+                        None => {}
+                    }
                 }
                 event=input.recv()=>{
                     let Some(event)=event else {anyhow::bail!("Discord control channel closed")};
@@ -694,6 +773,8 @@ pub async fn run(cfg: DirectConfig) -> Result<()> {
     let a = coordinator.clone();
     tasks.spawn(async move { ("scheduler", a.scheduler_loop().await) });
     let a = coordinator.clone();
+    tasks.spawn(async move { ("typing", a.typing_loop().await) });
+    let a = coordinator.clone();
     tasks.spawn(async move {("sweeper",async {
         let mut tick=tokio::time::interval(Duration::from_secs(1));
         loop {tokio::select!{_=a.cancel.cancelled()=>return Ok(()),_=tick.tick()=>{a.app.store.sweep().await?;}}}
@@ -747,20 +828,31 @@ mod tests {
 
     #[tokio::test]
     async fn raw_message_reaches_direct_child_and_saved_answer_is_delivered_once() {
-        direct_flow(false).await;
+        direct_flow(false, false).await;
     }
 
     #[tokio::test]
     async fn mcp_approval_button_returns_to_exact_direct_run() {
-        direct_flow(true).await;
+        direct_flow(true, false).await;
     }
 
-    async fn direct_flow(mcp_approval: bool) {
+    #[tokio::test]
+    #[ignore = "requires local Codex login and network; run explicitly for integration acceptance"]
+    async fn real_codex_reaches_mock_discord_through_direct_daemon() {
+        direct_flow(false, true).await;
+    }
+
+    async fn direct_flow(mcp_approval: bool, real_codex: bool) {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         let home = root.join("codex-home");
         fs::create_dir(&home).unwrap();
         fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
+        if real_codex {
+            let source = PathBuf::from(std::env::var("HOME").unwrap()).join(".codex/auth.json");
+            fs::copy(source, home.join("auth.json")).unwrap();
+            fs::set_permissions(home.join("auth.json"), fs::Permissions::from_mode(0o600)).unwrap();
+        }
         let state = root.join("state");
         fs::create_dir(&state).unwrap();
         let cfg = DirectConfig {
@@ -804,7 +896,12 @@ mod tests {
         storage::initialize_direct(&cfg).unwrap();
         let _lock = storage::StateLock::acquire(&cfg.storage.state_dir).unwrap();
         let (store, _done) = Store::open_direct(&cfg).unwrap();
-        let original = json!({"id":"999","channel_id":"4","guild_id":"1","author":{"id":"2","bot":false},"webhook_id":null,"content":"hello","attachments":[],"edited_timestamp":null});
+        let prompt = if real_codex {
+            "Reply with exactly DIRECT_GATEWAY_OK. Do not call tools."
+        } else {
+            "hello"
+        };
+        let original = json!({"id":"999","channel_id":"4","guild_id":"1","author":{"id":"2","bot":false},"webhook_id":null,"content":prompt,"attachments":[],"edited_timestamp":null});
         let posts = Arc::new(StdMutex::new(Vec::<Value>::new()));
         let posted = posts.clone();
         let callbacks = Arc::new(StdMutex::new(Vec::<Value>::new()));
@@ -860,8 +957,14 @@ mod tests {
             runs: DirectRunService {
                 store: store.clone(),
                 pool: CodexRuntimePool::new(LaunchConfig {
-                    command: PathBuf::from("python3"),
-                    args: {
+                    command: if real_codex {
+                        PathBuf::from("codex")
+                    } else {
+                        PathBuf::from("python3")
+                    },
+                    args: if real_codex {
+                        vec!["app-server".into(), "--listen".into(), "stdio://".into()]
+                    } else {
                         let mut args = vec![format!(
                             "{}/tests/fixtures/mock_app_server.py",
                             env!("CARGO_MANIFEST_DIR")
@@ -871,9 +974,13 @@ mod tests {
                         }
                         args
                     },
-                    codex_home: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
-                    initialize_timeout: Duration::from_secs(10),
-                    request_timeout: Duration::from_secs(2),
+                    codex_home: if real_codex {
+                        cfg.codex.home.clone()
+                    } else {
+                        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    },
+                    initialize_timeout: Duration::from_secs(if real_codex { 20 } else { 10 }),
+                    request_timeout: Duration::from_secs(if real_codex { 45 } else { 2 }),
                     experimental_api: true,
                 }),
                 content: DirectContent::new(&state).unwrap(),
@@ -940,19 +1047,25 @@ mod tests {
                 .await
                 .unwrap();
         }
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                if posts
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .any(|post| post["content"].as_str().is_some_and(|s| s.contains("DONE")))
-                {
-                    break;
+        tokio::time::timeout(
+            Duration::from_secs(if real_codex { 150 } else { 10 }),
+            async {
+                loop {
+                    if posts.lock().unwrap().iter().any(|post| {
+                        post["content"].as_str().is_some_and(|s| {
+                            s.contains(if real_codex {
+                                "DIRECT_GATEWAY_OK"
+                            } else {
+                                "DONE"
+                            })
+                        })
+                    }) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
                 }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        })
+            },
+        )
         .await
         .unwrap();
         let states = store.status().await.unwrap();
@@ -962,7 +1075,13 @@ mod tests {
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|post| post["content"].as_str().is_some_and(|s| s.contains("DONE")))
+                .filter(|post| post["content"].as_str().is_some_and(|s| s.contains(
+                    if real_codex {
+                        "DIRECT_GATEWAY_OK"
+                    } else {
+                        "DONE"
+                    }
+                )))
                 .count(),
             1
         );
