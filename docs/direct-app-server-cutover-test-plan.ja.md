@@ -2,17 +2,19 @@
 
 2026-09-18 / Tane Channel Technology
 
-状態：テスト計画・実装中。常駐切替は未実施。[目標要件](requirements-direct-app-server.ja.md)のDA-A01〜DA-A11を、運用とDiscord画面で判定できる形にする。試験場所は利用者が指定済みの[Discordチャンネル](https://discord.com/channels/1547798936167915541/1547877505040654397)。
+状態：直接接続版を常駐サービスへ試験反映済み。実Discordでの受入は未了で、製品切替の合格判定ではない。[目標要件](requirements-direct-app-server.ja.md)のDA-A01〜DA-A11を、運用とDiscord画面で判定できる形にする。試験場所は利用者が指定済みの[Discordチャンネル](https://discord.com/channels/1547798936167915541/1547877505040654397)。
 
 `direct check/init/archive-init/cutover/run` の独立CLI入口を実装した。模擬Discordの投稿重複→専属App Server→保存回答1回配信、承認ボタン→実callへの返信→回答配信、MCPの対応する `item/started` と質問の照合、成果物登録ツール→不変保存、`/get`の送信不明→nonce照合、未対応確認の拒否は自動試験を通した。2026-09-18には実Codex App Serverを子プロセスにした「投稿→実モデル回答→Gateway保存→模擬Discordへ1回配信」も隔離状態ディレクトリで通した。これは実Discordの表示試験ではない。U系列の直接接続版実Discord試験は全件未実施。合格表は実行時に証跡とともに更新する。
 
-## 試験開始条件
+## 試験運用と正式切替の条件
 
-次を満たすまで、既存systemdサービスと本番DBは切り替えない。
+2026-09-18、旧サービスを停止してから同じユーザーsystemdサービスを直接接続版へ切り替えた。旧設定・旧実行ファイルは `~/.config/codex-hoshikage-gateway/backup-before-direct-20260918/` に退避し、旧DB・保存物は `~/.local/state/codex-hoshikage-gateway-legacy-archive-20260918/` に検証付きで保存した。新DBは `~/.local/state/codex-hoshikage-gateway-direct/`、設定は `~/.config/codex-hoshikage-gateway/config.direct.toml` を使用する。新DBの `runtime_mode=direct`、schema 14、サービスの起動を確認した。旧配信の未確定2件は再送していない。
 
-1. `direct run` が専属Codex App Serverを起動する入口は実装済み。旧 `run` はProxy版のままであり、設定形式で誤って混同しないことをCLI試験で確認した。実Codex・実Discordでの常駐受入は未実施。
-2. Discord投稿受付・スケジューラ、基本操作、コマンド／ファイル変更の単発承認、MCPの1問Allow/Cancel確認、回答・生成画像配信、成果物登録／`/get`と成果物配信の再起動後照合を直接接続経路へ接続した。一般の追加質問・権限変更・MCPフォームの回答、実Discord表示は引き続き未達。模擬試験の合格だけで常駐切替しない。
-3. Proxyを要求しない[Gateway専用設定例](../config/config.direct.example.toml)は用意した。専属Codex homeの認証・MCP設定、英日導入／利用者向け説明は未整備。
+以下をすべて満たすまでは正式な製品切替完了と判定しない。試験運用中に未対応操作の確認が出た場合は拒否か `/stop` を使い、元の操作を自動で繰り返さない。
+
+1. `direct run` が専属Codex App Serverを起動する入口は実装済み。旧 `run` はProxy版のままであり、設定形式で誤って混同しないことをCLI試験で確認した。実Codexと模擬Discordの組合せは通過したが、実Discordでの常駐受入は未実施。
+2. Discord投稿受付・スケジューラ、基本操作、コマンド／ファイル変更の単発承認、MCPの1問Allow/Cancel確認、回答・生成画像配信、成果物登録／`/get`と成果物配信の再起動後照合を直接接続経路へ接続した。一般の追加質問・権限変更・MCPフォームの回答、実Discord表示は引き続き未達。模擬試験の合格だけで正式合格と判定しない。
+3. Proxyを要求しない[Gateway専用設定例](../config/config.direct.example.toml)を用意し、このホストには専属Codex homeとPlaywright MCP設定を配置した。認証ファイルは従来のものから非公開コピーを作成した。認証更新と実MCP接続は受入で確認する。英日導入／利用者向け説明は未整備。
 4. 別のstate_dirとCodex homeで隔離試験し、旧サービスと同じBotがDiscordイベントを二重受信しないようにする。
 5. 旧サービス停止後、DB・保存ファイルの整合バックアップを検証する。同じDBの変換は未終端の依頼・配信・制御があれば拒否する。別state_dirの新DBで開始する場合は、未確定件数と旧バックアップの所在を監査記録し、旧状態を参照用アーカイブとして保持する。2026-09-18の読取検査では旧 `resource_deliveries` にWAITINGが2件ある。Proxyの回答保存は両方 `ready` だが、Discord配信記録は一方 `PATCH_PENDING`、もう一方 `POST_PENDING`。両方のDiscordスレッドをBot認証で読み取り確認したところ `403 Forbidden` で、現権限では送信結果を照合できない。新方式はこれらを自動放棄・成功化・AI再実行・Discord再送しない。アーカイブから後日照合する可能性を残す。
 6. 切替後の既存Discord会話は次の発言から新しいCodex文脈を始める。旧投稿・依頼記録は保持し、旧Codex thread／response IDは引き継がない。
@@ -69,6 +71,6 @@ U-07〜U-11の具体的な安全な依頼文は実施時にこちらで提示す
 
 ## 切替判定と復旧
 
-試験開始条件、U-01〜U-12、S-01〜S-12を満たしてから常駐切替する。利用者とこちらで実Discord表示を照合する。未合格を黙って本番へ持ち込まない。
+上記条件、U-01〜U-12、S-01〜S-12を満たしてから正式な切替完了と判定する。利用者とこちらで実Discord表示を照合する。未合格を黙って本番完了として扱わない。
 
-切替は旧サービス停止、バックアップ検証、DB移行、設定確認、新バイナリ起動、Discord受入の順。問題時は新Gatewayを停止し、移行前バックアップを照合して旧バイナリ・旧設定へ戻す。切替後の新規依頼を旧Proxy方式へ自動再送しない。
+試験反映は旧サービス停止、バックアップ検証、別DB初期化、設定確認、新バイナリ起動まで実施した。Discord受入は未了。問題時は新Gatewayを停止し、退避した旧バイナリ・旧systemd定義で起動する。新方式で受け付けた依頼を旧Proxy方式へ自動再送しない。
