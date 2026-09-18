@@ -1,5 +1,8 @@
 mod common;
-use axum::{Json, Router, routing::post};
+use axum::{
+    Json, Router,
+    routing::{get, post},
+};
 use codex_hoshikage_gateway::{
     codex_transport::{CodexRuntimePool, LaunchConfig},
     delivery::Delivery,
@@ -61,16 +64,21 @@ async fn actor_routes_exact_approval_then_delivers_after_turn_completion() {
         .unwrap();
     let posts = Arc::new(Mutex::new(Vec::<Value>::new()));
     let seen = posts.clone();
-    let router = Router::new().route(
-        "/channels/4/messages",
-        post(move |Json(body): Json<Value>| {
-            let seen = seen.clone();
-            async move {
-                seen.lock().unwrap().push(body);
-                Json(json!({"id":"1000","channel_id":"4"}))
-            }
-        }),
-    );
+    let router = Router::new()
+        .route(
+            "/channels/4",
+            get(|| async { Json(json!({"id":"4","guild_id":"1","type":0})) }),
+        )
+        .route(
+            "/channels/4/messages",
+            post(move |Json(body): Json<Value>| {
+                let seen = seen.clone();
+                async move {
+                    seen.lock().unwrap().push(body);
+                    Json(json!({"id":"1000","channel_id":"4"}))
+                }
+            }),
+        );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
@@ -132,6 +140,18 @@ async fn actor_routes_exact_approval_then_delivers_after_turn_completion() {
     };
     assert_eq!(operation.kind, InteractionKind::CommandApproval);
     assert_eq!(operation.params["command"], "cat report.txt");
+    let (steer_reply, steer_result) = tokio::sync::oneshot::channel();
+    actor
+        .commands
+        .send(RunCommand::Steer {
+            interaction_id: "902".into(),
+            discord_thread_id: "4".into(),
+            input: vec![json!({"type":"text","text":"follow up"})],
+            reply: steer_reply,
+        })
+        .await
+        .unwrap();
+    steer_result.await.unwrap().unwrap();
     let (reply, result) = tokio::sync::oneshot::channel();
     actor
         .commands

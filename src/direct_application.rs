@@ -5,7 +5,7 @@ use crate::{
     direct_config::DirectConfig,
     direct_delivery::DirectImageDelivery,
     direct_run::{ActiveRun, DirectRunService},
-    discord::{Discord, snowflake},
+    discord::{Discord, input_message, snowflake},
     domain,
     files::Files,
     storage::Store,
@@ -28,6 +28,13 @@ pub struct DirectDeliveryResult {
     pub answer_delivered: bool,
     pub images: DirectImageDelivery,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DirectAdmission {
+    Ignored,
+    Duplicate,
+    Accepted(String),
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DirectControlOutcome {
     WaitingCancelled,
@@ -38,6 +45,61 @@ pub enum DirectControlOutcome {
 }
 
 impl DirectApplication {
+    /// Reserve the Discord message before attachment validation. A second
+    /// event carrying the same Message ID can never create another Codex turn.
+    pub async fn admit_message(&self, raw: &Value) -> Result<DirectAdmission> {
+        if raw["guild_id"] != self.cfg.discord.guild_id
+            || raw["author"]["id"] != self.cfg.discord.allowed_user_id
+            || raw["author"]["bot"] == true
+            || !raw["webhook_id"].is_null()
+            || crate::commands::is_text_control(raw["content"].as_str().unwrap_or(""))
+            || !self
+                .discord
+                .should_respond(raw, self.cfg.discord.response_mode)
+        {
+            return Ok(DirectAdmission::Ignored);
+        }
+        let message = input_message(raw, &self.cfg.discord.guild_id)?;
+        self.verify_location(&message.thread_id).await?;
+        self.store
+            .add_conversation(
+                message.thread_id.clone(),
+                crate::storage::PROXY_SCOPE.into(),
+            )
+            .await?;
+        let Some(id) = self
+            .store
+            .reserve(
+                message.id.clone(),
+                message.thread_id.clone(),
+                message.metadata_digest(),
+                self.cfg.limits.clone(),
+            )
+            .await?
+        else {
+            return Ok(DirectAdmission::Duplicate);
+        };
+        let result = async {
+            let prepared = self.files.prepare(&message, &self.cfg.limits).await?;
+            self.store
+                .finalize(
+                    id.clone(),
+                    prepared.metadata_digest,
+                    prepared.digest,
+                    prepared.attachments,
+                )
+                .await
+        }
+        .await;
+        if let Err(error) = result {
+            self.store
+                .reject_admission(id, "direct_input_validation_failed")
+                .await?;
+            return Err(error);
+        }
+        Ok(DirectAdmission::Accepted(id))
+    }
+
     pub async fn cancel(
         &self,
         interaction: &str,

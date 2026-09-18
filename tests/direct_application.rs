@@ -6,11 +6,11 @@ use axum::{
 use codex_hoshikage_gateway::{
     codex_transport::{CodexRuntimePool, LaunchConfig},
     delivery::Delivery,
-    direct_application::{DirectApplication, DirectControlOutcome},
+    direct_application::{DirectAdmission, DirectApplication, DirectControlOutcome},
     direct_config::{Codex, DirectConfig},
     direct_content::DirectContent,
     direct_run::DirectRunService,
-    discord::{Discord, input_message},
+    discord::Discord,
     files::Files,
     storage::{self, StateLock, Store},
 };
@@ -47,34 +47,8 @@ async fn original_discord_message_runs_locally_and_delivers_its_saved_answer() {
     storage::initialize_direct(&cfg).unwrap();
     let _lock = StateLock::acquire(&cfg.storage.state_dir).unwrap();
     let (store, _done) = Store::open_direct(&cfg).unwrap();
-    store
-        .add_conversation("4".into(), storage::PROXY_SCOPE.into())
-        .await
-        .unwrap();
     let original = json!({"id":"999","channel_id":"4","guild_id":"1","author":{"id":"2","bot":false},"webhook_id":null,"content":"hello","attachments":[],"edited_timestamp":null});
-    let message = input_message(&original, "1").unwrap();
     let files = Files::new().unwrap();
-    let prepared = files.prepare(&message, &cfg.limits).await.unwrap();
-    let request = store
-        .reserve(
-            message.id.clone(),
-            message.thread_id.clone(),
-            message.metadata_digest(),
-            cfg.limits.clone(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-    store
-        .finalize(
-            request.clone(),
-            prepared.metadata_digest,
-            prepared.digest,
-            prepared.attachments,
-        )
-        .await
-        .unwrap();
-    drop(prepared.reservation);
     let posts = Arc::new(Mutex::new(Vec::<Value>::new()));
     let seen = posts.clone();
     let router = Router::new()
@@ -137,6 +111,13 @@ async fn original_discord_message_runs_locally_and_delivers_its_saved_answer() {
         },
         delivery,
     };
+    let DirectAdmission::Accepted(request) = app.admit_message(&original).await.unwrap() else {
+        panic!("message was not accepted")
+    };
+    assert_eq!(
+        app.admit_message(&original).await.unwrap(),
+        DirectAdmission::Duplicate
+    );
     let run = app.start_queued(&request).await.unwrap();
     assert_eq!(
         app.cancel("1001", "4", Some(&run)).await.unwrap(),

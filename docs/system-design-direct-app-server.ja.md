@@ -48,6 +48,7 @@ App Serverの実行数・設定隔離はtransportの単体試験直後に実機�
 
 1. Discordから本人・場所を検証し、Message IDで受付を永続化する。本文・添付の同一性を確認する。
    入力の検証結果は既存Gatewayの受付用形式で保持し、送信直前にApp Serverの`UserInput`（`text`／`image`）へ厳密に変換する。Proxy向け`role`／`content`形式をそのまま`turn/start`へ渡さない。変換不能な添付は送信前に拒否し、推測で別種の入力へ変えない。
+   本人・Guild・チャンネルを検証したメッセージは、添付のネットワーク検証より先にMessage IDで予約する。同一イベントの再配信は既存予約を返し、新たなCodex依頼を作らない。検証失敗は予約を拒否状態へ確定させ、後着のworkerが送信できないようにする。
 2. Schedulerが同一会話1、全体2の枠を取得し、Codex実行先とモデルを確定する。受付順とworkの排他をDBで確認する。
 3. thread/turnへ送る前に、対象、入力digest、送信意思をcommitする。境界を越えた後のcrashでは「送信されなかった」と推測しない。
 4. Codex transportから得たthread/turn IDと通知を実行記録へ反映する。SSE/HTTPイベントへ変換する必要はない。進捗表示は揮発してもよいが、確定状態と承認要求は復旧可能にする。
@@ -70,6 +71,8 @@ Codex transportは上流の承認要求を `ApprovalRequest { app_server_request
 直接接続での`/stop`・`/cancel`・Steerは、Discord操作ID、Gateway依頼ID、Codex thread／turn IDを同じDB transactionで固定してから上流へ送る。送信意思を記録した後の通信失敗は`UNKNOWN`であり、Discordイベント再配信による再送は禁止する。すでに終端したTurnへの制御や、停止要求後のSteerも送信前に拒否する。中断RPCの受付とTurnの中断完了は別の状態として表示する。
 
 生きているTurnはRun単位のactorが専属子プロセスと一緒に所有する。actorが上流通知、承認要求、Discordからの制御コマンドを直列化し、承認UIへは上流要求IDと完全な操作内容を含む内部イベントを渡す。終端通知を取り落としても同じthread／turnを照会する。照会だけが遅いときは実行を再送せず、子プロセスの切断・不正な要求では対象依頼をUNKNOWNへ保護する。actorの異常終了もSupervisorが検知し、RUNNINGのまま放置しない。
+
+actorから表示層へのイベント送信は非待機とし、表示層の停止で承認・停止の処理を詰まらせない。Codex終端は確認できても回答保存を一定期間確定できない場合は結果不明として保護する。保存済みの終端結果に対してDiscord配信だけが失敗した場合は配信待ちとしてactorを終了し、保存済み版の復旧経路へ渡す。
 
 意味ベース委任はapprovalへ後付けできる判断providerの一つとする。標準の手動承認を動かしてから要件を再評価する。LLM、対象証拠、委任範囲、サイト固有知識をCodex transportやDiscord adapterへ組み込まない。
 

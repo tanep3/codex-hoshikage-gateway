@@ -6,10 +6,14 @@ use crate::{
     direct_application::{DirectApplication, DirectControlOutcome, DirectDeliveryResult},
     direct_approval::{DirectInteraction, ManualDecision},
     direct_run::ActiveRun,
+    domain::RequestState,
 };
 use anyhow::{Result, ensure};
 use serde_json::Value;
-use std::{collections::HashSet, time::Duration};
+use std::{
+    collections::HashSet,
+    time::{Duration, Instant},
+};
 use tokio::{
     sync::{mpsc, oneshot},
     task::JoinHandle,
@@ -47,6 +51,7 @@ pub enum RunEvent {
     },
     UnsupportedApproval,
     Terminal(DirectDeliveryResult),
+    DeliveryPending,
     ResultUnknown,
 }
 
@@ -74,6 +79,7 @@ async fn serve(
     events: mpsc::Sender<RunEvent>,
 ) -> Result<()> {
     let mut seen_approvals = HashSet::new();
+    let mut terminal_seen = None::<Instant>;
     let mut ticker = tokio::time::interval(Duration::from_secs(5));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -107,26 +113,27 @@ async fn serve(
                         match app.runs.register_interaction(&run,&event).await? {
                             Some((id,operation))=>{
                                 if seen_approvals.insert(id.clone()) {
-                                    events.send(RunEvent::Approval{interaction_id:id,operation}).await?;
+                                    emit(&events,RunEvent::Approval{interaction_id:id,operation})?;
                                 }
                             }
-                            None=>{events.send(RunEvent::UnsupportedApproval).await?;}
+                            None=>{emit(&events,RunEvent::UnsupportedApproval)?;}
                         }
                     }
                     Ok(Event::Closed(_))|Err(tokio::sync::broadcast::error::RecvError::Closed)=>{
                         app.store.mark_direct_unknown(run.request_id.clone(),"runtime_closed".into()).await?;
-                        events.send(RunEvent::ResultUnknown).await?;
+                        emit(&events,RunEvent::ResultUnknown)?;
                         return Ok(());
                     }
                     Ok(Event::ProtocolError(_))|Ok(Event::InvalidServerRequest{..})=>{
                         app.store.mark_direct_unknown(run.request_id.clone(),"runtime_protocol_error".into()).await?;
-                        events.send(RunEvent::ResultUnknown).await?;
+                        emit(&events,RunEvent::ResultUnknown)?;
                         return Ok(());
                     }
                     Ok(Event::Notification{method,params}) if method=="turn/completed"=>{
                         ensure!(params["threadId"]==run.identity.thread_id && params["turn"]["id"]==run.identity.turn_id,"another turn completed on this child");
-                        if let Ok(result)=app.finish_and_deliver(&run).await {
-                            events.send(RunEvent::Terminal(result)).await?;
+                        terminal_seen.get_or_insert_with(Instant::now);
+                        if let Some(outcome)=finish_if_ready(&app,&run).await? {
+                            emit(&events,outcome)?;
                             return Ok(());
                         }
                     }
@@ -139,16 +146,46 @@ async fn serve(
             _=ticker.tick()=>{
                 let execution=CodexExecution::new(run.transport().clone());
                 if let Ok(Ok(snapshot))=tokio::time::timeout(Duration::from_secs(2),execution.read_turn(&run.identity)).await {
-                    if matches!(snapshot.status.as_str(),"completed"|"failed"|"interrupted")
-                        && let Ok(result)=app.finish_and_deliver(&run).await {
-                        events.send(RunEvent::Terminal(result)).await?;
-                        return Ok(());
+                    if matches!(snapshot.status.as_str(),"completed"|"failed"|"interrupted") {
+                        terminal_seen.get_or_insert_with(Instant::now);
+                        if let Some(outcome)=finish_if_ready(&app,&run).await? {
+                            emit(&events,outcome)?;
+                            return Ok(());
+                        }
                     }
                 } else if run.transport().is_closed() {
                     app.store.mark_direct_unknown(run.request_id.clone(),"runtime_closed".into()).await?;
-                    events.send(RunEvent::ResultUnknown).await?;
+                    emit(&events,RunEvent::ResultUnknown)?;
                     return Ok(());
                 }
+                if terminal_seen.is_some_and(|seen|seen.elapsed()>Duration::from_secs(60)) {
+                    app.store.mark_direct_unknown(run.request_id.clone(),"terminal_content_unavailable".into()).await?;
+                    emit(&events,RunEvent::ResultUnknown)?;
+                    return Ok(());
+                }
+            }
+        }
+    }
+}
+
+fn emit(events: &mpsc::Sender<RunEvent>, event: RunEvent) -> Result<()> {
+    events
+        .try_send(event)
+        .map_err(|_| anyhow::anyhow!("run event receiver unavailable or full"))
+}
+
+async fn finish_if_ready(app: &DirectApplication, run: &ActiveRun) -> Result<Option<RunEvent>> {
+    match app.finish_and_deliver(run).await {
+        Ok(result) => Ok(Some(RunEvent::Terminal(result))),
+        Err(_) => {
+            let state = app.store.request(&run.request_id).await?.state;
+            if matches!(
+                state,
+                RequestState::Completed | RequestState::Failed | RequestState::Cancelled
+            ) {
+                Ok(Some(RunEvent::DeliveryPending))
+            } else {
+                Ok(None)
             }
         }
     }
