@@ -58,7 +58,11 @@ impl DirectInteraction {
                 || (kind == InteractionKind::McpElicitation && wire_turn.is_none()),
             "App Server request belongs to another turn"
         );
-        let item_id = params["itemId"].as_str().map(str::to_owned);
+        let item_id = match kind {
+            InteractionKind::DynamicTool => params["callId"].as_str(),
+            _ => params["itemId"].as_str(),
+        }
+        .map(str::to_owned);
         ensure!(
             matches!(kind, InteractionKind::McpElicitation) || item_id.is_some(),
             "App Server request item ID missing"

@@ -82,3 +82,27 @@ fn mcp_elicitation_without_turn_is_bound_to_this_runs_thread() {
     );
     assert!(DirectInteraction::from_event(&other, &active()).is_err());
 }
+
+#[test]
+fn dynamic_tool_uses_call_id_from_the_installed_app_server_schema() {
+    let event = request(
+        "item/tool/call",
+        json!({"threadId":"thread-a","turnId":"turn-a","callId":"call-a",
+               "namespace":"browser","tool":"browser_tabs","arguments":{"action":"list"}}),
+    );
+    let operation = DirectInteraction::from_event(&event, &active())
+        .unwrap()
+        .unwrap();
+    assert_eq!(operation.kind, InteractionKind::DynamicTool);
+    assert_eq!(operation.item_id.as_deref(), Some("call-a"));
+    assert!(
+        operation
+            .manual_decision(ManualDecision::AcceptOnce)
+            .is_err()
+    );
+    let missing_call = request(
+        "item/tool/call",
+        json!({"threadId":"thread-a","turnId":"turn-a","tool":"browser_tabs","arguments":{}}),
+    );
+    assert!(DirectInteraction::from_event(&missing_call, &active()).is_err());
+}

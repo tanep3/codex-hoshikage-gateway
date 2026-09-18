@@ -64,6 +64,8 @@ Codex transportは上流の承認要求を `ApprovalRequest { app_server_request
 
 実装では上流要求IDを文字列／数値のまま保持し、現在のRunのthread／turnと照合する。MCP elicitationで上流にturn IDが無い場合のみ、Run専属子プロセスで一致したthreadへ紐付ける。要求本文とfingerprintは承認の本人向け表示へ渡すが、通常の公開投稿やログへ生の引数を出さない。単発のコマンド／ファイル変更承認は、上流が提示した選択肢だけを返信する。MCP入力・権限要求・動的ツールには別の返信schemaを適用し、単発承認の`decision`を流用しない。
 
+動的ツール呼出し`item/tool/call`は現行Codex schemaで`itemId`ではなく`callId`を持つ。上流要求IDと`callId`の両方を照合し、実引数の表示と実行結果の対応付けに使う。methodごとの必須フィールドを共通形と推測せず、稼働バイナリのschemaで確認する。
+
 `direct_interactions`はGateway依頼ID、上流RPC ID、method、thread／turn、表示fingerprint、提示された判断候補、返信状態を保存する。判断を送る前に`PENDING→SENDING`をcommitし、送信結果が不明なら`UNKNOWN`として再送しない。Gateway再起動で旧子プロセスに紐付く`PENDING`は`UNAVAILABLE`、`SENDING`／未解決`SENT`は`UNKNOWN`へ移し、同じ上流RPC IDへの自動再返信を禁止する。上流の`serverRequest/resolved`で同じ要求を照合できた場合だけ解決へ訂正する。完全な実引数は現状メモリ上の表示用データであり、再起動後に古い承認を再表示・再許可する根拠にはしない。
 
 拒否は表示取得に依存しない。Steerは新しい利用者入力世代を作り、以前の依頼中許可を失効させてから上流へ送る。/stopは待機列のpauseとactive Turnへの中断を区別する。/cancelは現行仕様どおり、直近待機1件、なければactive依頼を対象とし、queue全体をpauseしない。返信送信結果不明時は同一上流要求を調べ、新しい承認として再送しない。
