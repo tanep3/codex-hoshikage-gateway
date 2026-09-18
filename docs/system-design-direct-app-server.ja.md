@@ -69,6 +69,8 @@ Codex transportは上流の承認要求を `ApprovalRequest { app_server_request
 
 直接接続での`/stop`・`/cancel`・Steerは、Discord操作ID、Gateway依頼ID、Codex thread／turn IDを同じDB transactionで固定してから上流へ送る。送信意思を記録した後の通信失敗は`UNKNOWN`であり、Discordイベント再配信による再送は禁止する。すでに終端したTurnへの制御や、停止要求後のSteerも送信前に拒否する。中断RPCの受付とTurnの中断完了は別の状態として表示する。
 
+生きているTurnはRun単位のactorが専属子プロセスと一緒に所有する。actorが上流通知、承認要求、Discordからの制御コマンドを直列化し、承認UIへは上流要求IDと完全な操作内容を含む内部イベントを渡す。終端通知を取り落としても同じthread／turnを照会する。照会だけが遅いときは実行を再送せず、子プロセスの切断・不正な要求では対象依頼をUNKNOWNへ保護する。actorの異常終了もSupervisorが検知し、RUNNINGのまま放置しない。
+
 意味ベース委任はapprovalへ後付けできる判断providerの一つとする。標準の手動承認を動かしてから要件を再評価する。LLM、対象証拠、委任範囲、サイト固有知識をCodex transportやDiscord adapterへ組み込まない。
 
 ## 6. 回答・画像・成果物

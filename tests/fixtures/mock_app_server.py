@@ -4,6 +4,7 @@ import json
 import sys
 import time
 
+approval_pending = False
 for line in sys.stdin:
     msg = json.loads(line)
     method = msg.get("method")
@@ -47,8 +48,12 @@ for line in sys.stdin:
             continue
         print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"turn": {"id": "turn-one"}}}), flush=True)
         if "--request-approval" in sys.argv:
+            approval_pending = True
             print(json.dumps({"jsonrpc":"2.0","id":"approval-one","method":"item/commandExecution/requestApproval","params":{"threadId":"thread-one","turnId":"turn-one","itemId":"item-one","command":"cat report.txt","availableDecisions":["accept","decline"]}}), flush=True)
     elif method == "thread/read":
+        if approval_pending:
+            print(json.dumps({"jsonrpc":"2.0","id":msg["id"],"result":{"thread":{"id":msg["params"]["threadId"],"turns":[{"id":"turn-one","status":"inProgress","itemsView":"full","items":[]}]}}}),flush=True)
+            continue
         items = [{"type": "agentMessage", "phase": "final", "text": "DONE"}]
         if "--generated-image" in sys.argv:
             items.append({"type":"imageGeneration","id":"image-one","status":"completed","result":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jGZkAAAAASUVORK5CYII="})
@@ -60,4 +65,5 @@ for line in sys.stdin:
     elif method == "turn/interrupt":
         print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {}}), flush=True)
     elif method is None and msg.get("id") == "approval-one":
+        approval_pending = False
         print(json.dumps({"jsonrpc":"2.0","method":"serverRequest/resolved","params":{"threadId":"thread-one","requestId":"approval-one"}}), flush=True)

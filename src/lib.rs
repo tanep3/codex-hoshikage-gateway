@@ -16,6 +16,7 @@ pub mod direct_migration;
 pub mod direct_model_store;
 pub mod direct_models;
 pub mod direct_run;
+pub mod direct_run_actor;
 pub mod direct_store;
 pub mod direct_workspace;
 pub mod domain;
