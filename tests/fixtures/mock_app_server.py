@@ -38,6 +38,10 @@ for line in sys.stdin:
         print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"thread": {"id": msg["params"]["threadId"]}}}), flush=True)
     elif method == "turn/start":
         policy = msg["params"].get("sandboxPolicy", {})
+        user_input = msg["params"].get("input", [])
+        if not user_input or any(not isinstance(item, dict) or item.get("type") not in ("text", "image") for item in user_input):
+            print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32602, "message": "invalid App Server user input"}}), flush=True)
+            continue
         if "--enforce-sandbox" in sys.argv and (policy.get("type") != "workspaceWrite" or policy.get("writableRoots") != ["/tmp"] or policy.get("networkAccess") is not False or msg["params"].get("approvalPolicy") != "on-request"):
             print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32600, "message": "turn policy mismatch"}}), flush=True)
             continue
@@ -45,7 +49,12 @@ for line in sys.stdin:
         if "--request-approval" in sys.argv:
             print(json.dumps({"jsonrpc":"2.0","id":"approval-one","method":"item/commandExecution/requestApproval","params":{"threadId":"thread-one","turnId":"turn-one","itemId":"item-one","command":"cat report.txt","availableDecisions":["accept","decline"]}}), flush=True)
     elif method == "thread/read":
-        print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"thread": {"id": msg["params"]["threadId"], "turns": [{"id": "turn-one", "status": "completed", "itemsView": "full", "items": [{"type": "agentMessage", "phase": "final", "text": "DONE"}]}]}}}), flush=True)
+        items = [{"type": "agentMessage", "phase": "final", "text": "DONE"}]
+        if "--generated-image" in sys.argv:
+            items.append({"type":"imageGeneration","id":"image-one","status":"completed","result":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jGZkAAAAASUVORK5CYII="})
+        print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"thread": {"id": msg["params"]["threadId"], "turns": [{"id": "turn-one", "status": "completed", "itemsView": "full", "items": items}]}}}), flush=True)
+    elif method == "model/list":
+        print(json.dumps({"jsonrpc":"2.0","id":msg["id"],"result":{"data":[{"id":"gpt-5.6-luna","displayName":"GPT 5.6 Luna"}],"nextCursor":None}}),flush=True)
     elif method == "turn/steer":
         print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"turnId": msg["params"]["expectedTurnId"]}}), flush=True)
     elif method == "turn/interrupt":

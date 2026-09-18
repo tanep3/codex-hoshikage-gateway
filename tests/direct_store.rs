@@ -4,6 +4,103 @@ use codex_hoshikage_gateway::{
     storage::Store,
 };
 
+#[tokio::test]
+async fn a_second_turn_in_the_same_conversation_cannot_cross_the_send_boundary() {
+    let temp = tempfile::tempdir().unwrap();
+    let cfg = common::config(&temp);
+    let (store, _lock) = common::store(&cfg).await;
+    let first = common::queued(&store, &cfg, "701").await;
+    let second = common::queued(&store, &cfg, "702").await;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let first_intent = store
+        .prepare_direct(
+            first.clone(),
+            "4".into(),
+            workspace.clone(),
+            "openai".into(),
+        )
+        .await
+        .unwrap();
+    let second_intent = store
+        .prepare_direct(second.clone(), "4".into(), workspace, "openai".into())
+        .await
+        .unwrap();
+    store
+        .begin_direct_send(first.clone(), first_intent)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .begin_direct_send(second.clone(), second_intent.clone())
+            .await
+            .is_err()
+    );
+    store
+        .mark_direct_unknown(first, "upstream_unavailable".into())
+        .await
+        .unwrap();
+    assert!(
+        store
+            .begin_direct_send(second.clone(), second_intent)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store.request(&second).await.unwrap().state,
+        RequestState::Queued
+    );
+}
+
+#[tokio::test]
+async fn two_distinct_conversations_can_run_but_a_third_waits() {
+    let temp = tempfile::tempdir().unwrap();
+    let cfg = common::config(&temp);
+    let (store, _lock) = common::store(&cfg).await;
+    for thread in ["5", "6"] {
+        store
+            .add_conversation(thread.into(), cfg.projects[0].id.clone())
+            .await
+            .unwrap();
+    }
+    for (thread, message) in [("4", "801"), ("5", "802"), ("6", "803")] {
+        let request = store
+            .reserve(
+                message.into(),
+                thread.into(),
+                "meta".into(),
+                cfg.limits.clone(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        store
+            .finalize(request.clone(), "meta".into(), "input".into(), vec![])
+            .await
+            .unwrap();
+        let workspace = temp.path().join(format!("workspace-{thread}"));
+        std::fs::create_dir(&workspace).unwrap();
+        let intent = store
+            .prepare_direct(request.clone(), thread.into(), workspace, "openai".into())
+            .await
+            .unwrap();
+        if thread == "6" {
+            assert!(
+                store
+                    .begin_direct_send(request.clone(), intent)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                store.request(&request).await.unwrap().state,
+                RequestState::Queued
+            );
+        } else {
+            store.begin_direct_send(request, intent).await.unwrap();
+        }
+    }
+}
+
 #[test]
 fn schema_nine_upgrades_without_reinterpreting_proxy_records() {
     use codex_hoshikage_gateway::storage;
@@ -11,7 +108,7 @@ fn schema_nine_upgrades_without_reinterpreting_proxy_records() {
     let cfg = common::config(&temp);
     storage::initialize(&cfg).unwrap();
     let c = rusqlite::Connection::open(storage::db_path(&cfg)).unwrap();
-    c.execute_batch("DROP TABLE runtime_mode;DELETE FROM schema_migrations WHERE version=12;DROP TRIGGER direct_interaction_no_rewind;DROP TABLE direct_interactions;DELETE FROM schema_migrations WHERE version=11;DROP TRIGGER direct_dispatch_no_rewind; DROP TABLE direct_answers; DROP TABLE direct_dispatches; DROP TABLE direct_conversations; DELETE FROM schema_migrations WHERE version=10; UPDATE schema_meta SET schema_version=9;").unwrap();
+    c.execute_batch("DROP TABLE direct_generated_images;DROP TABLE direct_image_inventories;DELETE FROM schema_migrations WHERE version=13;DROP TABLE runtime_mode;DELETE FROM schema_migrations WHERE version=12;DROP TRIGGER direct_interaction_no_rewind;DROP TABLE direct_interactions;DELETE FROM schema_migrations WHERE version=11;DROP TRIGGER direct_dispatch_no_rewind; DROP TABLE direct_answers; DROP TABLE direct_dispatches; DROP TABLE direct_conversations; DELETE FROM schema_migrations WHERE version=10; UPDATE schema_meta SET schema_version=9;").unwrap();
     drop(c);
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
@@ -130,6 +227,98 @@ async fn acknowledgement_is_bound_to_the_original_request_and_thread() {
 }
 
 #[tokio::test]
+async fn direct_control_is_bound_to_the_exact_turn_and_never_replayed() {
+    let temp = tempfile::tempdir().unwrap();
+    let cfg = common::config(&temp);
+    let (store, _lock) = common::store(&cfg).await;
+    let request = common::queued(&store, &cfg, "107").await;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let intent = store
+        .prepare_direct(request.clone(), "4".into(), workspace, "openai".into())
+        .await
+        .unwrap();
+    store
+        .begin_direct_send(request.clone(), intent)
+        .await
+        .unwrap();
+    store
+        .record_direct_thread(request.clone(), "thread-a".into())
+        .await
+        .unwrap();
+    store
+        .acknowledge_direct_turn(request.clone(), "thread-a".into(), "turn-a".into())
+        .await
+        .unwrap();
+    let exact = TurnIdentity {
+        thread_id: "thread-a".into(),
+        turn_id: "turn-a".into(),
+    };
+    let wrong = TurnIdentity {
+        thread_id: "thread-a".into(),
+        turn_id: "turn-b".into(),
+    };
+    assert!(
+        store
+            .begin_direct_steer(
+                "900".into(),
+                request.clone(),
+                wrong.clone(),
+                "digest".into()
+            )
+            .await
+            .is_err()
+    );
+    store
+        .begin_direct_steer(
+            "900".into(),
+            request.clone(),
+            exact.clone(),
+            "digest".into(),
+        )
+        .await
+        .unwrap();
+    store
+        .finish_direct_control("900".into(), false)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .begin_direct_steer(
+                "900".into(),
+                request.clone(),
+                exact.clone(),
+                "digest".into()
+            )
+            .await
+            .is_err()
+    );
+    let (kind, target) = store.cancel_latest("901".into(), "4".into()).await.unwrap();
+    assert_eq!(kind, "active");
+    assert_eq!(target.as_deref(), Some(request.as_str()));
+    assert!(
+        store
+            .begin_direct_interrupt("901".into(), request.clone(), wrong)
+            .await
+            .is_err()
+    );
+    store
+        .begin_direct_interrupt("901".into(), request.clone(), exact.clone())
+        .await
+        .unwrap();
+    store
+        .finish_direct_control("901".into(), true)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .begin_direct_interrupt("901".into(), request, exact)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn replaced_workspace_after_commit_does_not_requeue_the_request() {
     use std::os::unix::fs::symlink;
     let temp = tempfile::tempdir().unwrap();
@@ -230,6 +419,9 @@ async fn completed_turn_requires_durable_answer_and_matching_identity() {
         store.request(&request).await.unwrap().state,
         RequestState::Completed
     );
+    let conversation = store.conversation("4").await.unwrap();
+    assert_eq!(conversation.continuation, "READY");
+    assert_eq!(conversation.effective_model, Some("chatgpt/test".into()));
     assert_eq!(
         content
             .read_answer(&saved, cfg.limits.output_bytes)

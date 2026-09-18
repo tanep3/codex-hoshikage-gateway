@@ -15,12 +15,113 @@ pub struct StoredAnswer {
     pub bytes: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredImage {
+    pub relative_path: String,
+    pub sha256: String,
+    pub bytes: usize,
+}
+
 #[derive(Clone)]
 pub struct DirectContent {
     root: PathBuf,
 }
 
 impl DirectContent {
+    pub fn save_image(
+        &self,
+        request_id: &str,
+        item_id: &str,
+        bytes: &[u8],
+        max_bytes: usize,
+    ) -> Result<StoredImage> {
+        let request = uuid::Uuid::parse_str(request_id).context("invalid image request ID")?;
+        ensure!(
+            !item_id.is_empty() && item_id.len() <= 256,
+            "invalid image item ID"
+        );
+        ensure!(
+            bytes.len() <= max_bytes,
+            "generated image exceeds storage limit"
+        );
+        let root = self
+            .root
+            .parent()
+            .context("state directory unavailable")?
+            .join("direct-images");
+        private_dir(&root)?;
+        ensure!(root.canonicalize()? == root, "image store path changed");
+        let item_hash = domain::digest(item_id.as_bytes());
+        let name = format!("{request}-{item_hash}.png");
+        let relative_path = format!("direct-images/{name}");
+        let saved = StoredImage {
+            relative_path,
+            sha256: domain::digest(bytes),
+            bytes: bytes.len(),
+        };
+        let final_path = root.join(name);
+        if final_path.exists() {
+            ensure!(
+                self.read_image(&saved, max_bytes)? == bytes,
+                "stored image differs from Codex output"
+            );
+            return Ok(saved);
+        }
+        let temporary = root.join(format!(".{request}.{}.tmp", uuid::Uuid::new_v4()));
+        let _cleanup = TempFile(temporary.clone());
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        match fs::hard_link(&temporary, &final_path) {
+            Ok(()) => File::open(&root)?.sync_all()?,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                ensure!(
+                    self.read_image(&saved, max_bytes)? == bytes,
+                    "stored image differs from Codex output"
+                );
+            }
+            Err(error) => return Err(error.into()),
+        }
+        Ok(saved)
+    }
+
+    pub fn read_image(&self, saved: &StoredImage, max_bytes: usize) -> Result<Vec<u8>> {
+        let relative = Path::new(&saved.relative_path);
+        ensure!(
+            relative.components().count() == 2
+                && relative.parent() == Some(Path::new("direct-images")),
+            "invalid image path"
+        );
+        let root = self
+            .root
+            .parent()
+            .context("state directory unavailable")?
+            .join("direct-images");
+        let mut file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(root.join(relative.file_name().context("image filename missing")?))?;
+        let md = file.metadata()?;
+        ensure!(
+            md.is_file() && md.len() as usize == saved.bytes && saved.bytes <= max_bytes,
+            "image size or type changed"
+        );
+        let mut bytes = Vec::with_capacity(saved.bytes);
+        Read::by_ref(&mut file)
+            .take((saved.bytes + 1) as u64)
+            .read_to_end(&mut bytes)?;
+        ensure!(
+            bytes.len() == saved.bytes && domain::digest(&bytes) == saved.sha256,
+            "image content changed"
+        );
+        Ok(bytes)
+    }
     pub fn new(state_dir: &Path) -> Result<Self> {
         private_dir(state_dir)?;
         let root = state_dir.join("direct-answers");

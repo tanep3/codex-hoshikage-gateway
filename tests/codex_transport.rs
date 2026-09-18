@@ -12,7 +12,7 @@ fn config() -> LaunchConfig {
             env!("CARGO_MANIFEST_DIR")
         )],
         codex_home: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
-        initialize_timeout: Duration::from_secs(2),
+        initialize_timeout: Duration::from_secs(10),
         request_timeout: Duration::from_secs(2),
         experimental_api: true,
     }

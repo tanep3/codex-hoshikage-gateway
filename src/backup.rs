@@ -280,26 +280,63 @@ fn list_content(db: &Connection) -> Result<Vec<ContentManifest>> {
         content_path(Path::new("/"), &item.relative_path)?;
         result.push(item);
     }
+    if schema >= 13 {
+        let mut stmt = db.prepare("SELECT relative_path,bytes,sha256 FROM direct_generated_images WHERE state='READY' ORDER BY relative_path")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(ContentManifest {
+                relative_path: r.get(0)?,
+                bytes: r.get::<_, i64>(1)? as u64,
+                sha256: r.get(2)?,
+            })
+        })?;
+        for row in rows {
+            let item = row?;
+            content_path(Path::new("/"), &item.relative_path)?;
+            result.push(item);
+        }
+    }
     Ok(result)
 }
 
 fn content_path(root: &Path, relative: &str) -> Result<PathBuf> {
     let path = Path::new(relative);
     ensure!(
-        path.parent() == Some(Path::new("direct-answers")) && path.components().count() == 2,
+        path.components().count() == 2,
         "invalid backup content path"
     );
+    let answer = path.parent() == Some(Path::new("direct-answers"));
+    let image = path.parent() == Some(Path::new("direct-images"));
+    ensure!(answer || image, "invalid backup content directory");
     let file = path
         .file_name()
         .and_then(|v| v.to_str())
         .context("invalid content filename")?;
-    let id = file
-        .strip_suffix(".txt")
-        .context("invalid content extension")?;
-    ensure!(
-        uuid::Uuid::parse_str(id)?.to_string() == id,
-        "invalid content identity"
-    );
+    if answer {
+        let id = file
+            .strip_suffix(".txt")
+            .context("invalid answer extension")?;
+        ensure!(
+            uuid::Uuid::parse_str(id)?.to_string() == id,
+            "invalid answer identity"
+        );
+    } else {
+        let stem = file
+            .strip_suffix(".png")
+            .context("invalid image extension")?;
+        // UUIDs contain hyphens; the image ID starts after their 36 bytes.
+        let (id, hash) = stem.split_at(36.min(stem.len()));
+        let hash = hash
+            .strip_prefix('-')
+            .context("invalid image hash separator")?;
+        ensure!(
+            uuid::Uuid::parse_str(id)?.to_string() == id
+                && hash.len() == 64
+                && hash
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
+            "invalid image identity"
+        );
+    }
     Ok(root.join(path))
 }
 

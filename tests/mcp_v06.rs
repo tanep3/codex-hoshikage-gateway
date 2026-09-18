@@ -161,7 +161,7 @@ fn schema_eight_upgrade_preserves_old_records() {
     let cfg = common::config(&t);
     storage::initialize(&cfg).unwrap();
     let c = rusqlite::Connection::open(storage::db_path(&cfg)).unwrap();
-    c.execute_batch("DROP TABLE runtime_mode;DELETE FROM schema_migrations WHERE version=12;DROP TRIGGER direct_interaction_no_rewind;DROP TABLE direct_interactions;DELETE FROM schema_migrations WHERE version=11;DROP TRIGGER direct_dispatch_no_rewind;DROP TABLE direct_answers;DROP TABLE direct_dispatches;DROP TABLE direct_conversations;DELETE FROM schema_migrations WHERE version=10;DROP TABLE mcp_v06_decisions; DROP TABLE mcp_v06_parts; DROP TABLE mcp_v06_pages; DROP TABLE mcp_v06_views; DROP TABLE mcp_v06_runs; DELETE FROM schema_migrations WHERE version=9; UPDATE schema_meta SET schema_version=8;").unwrap();
+    c.execute_batch("DROP TABLE direct_generated_images;DROP TABLE direct_image_inventories;DELETE FROM schema_migrations WHERE version=13;DROP TABLE runtime_mode;DELETE FROM schema_migrations WHERE version=12;DROP TRIGGER direct_interaction_no_rewind;DROP TABLE direct_interactions;DELETE FROM schema_migrations WHERE version=11;DROP TRIGGER direct_dispatch_no_rewind;DROP TABLE direct_answers;DROP TABLE direct_dispatches;DROP TABLE direct_conversations;DELETE FROM schema_migrations WHERE version=10;DROP TABLE mcp_v06_decisions; DROP TABLE mcp_v06_parts; DROP TABLE mcp_v06_pages; DROP TABLE mcp_v06_views; DROP TABLE mcp_v06_runs; DELETE FROM schema_migrations WHERE version=9; UPDATE schema_meta SET schema_version=8;").unwrap();
     drop(c);
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();

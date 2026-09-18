@@ -174,7 +174,7 @@ impl Delivery {
         Ok(false)
     }
     pub async fn recover(&self) -> Result<()> {
-        let rows=self.store.call(false,|c|{let mut st=c.prepare("SELECT id,thread_id,message_id,pending_digest FROM deliveries WHERE state IN ('POST_PENDING','PATCH_PENDING') ORDER BY created_at LIMIT 50")?;Ok(st.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,Option<String>>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?)}).await?;
+        let rows=self.store.call(false,|c|{let mut st=c.prepare("SELECT id,thread_id,message_id,pending_digest FROM deliveries WHERE state IN ('POST_PENDING','PATCH_PENDING') AND kind!='direct-image' ORDER BY created_at LIMIT 50")?;Ok(st.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,Option<String>>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?)}).await?;
         for (id, t, m, h) in rows {
             let _ = self.reconcile(&id, &t, m.as_deref(), h.as_deref()).await?;
         }

@@ -16,9 +16,23 @@ pub struct DirectDispatch {
     pub workspace_dev: u64,
     pub workspace_ino: u64,
     pub codex_thread_id: Option<String>,
+    pub selected_model: String,
 }
 
 impl Store {
+    pub async fn fail_direct_before_send(
+        &self,
+        request_id: String,
+        reason: &'static str,
+    ) -> Result<()> {
+        self.call(true,move|connection|{
+            let tx=connection.transaction()?;
+            ensure!(tx.execute("UPDATE requests SET state='FAILED',dispatch_eligible=0,error_code=?2,updated_at=?3,version=version+1 WHERE id=?1 AND state='QUEUED' AND dispatch_started_at IS NULL",params![request_id,reason,domain::now_ms()])?==1,"direct request is no longer unsent");
+            tx.execute("INSERT INTO request_events(request_id,old_state,new_state,reason,created_at) VALUES(?1,'QUEUED','FAILED',?2,?3)",params![request_id,reason,domain::now_ms()])?;
+            tx.commit()?;
+            Ok(())
+        }).await
+    }
     pub async fn direct_answer(&self, request_id: String) -> Result<Option<StoredAnswer>> {
         self.call(true,move|c| {
             let saved=c.query_row(
@@ -109,21 +123,58 @@ impl Store {
         let dispatch = self.call(true, move |c| {
             let tx = c.transaction()?;
             let now = domain::now_ms();
+            let recovery_pending: bool = tx.query_row(
+                "SELECT recovery_pending!=0 FROM schema_meta WHERE singleton=1",[],|r|r.get(0),
+            )?;
+            ensure!(!recovery_pending,"database restore is not released");
+            let thread: String = tx.query_row(
+                "SELECT discord_thread_id FROM direct_dispatches WHERE request_id=?1 AND intent_id=?2 AND send_state='PREPARED'",
+                params![request_id,expected_intent],
+                |r| r.get(0),
+            )?;
+            let (project,paused,continuation,selected_model,model_revision):(String,bool,String,String,i64) = tx.query_row(
+                "SELECT project_id,paused,continuation,selected_model,selection_revision FROM conversations WHERE thread_id=?1",
+                [&thread],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)),
+            )?;
+            ensure!(!paused && matches!(continuation.as_str(),"NEW"|"READY"),"direct conversation is not dispatchable");
+            ensure!(!selected_model.is_empty(),"direct conversation has no selected model");
+            ensure!(tx.query_row("SELECT lifecycle='ACTIVE' FROM projects WHERE id=?1",[&project],|r|r.get::<_,bool>(0))?,"project retired");
+            ensure!(!tx.prepare("SELECT 1 FROM operations WHERE thread_id=?1 AND kind='model' AND state='VALIDATING'")?.exists([&thread])?,"model validation pending");
+            let occupied: i64 = tx.query_row(
+                "SELECT count(*) FROM holds WHERE released=0",[],|r|r.get(0),
+            )?;
+            ensure!(occupied<2,"direct execution capacity is full");
+            let same_conversation: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM holds h JOIN requests r ON r.id=h.request_id WHERE r.thread_id=?1 AND h.released=0)",
+                [&thread],|r|r.get(0),
+            )?;
+            ensure!(!same_conversation,"direct conversation already has an active request");
+            let earlier: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM requests current JOIN admissions prior ON prior.thread_id=current.thread_id AND prior.sequence<current.sequence LEFT JOIN requests preceding ON preceding.id=prior.request_id WHERE current.id=?1 AND (prior.status='VALIDATING' OR (preceding.state IN ('RECEIVED','QUEUED') AND preceding.dispatch_eligible=1)))",
+                [&request_id],|r|r.get(0),
+            )?;
+            ensure!(!earlier,"earlier request has priority");
             ensure!(tx.execute(
                 "UPDATE direct_dispatches SET send_state='SENDING',send_started_at=?3,updated_at=?3,version=version+1 WHERE request_id=?1 AND intent_id=?2 AND send_state='PREPARED'",
                 params![request_id,expected_intent,now],
             )?==1,"direct send intent already consumed");
             ensure!(tx.execute(
-                "UPDATE requests SET state='SENDING',dispatch_started_at=?2,dispatch_eligible=0,updated_at=?2,version=version+1 WHERE id=?1 AND state='QUEUED' AND dispatch_started_at IS NULL AND dispatch_eligible=1",
-                params![request_id,now],
+                "UPDATE requests SET state='SENDING',dispatch_started_at=?2,dispatch_eligible=0,updated_at=?2,version=version+1,model=?3,model_revision=?4 WHERE id=?1 AND state='QUEUED' AND dispatch_started_at IS NULL AND dispatch_eligible=1",
+                params![request_id,now,selected_model,model_revision],
             )?==1,"request is not queued for direct send");
+            tx.execute("UPDATE conversations SET continuation='VERIFYING' WHERE thread_id=?1",[&thread])?;
+            tx.execute(
+                "INSERT INTO holds(request_id,project_id) VALUES(?1,?2)",
+                params![request_id,project],
+            )?;
             let value = tx.query_row(
-                "SELECT d.request_id,d.intent_id,d.discord_thread_id,c.workspace_path,c.workspace_dev,c.workspace_ino,c.codex_thread_id FROM direct_dispatches d JOIN direct_conversations c ON c.discord_thread_id=d.discord_thread_id WHERE d.request_id=?1",
+                "SELECT d.request_id,d.intent_id,d.discord_thread_id,c.workspace_path,c.workspace_dev,c.workspace_ino,c.codex_thread_id,v.selected_model FROM direct_dispatches d JOIN direct_conversations c ON c.discord_thread_id=d.discord_thread_id JOIN conversations v ON v.thread_id=d.discord_thread_id WHERE d.request_id=?1",
                 [&request_id], |r| Ok(DirectDispatch {
                     request_id:r.get(0)?,intent_id:r.get(1)?,discord_thread_id:r.get(2)?,
                     workspace_path:PathBuf::from(r.get::<_,String>(3)?),
                     workspace_dev:r.get::<_,i64>(4)? as u64,workspace_ino:r.get::<_,i64>(5)? as u64,
                     codex_thread_id:r.get(6)?,
+                    selected_model:r.get(7)?,
                 }),
             )?;
             tx.commit()?;
@@ -241,6 +292,8 @@ impl Store {
             }
             tx.execute("UPDATE direct_dispatches SET send_state='TERMINAL',terminal_status=?2,updated_at=?3,version=version+1 WHERE request_id=?1",params![request_id,status,now])?;
             tx.execute("UPDATE requests SET state=?2,updated_at=?3,version=version+1 WHERE id=?1",params![request_id,request_state,now])?;
+            tx.execute("UPDATE holds SET released=1,generation=generation+1 WHERE request_id=?1 AND released=0",[&request_id])?;
+            tx.execute("UPDATE conversations SET continuation='READY',effective_model=(SELECT model FROM requests WHERE id=?1),effective_sequence=(SELECT sequence FROM requests WHERE id=?1),last_success_sequence=CASE WHEN ?2='COMPLETED' THEN (SELECT sequence FROM requests WHERE id=?1) ELSE last_success_sequence END WHERE thread_id=(SELECT discord_thread_id FROM direct_dispatches WHERE request_id=?1) AND continuation='VERIFYING'",params![request_id,request_state])?;
             tx.execute("INSERT INTO request_events(request_id,old_state,new_state,reason,created_at) VALUES(?1,?2,?3,'codex_terminal_verified',?4)",params![request_id,old,request_state,now])?;
             tx.commit()?;
             Ok(())

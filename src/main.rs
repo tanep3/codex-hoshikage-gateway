@@ -5,8 +5,6 @@ use codex_hoshikage_gateway::{
     application::App,
     backup,
     config::{Config, secret},
-    direct_config::DirectConfig,
-    direct_migration,
     discord::{Discord, Handler},
     domain,
     proxy::Proxy,
@@ -30,12 +28,6 @@ struct Cli {
 enum Command {
     Check,
     Init,
-    DirectCheck,
-    DirectInit,
-    DirectCutover {
-        #[arg(long)]
-        backup_to: PathBuf,
-    },
     Run {
         #[arg(long)]
         recovery: bool,
@@ -126,43 +118,8 @@ async fn run(cli: Cli) -> Result<()> {
         .config
         .canonicalize()
         .context("設定ファイルを読み込めません")?;
-    if matches!(
-        &cli.command,
-        Command::DirectCheck | Command::DirectInit | Command::DirectCutover { .. }
-    ) {
-        let cfg = DirectConfig::read(&config_path)?;
-        secret(&cfg.discord.token_file)?;
-        match cli.command {
-            Command::DirectCheck => {
-                println!("Codex直結設定と認証ファイルを確認しました。App Server接続は未検証です。");
-            }
-            Command::DirectInit => {
-                ensure!(
-                    !admin::binding(&config_path)?.exists(),
-                    "インスタンスは初期化済みです"
-                );
-                let instance = storage::initialize_direct(&cfg)?;
-                backup::atomic_new(
-                    &admin::binding(&config_path)?,
-                    &serde_json::to_vec(
-                        &serde_json::json!({"instance_uuid":instance,"state_dir":cfg.storage.state_dir}),
-                    )?,
-                )?;
-                println!("Codex直結DBを初期化しました。instance_uuid={instance}");
-            }
-            Command::DirectCutover { backup_to } => {
-                let id = direct_migration::cutover(&cfg, &backup_to)?;
-                println!("Codex直結へのDB切替を記録しました。backup_id={id}");
-            }
-            _ => unreachable!(),
-        }
-        return Ok(());
-    }
     let cfg = Config::read(&config_path)?;
     match cli.command {
-        Command::DirectCheck | Command::DirectInit | Command::DirectCutover { .. } => {
-            unreachable!()
-        }
         Command::Check => {
             let cfg = cfg
                 .clone()

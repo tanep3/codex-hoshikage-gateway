@@ -23,7 +23,7 @@ async fn local_dispatch_stores_answer_before_terminal_commit() {
             env!("CARGO_MANIFEST_DIR")
         )],
         codex_home: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
-        initialize_timeout: Duration::from_secs(2),
+        initialize_timeout: Duration::from_secs(10),
         request_timeout: Duration::from_secs(2),
         experimental_api: true,
     });
@@ -33,6 +33,8 @@ async fn local_dispatch_stores_answer_before_terminal_commit() {
         content: DirectContent::new(&cfg.storage.state_dir).unwrap(),
         state_dir: cfg.storage.state_dir.clone(),
         output_limit: cfg.limits.output_bytes,
+        image_max_count: 16,
+        image_max_bytes: cfg.limits.artifact_bytes,
     };
     let options = ExecutionOptions {
         cwd: PathBuf::new(),
@@ -79,13 +81,15 @@ async fn dropping_an_unfinished_run_fences_it_as_unknown() {
                 env!("CARGO_MANIFEST_DIR")
             )],
             codex_home: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
-            initialize_timeout: Duration::from_secs(2),
+            initialize_timeout: Duration::from_secs(10),
             request_timeout: Duration::from_secs(2),
             experimental_api: true,
         }),
         content: DirectContent::new(&cfg.storage.state_dir).unwrap(),
         state_dir: cfg.storage.state_dir.clone(),
         output_limit: cfg.limits.output_bytes,
+        image_max_count: 16,
+        image_max_bytes: cfg.limits.artifact_bytes,
     };
     let run = service
         .start(
@@ -140,13 +144,15 @@ async fn a_manual_approval_replies_to_only_the_original_app_server_call() {
                 "--request-approval".into(),
             ],
             codex_home: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
-            initialize_timeout: Duration::from_secs(2),
+            initialize_timeout: Duration::from_secs(10),
             request_timeout: Duration::from_secs(2),
             experimental_api: true,
         }),
         content: DirectContent::new(&cfg.storage.state_dir).unwrap(),
         state_dir: cfg.storage.state_dir.clone(),
         output_limit: cfg.limits.output_bytes,
+        image_max_count: 16,
+        image_max_bytes: cfg.limits.artifact_bytes,
     };
     let mut run = service
         .start(

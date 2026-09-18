@@ -6,7 +6,11 @@ use crate::{
     codex_transport::{CodexRuntimePool, Event, RuntimeLease, TransportError},
     direct_approval::{DirectInteraction, ManualDecision},
     direct_content::DirectContent,
+    direct_image_store::{ImageRecord, ImageRecordState},
+    direct_images::{GeneratedImageStatus, inventory},
+    direct_input::app_server_input,
     direct_workspace::ensure_conversation_workspace,
+    files::PreparedInput,
     storage::Store,
 };
 use anyhow::{Context, Result, ensure};
@@ -24,6 +28,8 @@ pub struct DirectRunService {
     pub content: DirectContent,
     pub state_dir: PathBuf,
     pub output_limit: usize,
+    pub image_max_count: usize,
+    pub image_max_bytes: usize,
 }
 
 pub struct ActiveRun {
@@ -62,6 +68,18 @@ impl Drop for UnknownOnDrop {
 }
 
 impl DirectRunService {
+    pub async fn start_prepared(
+        &self,
+        request_id: String,
+        discord_thread_id: String,
+        options: ExecutionOptions,
+        prepared: &PreparedInput,
+    ) -> Result<ActiveRun> {
+        let input = app_server_input(&prepared.input)?;
+        self.start(request_id, discord_thread_id, options, input)
+            .await
+    }
+
     /// Persist the exact App Server request before any approval card is shown.
     pub async fn register_interaction(
         &self,
@@ -158,6 +176,7 @@ impl DirectRunService {
                 return Err(error);
             }
         };
+        options.model = dispatch.selected_model.clone();
         let on_drop = UnknownOnDrop {
             store: self.store.clone(),
             request_id: request_id.clone(),
@@ -250,6 +269,47 @@ impl DirectRunService {
             ),
             "Codex turn has not ended"
         );
+        ensure!(
+            snapshot.items_view_full,
+            "Codex output inventory is incomplete"
+        );
+        match inventory(&snapshot, self.image_max_count, self.image_max_bytes) {
+            Ok(images) => {
+                let mut records = Vec::with_capacity(images.len());
+                for image in images {
+                    let state = match image.status {
+                        GeneratedImageStatus::Ready(bytes) => match self.content.save_image(
+                            &run.request_id,
+                            &image.item_id,
+                            &bytes,
+                            self.image_max_bytes,
+                        ) {
+                            Ok(saved) => ImageRecordState::Ready(saved),
+                            Err(_) => ImageRecordState::Unknown,
+                        },
+                        GeneratedImageStatus::Failed => ImageRecordState::Failed,
+                        GeneratedImageStatus::Unknown => ImageRecordState::Unknown,
+                    };
+                    records.push(ImageRecord {
+                        item_id: image.item_id,
+                        ordinal: image.ordinal,
+                        state,
+                    });
+                }
+                self.store
+                    .record_direct_images(run.request_id.clone(), run.identity.clone(), records)
+                    .await?;
+            }
+            Err(_) => {
+                self.store
+                    .mark_direct_image_unknown(
+                        run.request_id.clone(),
+                        run.identity.clone(),
+                        "inventory_unavailable",
+                    )
+                    .await?
+            }
+        }
         let answer = if snapshot.status == "completed" || snapshot.final_text.is_some() {
             Some(self.content.save_answer(
                 &run.request_id,

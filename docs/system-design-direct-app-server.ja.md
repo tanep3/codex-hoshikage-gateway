@@ -47,6 +47,7 @@ App Serverの実行数・設定隔離はtransportの単体試験直後に実機�
 ## 4. 実行と永続化の境界
 
 1. Discordから本人・場所を検証し、Message IDで受付を永続化する。本文・添付の同一性を確認する。
+   入力の検証結果は既存Gatewayの受付用形式で保持し、送信直前にApp Serverの`UserInput`（`text`／`image`）へ厳密に変換する。Proxy向け`role`／`content`形式をそのまま`turn/start`へ渡さない。変換不能な添付は送信前に拒否し、推測で別種の入力へ変えない。
 2. Schedulerが同一会話1、全体2の枠を取得し、Codex実行先とモデルを確定する。受付順とworkの排他をDBで確認する。
 3. thread/turnへ送る前に、対象、入力digest、送信意思をcommitする。境界を越えた後のcrashでは「送信されなかった」と推測しない。
 4. Codex transportから得たthread/turn IDと通知を実行記録へ反映する。SSE/HTTPイベントへ変換する必要はない。進捗表示は揮発してもよいが、確定状態と承認要求は復旧可能にする。
@@ -66,6 +67,8 @@ Codex transportは上流の承認要求を `ApprovalRequest { app_server_request
 
 拒否は表示取得に依存しない。Steerは新しい利用者入力世代を作り、以前の依頼中許可を失効させてから上流へ送る。/stopは待機列のpauseとactive Turnへの中断を区別する。/cancelは現行仕様どおり、直近待機1件、なければactive依頼を対象とし、queue全体をpauseしない。返信送信結果不明時は同一上流要求を調べ、新しい承認として再送しない。
 
+直接接続での`/stop`・`/cancel`・Steerは、Discord操作ID、Gateway依頼ID、Codex thread／turn IDを同じDB transactionで固定してから上流へ送る。送信意思を記録した後の通信失敗は`UNKNOWN`であり、Discordイベント再配信による再送は禁止する。すでに終端したTurnへの制御や、停止要求後のSteerも送信前に拒否する。中断RPCの受付とTurnの中断完了は別の状態として表示する。
+
 意味ベース委任はapprovalへ後付けできる判断providerの一つとする。標準の手動承認を動かしてから要件を再評価する。LLM、対象証拠、委任範囲、サイト固有知識をCodex transportやDiscord adapterへ組み込まない。
 
 ## 6. 回答・画像・成果物
@@ -78,11 +81,15 @@ Discordへ再配信する際は、依頼の会話IDと送信先を照合し、`d
 
 画像の自動配信は、そのTurnに帰属すると確認できた生成結果だけを対象にする。未発見と「画像なし確定」を区別する。回答本文が空でも画像を配信できる。Discord送信結果不明は元の保存版・送信先・メッセージIDで照合する。キャッシュを失っても期限内の保存版から復旧し、Codexを再実行しない。
 
+実装中の直結経路では、`thread/read`が対象Turnの`itemsView=full`を返した場合に限り、`imageGeneration`項目のID・順序・PNGヘッダー・容量を検証する。保存済みPNGは`state_dir/direct-images`に不変ファイルとして置き、`direct_image_inventories`と`direct_generated_images`へ結果を保存してから依頼の終端を確定する。画像の登録失敗は個別の`UNKNOWN`として残し、回答の実行結果を書き換えない。バックアップ形式2にはDBが参照する確定回答と画像の両方を含める。Discord配信は画像ごとに送信意思とnonceを永続化し、HTTP応答を失った場合は既存投稿を照合するまで再アップロードしない。これらのモジュールはまだDiscord常駐経路へ接続中であり、単体試験成功を製品受入とはしない。
+
 ## 7. 設定・保存場所・運用
 
 Gatewayの設定正本は `~/.config/codex-hoshikage-gateway/config.toml`。現在の `[proxy]`を最終的に削除し、専属Codexコマンド、Codex home、作業先・権限、保存容量・保持、モデルの設定へ移す。既存設定からの切替手順は、保存済み依頼の隔離方法を確認して確定する。設定検証は子プロセス起動前に行い、state_dirや認証先の稼働中切替を許さない。
 
 直接接続用の設定型は既存Proxy設定型と分離する。`[codex]`には絶対パスの`command`と`home`を置き、Gatewayが`app-server`をstdioで起動する。`default_model`と`model_provider`、`sandbox`、`approval_policy`を明示し、初期値は`workspace-write`／`on-request`、`network_access`はfalseとする。`thread/start`の`sandbox`と`approvalPolicy`はこのCLIが受け付けるkebab-case、`turn/start`の`sandboxPolicy.type`はcamelCaseへ変換する。Turn開始時にはworkspaceを明示したsandbox policyを渡し、Codex home側の設定とも整合を検証する。Codex homeはGateway専属とし、認証・MCP設定をそこへ配置する。設定ファイルや認証を旧Proxyの領域から暗黙にコピーしない。移行中は旧設定の読取りを維持するが、直接接続の設定に`[proxy]`を要求しない。新旧のどちらを起動するかは設定型で一意にし、一つの依頼を両方へ送らない。
+
+モデル一覧と選択値の検証は、実行中Turnの2枠を占有しない専用の短命App Server子プロセスで行う。Discordのモデル変更はイベントIDの順序と一意性をSQLiteで確認し、検証完了が前後しても古い選択が新しい選択を上書きしない。選択値は新規Turnの送信境界で固定し、既存会話のCodex threadを継続したまま次のTurnに渡す。
 
 プロトコルの起動順序と設定値は[Codex App Server公式資料](https://developers.openai.com/codex/app-server/)と[Codex設定資料](https://developers.openai.com/codex/config-reference/)を基準にし、稼働バイナリのschemaと実機試験で照合する。Gatewayの`[codex]`はGateway専用の運用設定であり、Codex自身の`$CODEX_HOME/config.toml`とは別ファイルである。
 
