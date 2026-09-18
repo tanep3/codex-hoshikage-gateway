@@ -84,6 +84,77 @@ fn mcp_elicitation_without_turn_is_bound_to_this_runs_thread() {
 }
 
 #[test]
+fn mcp_tool_elicitation_accepts_only_the_exact_empty_form_once() {
+    let params = json!({
+        "threadId":"thread-a","turnId":"turn-a","serverName":"playwright",
+        "mode":"form","message":"Allow the playwright MCP server to run tool \"browser_run_code_unsafe\"?",
+        "requestedSchema":{"type":"object","properties":{}},
+        "_meta":{"codex_approval_kind":"mcp_tool_call","persist":["session","always"],
+            "tool_params":{"code":"async (page) => await page.title()"}}
+    });
+    let prompt = DirectInteraction::from_event(
+        &request("mcpServer/elicitation/request", params.clone()),
+        &active(),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(prompt.kind, InteractionKind::McpElicitation);
+    assert_eq!(
+        prompt
+            .mcp_tool_decision(ManualDecision::AcceptOnce)
+            .unwrap(),
+        json!({"action":"accept","content":{}})
+    );
+    assert_eq!(
+        prompt.mcp_tool_decision(ManualDecision::Decline).unwrap(),
+        json!({"action":"decline","content":null})
+    );
+    assert!(prompt.manual_decision(ManualDecision::AcceptOnce).is_err());
+
+    let mut missing_arguments = params.clone();
+    missing_arguments["_meta"]
+        .as_object_mut()
+        .unwrap()
+        .remove("tool_params");
+    let incomplete = DirectInteraction::from_event(
+        &request("mcpServer/elicitation/request", missing_arguments),
+        &active(),
+    )
+    .unwrap()
+    .unwrap();
+    assert!(
+        incomplete
+            .mcp_tool_decision(ManualDecision::AcceptOnce)
+            .is_err()
+    );
+    assert_eq!(
+        incomplete
+            .mcp_tool_decision(ManualDecision::Decline)
+            .unwrap(),
+        json!({"action":"decline","content":null})
+    );
+    let mut nonempty_schema = params;
+    nonempty_schema["requestedSchema"]["properties"]["secret"] = json!({"type":"string"});
+    let incompatible = DirectInteraction::from_event(
+        &request("mcpServer/elicitation/request", nonempty_schema),
+        &active(),
+    )
+    .unwrap()
+    .unwrap();
+    assert!(
+        incompatible
+            .mcp_tool_decision(ManualDecision::AcceptOnce)
+            .is_err()
+    );
+    assert_eq!(
+        incompatible
+            .mcp_tool_decision(ManualDecision::Decline)
+            .unwrap(),
+        json!({"action":"decline","content":null})
+    );
+}
+
+#[test]
 fn dynamic_tool_uses_call_id_from_the_installed_app_server_schema() {
     let event = request(
         "item/tool/call",

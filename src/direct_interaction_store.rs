@@ -121,7 +121,7 @@ impl Store {
                 "approval is stale or does not match the displayed operation"
             );
             ensure!(
-                if mcp {method == "item/tool/requestUserInput"} else {
+                if mcp {matches!(method.as_str(), "item/tool/requestUserInput" | "mcpServer/elicitation/request")} else {
                     matches!(method.as_str(),
                         "item/commandExecution/requestApproval" | "item/fileChange/requestApproval")
                 },

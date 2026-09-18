@@ -64,6 +64,12 @@ Codex transportは上流の承認要求を `ApprovalRequest { app_server_request
 
 実装では上流要求IDを文字列／数値のまま保持し、現在のRunのthread／turnと照合する。MCP elicitationで上流にturn IDが無い場合のみ、Run専属子プロセスで一致したthreadへ紐付ける。要求本文とfingerprintは承認の本人向け表示へ渡すが、通常の公開投稿やログへ生の引数を出さない。単発のコマンド／ファイル変更承認は、上流が提示した選択肢だけを返信する。MCP入力・権限要求・動的ツールには別の返信schemaを適用し、単発承認の`decision`を流用しない。
 
+MCPツール確認が `mcpServer/elicitation/request` の `mode=form`・空のobject schemaとして届く場合は、`_meta.codex_approval_kind=mcp_tool_call`、serverName、message、実引数、現在のRunのthread／turnを検証する。本人限定画面には上流の操作文面と実引数を表示し、実引数全体を表示できない場合は許可ボタンを出さない。完全に確認した一つのRPC IDへの「今回だけ許可」は `{ "action":"accept", "content":{} }`、「拒否」は `{ "action":"decline", "content":null }` を返信する。`persist` の提示候補は表示・判断の参考に留め、返信に永続許可指定を含めない。形式不明の要求に対するJSON-RPCエラーを利用者の「拒否」と表示しない。既存の送信意思・fingerprint・Run照合・UNKNOWN保護を同じく適用する。
+
+許可可能性と拒否可能性は別々に判定する。MCP elicitationの拒否は実引数やschemaを完全に取得できなくても同じ上流RPC要求へ`decline`を返せる。コマンド／ファイル承認では上流の`availableDecisions`を使い、提示されない許可をボタンにしない。回答schemaが未対応でJSON-RPCエラーしか返せない形式には「未対応の確認を終了」と表示し、実際の拒否成功とは区別する。
+
+未知のApp Server要求methodは、上流RPC IDに対し`-32601`を一度だけ返す。返信結果が不明ならRunをUNKNOWNとして保護する。既知の承認要求をCodexが`serverRequest/resolved`で解決したらDBを更新し、同じ要求のDiscord承認カードを無効化してボタンを除く。画面更新の失敗だけを理由にAIを再実行しない。
+
 動的ツール呼出し`item/tool/call`は現行Codex schemaで`itemId`ではなく`callId`を持つ。上流要求IDと`callId`の両方を照合し、実引数の表示と実行結果の対応付けに使う。methodごとの必須フィールドを共通形と推測せず、稼働バイナリのschemaで確認する。
 
 `direct_interactions`はGateway依頼ID、上流RPC ID、method、thread／turn、表示fingerprint、提示された判断候補、返信状態を保存する。判断を送る前に`PENDING→SENDING`をcommitし、送信結果が不明なら`UNKNOWN`として再送しない。Gateway再起動で旧子プロセスに紐付く`PENDING`は`UNAVAILABLE`、`SENDING`／未解決`SENT`は`UNKNOWN`へ移し、同じ上流RPC IDへの自動再返信を禁止する。上流の`serverRequest/resolved`で同じ要求を照合できた場合だけ解決へ訂正する。完全な実引数は現状メモリ上の表示用データであり、再起動後に古い承認を再表示・再許可する根拠にはしない。

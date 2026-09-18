@@ -60,6 +60,9 @@ pub enum RunEvent {
         interaction_id: String,
         operation: Box<DirectInteraction>,
     },
+    ApprovalResolved {
+        interaction_id: String,
+    },
     UnsupportedApproval,
     Terminal(DirectDeliveryResult),
     DeliveryPending,
@@ -158,6 +161,7 @@ async fn serve(
                         run.transport().respond(id,response).await?;
                     }
                     Ok(event @ Event::ServerRequest{..})=>{
+                        let rpc_id=match &event { Event::ServerRequest{id,..}=>id.clone(),_=>unreachable!() };
                         let evidence=match &event {
                             Event::ServerRequest{params,..}=>params["itemId"].as_str().and_then(|id|mcp_items.get(id)).and_then(Option::as_ref).cloned(),
                             _=>None,
@@ -169,7 +173,14 @@ async fn serve(
                                     emit(&events,RunEvent::Approval{interaction_id:id,operation:Box::new(operation)})?;
                                 }
                             }
-                            None=>{emit(&events,RunEvent::UnsupportedApproval)?;}
+                            None=>{
+                                if let Err(error)=run.transport().reject(rpc_id,-32601,"unsupported App Server request").await {
+                                    app.store.mark_direct_unknown(run.request_id.clone(),"unsupported_request_reply_unknown".into()).await?;
+                                    emit(&events,RunEvent::ResultUnknown)?;
+                                    return Err(error.into());
+                                }
+                                emit(&events,RunEvent::UnsupportedApproval)?;
+                            }
                         }
                     }
                     Ok(Event::Notification{method,params}) if method=="item/started"
@@ -196,7 +207,8 @@ async fn serve(
                         if params["threadId"]==run.identity.thread_id
                             && let Some(request)=params.get("requestId")
                             && let Some(id)=approval_rpc_ids.remove(&serde_json::to_string(request)?) {
-                            app.store.resolve_direct_approval(id).await?;
+                            app.store.resolve_direct_approval(id.clone()).await?;
+                            emit(&events,RunEvent::ApprovalResolved{interaction_id:id})?;
                         }
                     }
                     Ok(Event::Closed(_))|Err(tokio::sync::broadcast::error::RecvError::Closed)=>{

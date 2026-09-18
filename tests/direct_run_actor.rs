@@ -27,15 +27,20 @@ use std::{
 
 #[tokio::test]
 async fn actor_routes_exact_approval_then_delivers_after_turn_completion() {
-    actor_accepts("--request-approval", InteractionKind::CommandApproval).await;
+    actor_accepts("--request-approval", Some(InteractionKind::CommandApproval)).await;
 }
 
 #[tokio::test]
 async fn actor_routes_mcp_tool_confirmation_with_its_own_reply_schema() {
-    actor_accepts("--request-mcp-approval", InteractionKind::UserInput).await;
+    actor_accepts("--request-mcp-approval", Some(InteractionKind::UserInput)).await;
 }
 
-async fn actor_accepts(flag: &str, expected_kind: InteractionKind) {
+#[tokio::test]
+async fn actor_rejects_unknown_server_request_without_hanging_the_turn() {
+    actor_accepts("--request-unknown-method", None).await;
+}
+
+async fn actor_accepts(flag: &str, expected_kind: Option<InteractionKind>) {
     let temp = tempfile::tempdir().unwrap();
     let legacy = common::config(&temp);
     let home = temp.path().join("codex-home");
@@ -142,6 +147,18 @@ async fn actor_accepts(flag: &str, expected_kind: InteractionKind) {
         .await
         .unwrap()
         .unwrap();
+    if expected_kind.is_none() {
+        assert!(matches!(event, RunEvent::UnsupportedApproval));
+        let terminal = tokio::time::timeout(Duration::from_secs(15), actor.events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(terminal, RunEvent::Terminal(result) if result.answer_delivered));
+        actor.task.await.unwrap().unwrap();
+        assert_eq!(posts.lock().unwrap()[0]["content"], "DONE");
+        server.abort();
+        return;
+    }
     let RunEvent::Approval {
         interaction_id,
         operation,
@@ -149,8 +166,8 @@ async fn actor_accepts(flag: &str, expected_kind: InteractionKind) {
     else {
         panic!("expected approval")
     };
-    assert_eq!(operation.kind, expected_kind);
-    if expected_kind == InteractionKind::CommandApproval {
+    assert_eq!(Some(operation.kind.clone()), expected_kind);
+    if expected_kind == Some(InteractionKind::CommandApproval) {
         assert_eq!(operation.params["command"], "cat report.txt");
     } else {
         assert_eq!(
@@ -171,7 +188,7 @@ async fn actor_accepts(flag: &str, expected_kind: InteractionKind) {
         .unwrap();
     steer_result.await.unwrap().unwrap();
     let (reply, result) = tokio::sync::oneshot::channel();
-    let command = if expected_kind == InteractionKind::UserInput {
+    let command = if expected_kind == Some(InteractionKind::UserInput) {
         RunCommand::McpToolApproval {
             interaction_id,
             operation: *operation,
@@ -188,6 +205,11 @@ async fn actor_accepts(flag: &str, expected_kind: InteractionKind) {
     };
     actor.commands.send(command).await.unwrap();
     result.await.unwrap().unwrap();
+    let resolved = tokio::time::timeout(Duration::from_secs(15), actor.events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(resolved, RunEvent::ApprovalResolved { .. }));
     let event = tokio::time::timeout(Duration::from_secs(15), actor.events.recv())
         .await
         .unwrap()

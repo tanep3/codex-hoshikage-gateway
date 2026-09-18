@@ -97,14 +97,77 @@ fn model_menu(models: &[DirectModel], current: &str, interaction: &str) -> (Stri
     )
 }
 
+fn approval_detail(operation: &DirectInteraction) -> Result<(String, bool)> {
+    let detail = if operation.kind == InteractionKind::McpElicitation
+        && operation
+            .mcp_tool_decision(ManualDecision::AcceptOnce)
+            .is_ok()
+    {
+        let args = serde_json::to_string_pretty(&operation.params["_meta"]["tool_params"])?;
+        format!(
+            "MCPツール実行の確認（本人限定）\nサーバー: {}\n操作: {}\n実引数（Codexからの原文）:\n```json\n{args}\n```\n「今回だけ許可」は、この操作1件だけです。",
+            operation.params["serverName"].as_str().unwrap_or("不明"),
+            operation.params["message"].as_str().unwrap_or("不明")
+        )
+    } else {
+        let rendered = serde_json::to_string_pretty(&json!({
+            "upstream_request":operation.params,
+            "matched_mcp_call":operation.mcp_evidence
+        }))?;
+        format!(
+            "Codexが求めた操作の実引数（本人限定）:\n```json\n{rendered}\n```\n内容を確認して選んでください。"
+        )
+    };
+    let complete = detail.chars().count() <= 1900;
+    Ok(if complete {
+        (detail, true)
+    } else {
+        (
+            "実引数が表示上限を超えました。全文を確認できないため許可はできません。拒否するか、/stop で作業を中断してください。".into(),
+            false,
+        )
+    })
+}
+
 impl DirectCoordinator {
     fn answerable(operation: &DirectInteraction) -> bool {
+        if matches!(
+            operation.kind,
+            InteractionKind::CommandApproval | InteractionKind::FileChangeApproval
+        ) {
+            operation
+                .manual_decision(ManualDecision::AcceptOnce)
+                .is_ok()
+        } else {
+            operation
+                .mcp_tool_decision(ManualDecision::AcceptOnce)
+                .is_ok()
+        }
+    }
+    fn declineable(operation: &DirectInteraction) -> bool {
+        if matches!(
+            operation.kind,
+            InteractionKind::CommandApproval | InteractionKind::FileChangeApproval
+        ) {
+            operation.manual_decision(ManualDecision::Decline).is_ok()
+        } else {
+            operation.mcp_tool_decision(ManualDecision::Decline).is_ok()
+        }
+    }
+    fn cancelable(operation: &DirectInteraction) -> bool {
         matches!(
             operation.kind,
             InteractionKind::CommandApproval | InteractionKind::FileChangeApproval
-        ) || operation
-            .mcp_tool_decision(ManualDecision::AcceptOnce)
-            .is_ok()
+        ) && operation.manual_decision(ManualDecision::Cancel).is_ok()
+    }
+    fn rejection_button(operation: &DirectInteraction, id: &str) -> Value {
+        if Self::declineable(operation) {
+            json!({"type":2,"style":4,"label":"拒否","custom_id":format!("direct:decline:{id}")})
+        } else if Self::cancelable(operation) {
+            json!({"type":2,"style":4,"label":"取り消し","custom_id":format!("direct:cancel:{id}")})
+        } else {
+            json!({"type":2,"style":4,"label":"未対応の確認を終了","custom_id":format!("direct:reject:{id}")})
+        }
     }
     fn new(app: DirectApplication) -> Self {
         Self {
@@ -293,8 +356,16 @@ impl DirectCoordinator {
                 RunEvent::Approval { interaction_id, operation } => {
                     self.show_approval(request_id, &thread, interaction_id, *operation).await?;
                 }
+                RunEvent::ApprovalResolved { interaction_id } => {
+                    if let Some(card)=self.approvals.lock().await.remove(&interaction_id) {
+                        // A stale Discord button must not remain usable after Codex resolves
+                        // the request. Delivery failure affects only the display, not the Run.
+                        let _=self.app.delivery.text(&interaction_id,&card.thread_id,"direct-approval",0,
+                            "このMCP承認・入力は終了しました。",json!([])).await;
+                    }
+                }
                 RunEvent::UnsupportedApproval => {
-                    self.notice(request_id,&thread,"Codexから未対応の確認形式が届きました。実行は保留中です。/stop で中断できます。AIを再実行しません。").await?;
+                    self.notice(request_id,&thread,"Codexから未対応の確認形式が届いたため、その要求には形式未対応を返しました。続く回答を待ってください。/status で作業状態を確認できます。AIは再実行していません。").await?;
                 }
                 RunEvent::Terminal(_) => break,
                 RunEvent::DeliveryPending => {
@@ -314,10 +385,32 @@ impl DirectCoordinator {
         }
         let task = actor.task.await;
         self.active.lock().await.remove(&thread);
-        self.approvals
-            .lock()
-            .await
-            .retain(|_, card| card.request_id != request_id);
+        let expired = {
+            let mut cards = self.approvals.lock().await;
+            let ids = cards
+                .iter()
+                .filter(|(_, card)| card.request_id == request_id)
+                .map(|(id, card)| (id.clone(), card.thread_id.clone()))
+                .collect::<Vec<_>>();
+            for (id, _) in &ids {
+                cards.remove(id);
+            }
+            ids
+        };
+        for (id, card_thread) in expired {
+            let _ = self
+                .app
+                .delivery
+                .text(
+                    &id,
+                    &card_thread,
+                    "direct-approval",
+                    0,
+                    "このMCP承認・入力は終了しました。",
+                    json!([]),
+                )
+                .await;
+        }
         let actor_result = task
             .context("direct run actor panicked")
             .and_then(|result| result);
@@ -361,9 +454,16 @@ impl DirectCoordinator {
                 evidence["server"].as_str().unwrap_or("不明"),
                 evidence["tool"].as_str().unwrap_or("不明")
             )
+        } else if operation.kind == InteractionKind::McpElicitation
+            && operation
+                .mcp_tool_decision(ManualDecision::AcceptOnce)
+                .is_ok()
+        {
+            "MCP操作".into()
         } else {
             kind.into()
         };
+        let rejection = Self::rejection_button(&operation, &id);
         self.approvals.lock().await.insert(
             id.clone(),
             ApprovalCard {
@@ -377,7 +477,7 @@ impl DirectCoordinator {
         // public message intentionally contains only the operation category.
         let components = json!([{"type":1,"components":[
             {"type":2,"style":1,"label":"自分だけに表示して確認","custom_id":format!("direct:detail:{id}")},
-            {"type":2,"style":4,"label":"拒否","custom_id":format!("direct:decline:{id}")}
+            rejection
         ]}]);
         self.app
             .delivery
@@ -853,26 +953,15 @@ impl DirectCoordinator {
             return Ok(());
         };
         if action == "detail" {
-            let rendered = serde_json::to_string_pretty(&json!({
-                "upstream_request":card.operation.params,
-                "matched_mcp_call":card.operation.mcp_evidence
-            }))?;
-            let complete = rendered.chars().count() <= 1400;
-            let detail = if complete {
-                format!(
-                    "Codexが求めた操作の実引数（本人限定）:\n```json\n{rendered}\n```\n内容を確認して選んでください。"
-                )
-            } else {
-                "実引数が表示上限を超えました。この画面では全文を確認できないため、許可はできません。拒否または /stop を選んでください。".into()
-            };
+            let (detail, complete) = approval_detail(&card.operation)?;
             let choices = if complete && Self::answerable(&card.operation) {
                 json!([{"type":1,"components":[
                     {"type":2,"style":3,"label":"今回だけ許可","custom_id":format!("direct:accept:{card_id}")},
-                    {"type":2,"style":4,"label":"拒否","custom_id":format!("direct:decline:{card_id}")}
+                    Self::rejection_button(&card.operation, card_id)
                 ]}])
             } else {
                 json!([{"type":1,"components":[
-                    {"type":2,"style":4,"label":"拒否","custom_id":format!("direct:decline:{card_id}")}
+                    Self::rejection_button(&card.operation, card_id)
                 ]}])
             };
             self.app.discord.interaction_callback(id,token,json!({"type":4,"data":{"content":detail,"flags":64,"components":choices,"allowed_mentions":{"parse":[]}}})).await?;
@@ -882,6 +971,8 @@ impl DirectCoordinator {
         let decision = match action {
             "accept" => ManualDecision::AcceptOnce,
             "decline" => ManualDecision::Decline,
+            "cancel" => ManualDecision::Cancel,
+            "reject" => ManualDecision::Decline,
             _ => {
                 self.app
                     .discord
@@ -891,11 +982,7 @@ impl DirectCoordinator {
             }
         };
         if action == "accept"
-            && (serde_json::to_string_pretty(&json!({"upstream_request":card.operation.params,"matched_mcp_call":card.operation.mcp_evidence}))?
-                .chars()
-                .count()
-                > 1400
-                || !Self::answerable(&card.operation))
+            && (!approval_detail(&card.operation)?.1 || !Self::answerable(&card.operation))
         {
             self.app
                 .discord
@@ -905,6 +992,14 @@ impl DirectCoordinator {
                     "この確認形式はまだ回答できません。/stop で中断してください。",
                 )
                 .await?;
+            return Ok(());
+        }
+        if (action == "decline" && !Self::declineable(&card.operation))
+            || (action == "cancel" && !Self::cancelable(&card.operation))
+            || (action == "reject"
+                && (Self::declineable(&card.operation) || Self::cancelable(&card.operation)))
+        {
+            self.app.discord.reply(app_id,token,"この確認画面の選択肢は現在の要求と一致しません。/status で状態を確認してください。").await?;
             return Ok(());
         }
         let active = self.active.lock().await.get(thread).cloned();
@@ -920,13 +1015,16 @@ impl DirectCoordinator {
             return Ok(());
         };
         let (reply, receiver) = oneshot::channel();
-        let command = if !Self::answerable(&card.operation) {
+        let command = if action == "reject" {
             RunCommand::RejectUnsupported {
                 interaction_id: card_id.into(),
                 fingerprint: card.fingerprint,
                 reply,
             }
-        } else if card.operation.kind == InteractionKind::UserInput {
+        } else if matches!(
+            card.operation.kind,
+            InteractionKind::UserInput | InteractionKind::McpElicitation
+        ) {
             RunCommand::McpToolApproval {
                 interaction_id: card_id.into(),
                 operation: card.operation,
@@ -945,8 +1043,13 @@ impl DirectCoordinator {
         let result = tokio::time::timeout(Duration::from_secs(20), receiver).await??;
         match result {
             Ok(())=>{
-                self.approvals.lock().await.remove(card_id);
-                self.app.discord.reply(app_id,token,if decision==ManualDecision::Decline{"この操作を拒否しました。続きの回答はこの会話に届きます。"}else{"この操作だけを許可しました。続きの回答はこの会話に届きます。"}).await?
+                let feedback = match action {
+                    "reject" => "この確認形式には対応できないため、Codexへ形式未対応エラーを返しました。/status で作業結果を確認してください。",
+                    "decline" => "この操作を拒否しました。続きの回答はこの会話に届きます。",
+                    "cancel" => "この確認を取り消しました。続きの回答はこの会話に届きます。",
+                    _ => "この操作だけを許可しました。続きの回答はこの会話に届きます。",
+                };
+                self.app.discord.reply(app_id,token,feedback).await?
             }
             Err(_)=>self.app.discord.reply(app_id,token,"確認の結果を確定できません。再度押さず、/status で作業状態を確認してください。").await?
         }
@@ -1085,32 +1188,75 @@ mod tests {
         assert_eq!(select["options"][0]["value"], "model-0");
         assert_eq!(select["options"][0]["default"], true);
     }
+
+    #[test]
+    fn approval_buttons_follow_the_upstream_decisions() {
+        let active = crate::codex_execution::TurnIdentity {
+            thread_id: "thread-one".into(),
+            turn_id: "turn-one".into(),
+        };
+        let request = crate::codex_transport::Event::ServerRequest {
+            id: json!("approval"),
+            method: "item/commandExecution/requestApproval".into(),
+            params: json!({"threadId":"thread-one","turnId":"turn-one","itemId":"item-one","availableDecisions":["decline"]}),
+        };
+        let operation = DirectInteraction::from_event(&request, &active)
+            .unwrap()
+            .unwrap();
+        assert!(!DirectCoordinator::answerable(&operation));
+        assert_eq!(
+            DirectCoordinator::rejection_button(&operation, "card")["label"],
+            "拒否"
+        );
+        let unsupported = crate::codex_transport::Event::ServerRequest {
+            id: json!("unsupported"),
+            method: "item/permissions/requestApproval".into(),
+            params: json!({"threadId":"thread-one","turnId":"turn-one","itemId":"item-one"}),
+        };
+        let operation = DirectInteraction::from_event(&unsupported, &active)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            DirectCoordinator::rejection_button(&operation, "card")["label"],
+            "未対応の確認を終了"
+        );
+    }
     use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, sync::Mutex as StdMutex};
 
     #[tokio::test]
     async fn raw_message_reaches_direct_child_and_saved_answer_is_delivered_once() {
-        direct_flow(false, false, false, false).await;
+        direct_flow(false, false, false, false, None).await;
     }
 
     #[tokio::test]
     async fn mcp_approval_button_returns_to_exact_direct_run() {
-        direct_flow(true, false, false, false).await;
+        direct_flow(true, false, false, false, None).await;
+    }
+
+    #[tokio::test]
+    async fn mcp_empty_form_shows_arguments_and_accepts_only_this_call() {
+        direct_flow(false, false, false, false, Some(true)).await;
+    }
+
+    #[tokio::test]
+    async fn mcp_empty_form_decline_uses_the_elicitation_reply() {
+        direct_flow(false, false, false, false, Some(false)).await;
     }
 
     #[tokio::test]
     async fn artifact_tool_registers_a_conversation_bound_saved_file() {
-        direct_flow(false, false, true, false).await;
+        direct_flow(false, false, true, false, None).await;
     }
 
     #[tokio::test]
     async fn unsupported_permission_prompt_can_be_rejected_without_opening_detail() {
-        direct_flow(false, false, false, true).await;
+        direct_flow(false, false, false, true, None).await;
     }
 
     #[tokio::test]
     #[ignore = "requires local Codex login and network; run explicitly for integration acceptance"]
     async fn real_codex_reaches_mock_discord_through_direct_daemon() {
-        direct_flow(false, true, false, false).await;
+        direct_flow(false, true, false, false, None).await;
     }
 
     async fn direct_flow(
@@ -1118,6 +1264,7 @@ mod tests {
         real_codex: bool,
         artifact_tool: bool,
         unsupported_approval: bool,
+        mcp_form_approval: Option<bool>,
     ) {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
@@ -1199,6 +1346,8 @@ mod tests {
         let callback_copy = callbacks.clone();
         let edits = Arc::new(StdMutex::new(Vec::<Value>::new()));
         let edit_copy = edits.clone();
+        let approval_edits = Arc::new(StdMutex::new(Vec::<Value>::new()));
+        let approval_edit_copy = approval_edits.clone();
         let router = Router::new()
             .route(
                 "/channels/4",
@@ -1220,6 +1369,16 @@ mod tests {
                     let posted = posted.clone();
                     async move {
                         posted.lock().unwrap().push(body);
+                        Json(json!({"id":"1000","channel_id":"4"}))
+                    }
+                }),
+            )
+            .route(
+                "/channels/4/messages/1000",
+                patch(move |Json(body): Json<Value>| {
+                    let seen = approval_edit_copy.clone();
+                    async move {
+                        seen.lock().unwrap().push(body);
                         Json(json!({"id":"1000","channel_id":"4"}))
                     }
                 }),
@@ -1271,6 +1430,9 @@ mod tests {
                         if mcp_approval {
                             args.push("--request-mcp-approval".into());
                         }
+                        if mcp_form_approval.is_some() {
+                            args.push("--request-mcp-form-approval".into());
+                        }
                         if artifact_tool {
                             args.push("--request-artifact".into());
                         }
@@ -1313,7 +1475,7 @@ mod tests {
         };
         tx.send(Incoming::Message(original.clone())).await.unwrap();
         tx.send(Incoming::Message(original)).await.unwrap();
-        if mcp_approval || unsupported_approval {
+        if mcp_approval || unsupported_approval || mcp_form_approval.is_some() {
             let card = tokio::time::timeout(Duration::from_secs(10), async {
                 loop {
                     if let Some(value) = posts
@@ -1344,6 +1506,8 @@ mod tests {
             let approval = detail.replace(
                 ":detail:",
                 if unsupported_approval {
+                    ":reject:"
+                } else if mcp_form_approval == Some(false) {
                     ":decline:"
                 } else {
                     ":accept:"
@@ -1360,6 +1524,25 @@ mod tests {
                         .as_str()
                         .is_some_and(|s| s.contains("mcp_tool_call_approval_item-one"))
                 }));
+            }
+            if mcp_form_approval.is_some() {
+                controller
+                    .handle_interaction(interaction("1001", detail))
+                    .await
+                    .unwrap();
+                let view = callbacks.lock().unwrap().last().unwrap().clone();
+                let content = view["data"]["content"].as_str().unwrap();
+                assert!(content.contains("browser_run_code_unsafe"));
+                assert!(content.contains("async (page) => await page.title()"));
+                let buttons = view["data"]["components"][0]["components"]
+                    .as_array()
+                    .unwrap();
+                assert!(
+                    buttons
+                        .iter()
+                        .any(|button| button["label"] == "今回だけ許可")
+                );
+                assert!(buttons.iter().any(|button| button["label"] == "拒否"));
             }
             controller
                 .handle_interaction(interaction("1002", &approval))
@@ -1394,6 +1577,10 @@ mod tests {
         });
         let states = store.status().await.unwrap();
         assert_eq!(states["requests"], json!([["COMPLETED", 1]]));
+        if mcp_approval || unsupported_approval || mcp_form_approval.is_some() {
+            let updates = approval_edits.lock().unwrap();
+            assert!(updates.iter().any(|body| body["components"] == json!([])));
+        }
         assert_eq!(
             posts
                 .lock()

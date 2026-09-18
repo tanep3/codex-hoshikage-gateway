@@ -57,6 +57,9 @@ for line in sys.stdin:
             approval_pending = True
             print(json.dumps({"jsonrpc":"2.0","method":"item/started","params":{"threadId":"thread-one","turnId":"turn-one","item":{"type":"mcpToolCall","id":"item-one","server":"playwright","tool":"browser_tabs","arguments":{"action":"list"}}}}), flush=True)
             print(json.dumps({"jsonrpc":"2.0","id":"mcp-approval-one","method":"item/tool/requestUserInput","params":{"threadId":"thread-one","turnId":"turn-one","itemId":"item-one","questions":[{"id":"mcp_tool_call_approval_item-one","header":"Tool","question":"Allow the playwright MCP server to run browser_tabs?","isOther":False,"isSecret":False,"options":[{"label":"Allow"},{"label":"Cancel"}]}]}}), flush=True)
+        elif "--request-mcp-form-approval" in sys.argv:
+            approval_pending = True
+            print(json.dumps({"jsonrpc":"2.0","id":"mcp-form-one","method":"mcpServer/elicitation/request","params":{"threadId":"thread-one","turnId":"turn-one","serverName":"playwright","mode":"form","message":"Allow the playwright MCP server to run tool \"browser_run_code_unsafe\"?","requestedSchema":{"type":"object","properties":{}},"_meta":{"codex_approval_kind":"mcp_tool_call","persist":["session","always"],"tool_params":{"code":"async (page) => await page.title()"}}}}), flush=True)
         elif "--request-artifact" in sys.argv:
             assert workspace and os.path.isdir(workspace)
             with open(os.path.join(workspace, "report.txt"), "w", encoding="utf-8") as f:
@@ -66,6 +69,9 @@ for line in sys.stdin:
         elif "--request-unsupported-approval" in sys.argv:
             approval_pending = True
             print(json.dumps({"jsonrpc":"2.0","id":"unsupported-one","method":"item/permissions/requestApproval","params":{"threadId":"thread-one","turnId":"turn-one","itemId":"item-one","reason":"permission change"}}),flush=True)
+        elif "--request-unknown-method" in sys.argv:
+            approval_pending = True
+            print(json.dumps({"jsonrpc":"2.0","id":"unknown-one","method":"future/approval/request","params":{"threadId":"thread-one","turnId":"turn-one"}}),flush=True)
     elif method == "thread/read":
         if approval_pending:
             print(json.dumps({"jsonrpc":"2.0","id":msg["id"],"result":{"thread":{"id":msg["params"]["threadId"],"turns":[{"id":"turn-one","status":"inProgress","itemsView":"full","items":[]}]}}}),flush=True)
@@ -80,12 +86,16 @@ for line in sys.stdin:
         print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"turnId": msg["params"]["expectedTurnId"]}}), flush=True)
     elif method == "turn/interrupt":
         print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {}}), flush=True)
-    elif method is None and msg.get("id") in ("approval-one", "mcp-approval-one", "artifact-one", "unsupported-one"):
+    elif method is None and msg.get("id") in ("approval-one", "mcp-approval-one", "mcp-form-one", "artifact-one", "unsupported-one", "unknown-one"):
         if msg["id"] == "mcp-approval-one":
             assert msg.get("result") == {"answers":{"mcp_tool_call_approval_item-one":{"answers":["Allow"]}}}
+        if msg["id"] == "mcp-form-one":
+            assert msg.get("result") in ({"action":"accept","content":{}}, {"action":"decline","content":None})
         if msg["id"] == "artifact-one":
             assert msg.get("result",{}).get("success") is True
         if msg["id"] == "unsupported-one":
             assert msg.get("error",{}).get("code") == -32600
+        if msg["id"] == "unknown-one":
+            assert msg.get("error",{}).get("code") == -32601
         approval_pending = False
         print(json.dumps({"jsonrpc":"2.0","method":"serverRequest/resolved","params":{"threadId":"thread-one","requestId":msg["id"]}}), flush=True)

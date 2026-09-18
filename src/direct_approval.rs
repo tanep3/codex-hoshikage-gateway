@@ -147,14 +147,19 @@ impl DirectInteraction {
     /// Its wire shape differs from command/file approvals. Other user input
     /// must use an explicit form coordinator and cannot use these buttons.
     pub fn mcp_tool_decision(&self, decision: ManualDecision) -> Result<Value> {
+        if self.kind == InteractionKind::McpElicitation {
+            return self.mcp_form_tool_decision(decision);
+        }
         ensure!(
             self.kind == InteractionKind::UserInput && self.method == "item/tool/requestUserInput",
             "not a Codex MCP tool confirmation"
         );
-        ensure!(
-            self.mcp_evidence.is_some(),
-            "matching MCP tool call evidence is missing"
-        );
+        if decision == ManualDecision::AcceptOnce {
+            ensure!(
+                self.mcp_evidence.is_some(),
+                "matching MCP tool call evidence is missing"
+            );
+        }
         let questions = self.params["questions"]
             .as_array()
             .context("MCP confirmation questions missing")?;
@@ -186,6 +191,56 @@ impl DirectInteraction {
         let mut answers = serde_json::Map::new();
         answers.insert(id.into(), json!({"answers":[choice]}));
         Ok(json!({"answers":answers}))
+    }
+
+    fn mcp_form_tool_decision(&self, decision: ManualDecision) -> Result<Value> {
+        ensure!(
+            self.method == "mcpServer/elicitation/request",
+            "not an MCP elicitation"
+        );
+        if decision != ManualDecision::AcceptOnce {
+            return Ok(json!({"action":"decline","content":null}));
+        }
+        ensure!(
+            self.params["mode"] == "form"
+                && self.params["_meta"]["codex_approval_kind"] == "mcp_tool_call"
+                && self.params["threadId"] == self.thread_id
+                && self.params["turnId"] == self.turn_id,
+            "not a turn-bound MCP tool confirmation"
+        );
+        ensure!(
+            self.params["serverName"]
+                .as_str()
+                .is_some_and(|text| !text.is_empty() && text.len() <= 128)
+                && self.params["message"]
+                    .as_str()
+                    .is_some_and(|text| !text.is_empty() && text.len() <= 8192)
+                && self.params["_meta"]["tool_params"].is_object(),
+            "MCP tool confirmation details are incomplete"
+        );
+        let schema = self.params["requestedSchema"]
+            .as_object()
+            .context("MCP tool confirmation schema missing")?;
+        ensure!(
+            schema.keys().all(|key| {
+                matches!(
+                    key.as_str(),
+                    "type" | "properties" | "required" | "additionalProperties"
+                )
+            }) && schema.get("type") == Some(&json!("object"))
+                && schema
+                    .get("properties")
+                    .and_then(Value::as_object)
+                    .is_some_and(|p| p.is_empty())
+                && schema
+                    .get("required")
+                    .is_none_or(|v| v.as_array().is_some_and(|r| r.is_empty()))
+                && schema
+                    .get("additionalProperties")
+                    .is_none_or(|v| v == false),
+            "MCP tool confirmation is not an empty form"
+        );
+        Ok(json!({"action":"accept","content":{}}))
     }
 }
 
