@@ -46,6 +46,7 @@ async fn actor_accepts(flag: &str, expected_kind: InteractionKind) {
         codex: Codex {
             command: std::env::current_exe().unwrap(),
             home,
+            workspace_root: None,
             model_provider: "openai".into(),
             sandbox: "workspace-write".into(),
             approval_policy: "on-request".into(),
@@ -116,6 +117,7 @@ async fn actor_accepts(flag: &str, expected_kind: InteractionKind) {
             pool,
             content: DirectContent::new(&cfg.storage.state_dir).unwrap(),
             state_dir: cfg.storage.state_dir.clone(),
+            workspace_root: cfg.workspace_root(),
             output_limit: cfg.limits.output_bytes,
             image_max_count: 16,
             image_max_bytes: cfg.limits.artifact_bytes,

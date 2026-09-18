@@ -9,7 +9,7 @@ use crate::{
     direct_image_store::{ImageRecord, ImageRecordState},
     direct_images::{GeneratedImageStatus, inventory},
     direct_input::app_server_input,
-    direct_workspace::ensure_conversation_workspace,
+    direct_workspace::ensure_conversation_workspace_at,
     files::PreparedInput,
     storage::Store,
 };
@@ -27,6 +27,7 @@ pub struct DirectRunService {
     pub pool: CodexRuntimePool,
     pub content: DirectContent,
     pub state_dir: PathBuf,
+    pub workspace_root: PathBuf,
     pub output_limit: usize,
     pub image_max_count: usize,
     pub image_max_bytes: usize,
@@ -214,7 +215,15 @@ impl DirectRunService {
     ) -> Result<ActiveRun> {
         ensure!(!input.is_empty(), "empty Codex input");
         let lease = self.pool.acquire().await.map_err(anyhow::Error::new)?;
-        options.cwd = ensure_conversation_workspace(&self.state_dir, &discord_thread_id)?;
+        options.cwd = if let Some(bound) = self
+            .store
+            .bound_direct_workspace(&discord_thread_id)
+            .await?
+        {
+            bound
+        } else {
+            ensure_conversation_workspace_at(&self.workspace_root, &discord_thread_id)?
+        };
         let intent = self
             .store
             .prepare_direct(

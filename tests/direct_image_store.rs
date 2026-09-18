@@ -49,6 +49,7 @@ async fn image_only_or_text_plus_image_is_saved_before_terminal_and_in_backup() 
         }),
         content: DirectContent::new(&cfg.storage.state_dir).unwrap(),
         state_dir: cfg.storage.state_dir.clone(),
+        workspace_root: cfg.storage.state_dir.join("workspaces"),
         output_limit: cfg.limits.output_bytes,
         image_max_count: 16,
         image_max_bytes: cfg.limits.artifact_bytes,

@@ -20,6 +20,20 @@ pub struct DirectDispatch {
 }
 
 impl Store {
+    pub async fn bound_direct_workspace(&self, discord_thread_id: &str) -> Result<Option<PathBuf>> {
+        let thread = discord_thread_id.to_owned();
+        self.call(false, move |connection| {
+            Ok(connection
+                .query_row(
+                    "SELECT workspace_path FROM direct_conversations WHERE discord_thread_id=?1",
+                    [&thread],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .map(PathBuf::from))
+        })
+        .await
+    }
     pub async fn fail_direct_before_send(
         &self,
         request_id: String,

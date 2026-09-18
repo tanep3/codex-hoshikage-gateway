@@ -59,6 +59,7 @@ async fn artifact_capture_is_conversation_bound_immutable_and_backed_up() {
         codex: Codex {
             command: std::env::current_exe().unwrap(),
             home,
+            workspace_root: None,
             model_provider: "openai".into(),
             sandbox: "workspace-write".into(),
             approval_policy: "on-request".into(),

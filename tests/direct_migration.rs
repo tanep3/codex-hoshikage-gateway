@@ -18,6 +18,7 @@ fn direct(temp: &tempfile::TempDir) -> DirectConfig {
         codex: Codex {
             command: std::env::current_exe().unwrap(),
             home,
+            workspace_root: None,
             model_provider: "openai".into(),
             sandbox: "workspace-write".into(),
             approval_policy: "on-request".into(),

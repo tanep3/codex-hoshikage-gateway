@@ -8,10 +8,10 @@ use crate::{
     direct_approval::{DirectInteraction, InteractionKind, ManualDecision},
     direct_config::DirectConfig,
     direct_content::DirectContent,
-    direct_models::DirectModelCatalog,
+    direct_models::{DirectModel, DirectModelCatalog},
     direct_run::DirectRunService,
     direct_run_actor::{self, RunCommand, RunEvent},
-    discord::{Discord, Handler, Health, Incoming},
+    discord::{Discord, Handler, Health, Incoming, snowflake},
     domain::RequestState,
     files::Files,
     storage::{self, Store},
@@ -51,6 +51,50 @@ pub struct DirectCoordinator {
     approvals: Arc<Mutex<HashMap<String, ApprovalCard>>>,
     cancel: CancellationToken,
     connected: Arc<AtomicBool>,
+}
+
+fn model_menu(models: &[DirectModel], current: &str, interaction: &str) -> (String, Value) {
+    let choices: Vec<Value> = models
+        .iter()
+        .filter(|model| model.id.len() <= 100)
+        .take(25)
+        .map(|model| {
+            json!({
+                "label": model.id,
+                "value": model.id,
+                "description": model.display_name.chars().take(100).collect::<String>(),
+                "default": model.id == current,
+            })
+        })
+        .collect();
+    let omitted = models.len().saturating_sub(choices.len());
+    let note = if omitted == 0 {
+        String::new()
+    } else {
+        format!(
+            "\n一覧に収まらない残り{omitted}件は /models でIDを確認し、/model の id 欄に入力できます。"
+        )
+    };
+    let text = format!("選択中のモデル: {current}\n次に使うモデルを選んでください。{note}");
+    if choices.is_empty() {
+        return (
+            format!(
+                "{text}\nこの画面に表示できる候補はありません。/models でIDを確認し、/model の id 欄に入力してください。"
+            ),
+            json!([]),
+        );
+    }
+    (
+        text,
+        json!([{"type":1,"components":[{
+            "type":3,
+            "custom_id":format!("direct:model:{interaction}"),
+            "placeholder":"モデルを選択",
+            "min_values":1,
+            "max_values":1,
+            "options":choices,
+        }]}]),
+    )
 }
 
 impl DirectCoordinator {
@@ -423,8 +467,33 @@ impl DirectCoordinator {
             .as_str()
             .context("application ID missing")?;
         if let Some(custom) = value["data"]["custom_id"].as_str() {
+            if custom.starts_with("direct:model:") {
+                return self
+                    .model_selection(id, token, app_id, thread, custom, &value)
+                    .await;
+            }
             return self
                 .approval_button(id, token, app_id, thread, custom)
+                .await;
+        }
+        if value["data"]["name"] == "model"
+            && !value["data"]["options"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item["name"] == "id"))
+        {
+            self.app.discord.acknowledge(id, token).await?;
+            let result = self.model_selection_menu(thread, id).await;
+            let (text, components) = result.unwrap_or_else(|_| {
+                (
+                    "モデル候補を取得できませんでした。少し待って /model を開き直してください。"
+                        .into(),
+                    json!([]),
+                )
+            });
+            return self
+                .app
+                .discord
+                .reply_components(app_id, token, &text, components)
                 .await;
         }
         self.app.discord.acknowledge(id, token).await?;
@@ -437,6 +506,72 @@ impl DirectCoordinator {
             }
         };
         self.app.discord.reply(app_id, token, &text).await
+    }
+
+    async fn model_selection_menu(
+        &self,
+        thread: &str,
+        interaction: &str,
+    ) -> Result<(String, Value)> {
+        self.app.verify_location(thread).await?;
+        self.app
+            .store
+            .add_conversation(thread.into(), storage::PROXY_SCOPE.into())
+            .await?;
+        let current = self.app.store.conversation(thread).await?.selected_model;
+        let catalog = DirectModelCatalog {
+            launch: self.app.cfg.launch(),
+        }
+        .list()
+        .await?;
+        Ok(model_menu(&catalog, &current, interaction))
+    }
+
+    async fn model_selection(
+        &self,
+        id: &str,
+        token: &str,
+        app_id: &str,
+        thread: &str,
+        custom: &str,
+        value: &Value,
+    ) -> Result<()> {
+        self.app.discord.acknowledge_update(id, token).await?;
+        let result = async {
+            ensure!(
+                value["data"]["component_type"] == 3,
+                "model choice component type is invalid"
+            );
+            let source = custom
+                .strip_prefix("direct:model:")
+                .context("model menu identity missing")?;
+            snowflake(source)?;
+            let values = value["data"]["values"]
+                .as_array()
+                .context("model choice missing")?;
+            ensure!(values.len() == 1, "exactly one model must be selected");
+            let model = values[0].as_str().context("model choice is not text")?;
+            self.app.verify_location(thread).await?;
+            self.app
+                .store
+                .add_conversation(thread.into(), storage::PROXY_SCOPE.into())
+                .await?;
+            let applied = self.app.choose_model(thread, id, model).await?;
+            let current = self.app.store.conversation(thread).await?.selected_model;
+            Ok::<String, anyhow::Error>(if applied {
+                format!("選択中のモデルを {current} に変更しました。次の依頼から使います。")
+            } else {
+                format!("より新しいモデル選択が優先されています。現在のモデル: {current}")
+            })
+        }
+        .await;
+        let text = result.unwrap_or_else(|_| {
+            "モデルを変更できませんでした。/model を開き直して選択してください。".into()
+        });
+        self.app
+            .discord
+            .reply_components(app_id, token, &text, json!([]))
+            .await
     }
 
     async fn command(&self, id: &str, thread: &str, value: &Value) -> Result<String> {
@@ -478,15 +613,40 @@ impl DirectCoordinator {
                 }
                 .list()
                 .await?;
+                let page = value["data"]["options"]
+                    .as_array()
+                    .and_then(|items| items.iter().find(|item| item["name"] == "page"))
+                    .and_then(|item| item["value"].as_u64())
+                    .unwrap_or(1);
+                let start = usize::try_from(page.saturating_sub(1))?.saturating_mul(8);
+                ensure!(
+                    start < list.len() || (list.is_empty() && page == 1),
+                    "model catalog page is empty"
+                );
                 let names = list
                     .iter()
-                    .take(30)
-                    .map(|m| format!("{} — {}", m.id, m.display_name))
+                    .skip(start)
+                    .take(8)
+                    .map(|m| {
+                        format!(
+                            "{} — {}",
+                            m.id,
+                            m.display_name.chars().take(80).collect::<String>()
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join("\n");
+                let next = if start.saturating_add(8) < list.len() {
+                    format!("\n続き: /models page:{}", page + 1)
+                } else {
+                    String::new()
+                };
                 Ok(format!(
-                    "利用可能なモデル:\n{}",
-                    names.chars().take(1800).collect::<String>()
+                    "利用可能なモデル（全{}件、ページ{}）:\n{}{}",
+                    list.len(),
+                    page,
+                    names,
+                    next
                 ))
             }
             "model" => {
@@ -498,6 +658,19 @@ impl DirectCoordinator {
                     Ok(format!(
                         "選択中のモデル: {}\n/models で一覧を確認できます。",
                         cv.selected_model
+                    ))
+                }
+            }
+            "workspace" => {
+                if let Some(path) = self.app.store.bound_direct_workspace(thread).await? {
+                    Ok(format!(
+                        "この会話の作業フォルダー: {}\n保存先設定を変えても、この会話は同じ場所を使います。",
+                        path.display()
+                    ))
+                } else {
+                    Ok(format!(
+                        "この会話の最初の依頼から使う作業フォルダー: {}",
+                        self.app.cfg.workspace_root().join(thread).display()
                     ))
                 }
             }
@@ -804,6 +977,7 @@ pub async fn run(cfg: DirectConfig) -> Result<()> {
             pool: CodexRuntimePool::new(cfg.launch()),
             content: DirectContent::new(&cfg.storage.state_dir)?,
             state_dir: cfg.storage.state_dir.clone(),
+            workspace_root: cfg.workspace_root(),
             output_limit: cfg.limits.output_bytes,
             image_max_count: 16,
             image_max_bytes: cfg.limits.artifact_bytes,
@@ -893,6 +1067,24 @@ mod tests {
         Json, Router,
         routing::{get, patch, post},
     };
+
+    #[test]
+    fn model_menu_exposes_selectable_catalog_and_reports_overflow() {
+        let models = (0..27)
+            .map(|index| DirectModel {
+                id: format!("model-{index}"),
+                display_name: format!("Model {index}"),
+            })
+            .collect::<Vec<_>>();
+        let (text, components) = model_menu(&models, "model-0", "123");
+        assert!(text.contains("残り2件"));
+        let select = &components[0]["components"][0];
+        assert_eq!(select["type"], 3);
+        assert_eq!(select["custom_id"], "direct:model:123");
+        assert_eq!(select["options"].as_array().unwrap().len(), 25);
+        assert_eq!(select["options"][0]["value"], "model-0");
+        assert_eq!(select["options"][0]["default"], true);
+    }
     use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, sync::Mutex as StdMutex};
 
     #[tokio::test]
@@ -939,6 +1131,16 @@ mod tests {
         }
         let state = root.join("state");
         fs::create_dir(&state).unwrap();
+        let mock_command = root.join("mock-codex");
+        fs::write(
+            &mock_command,
+            format!(
+                "#!/bin/sh\nexec python3 '{}/tests/fixtures/mock_app_server.py'\n",
+                env!("CARGO_MANIFEST_DIR")
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&mock_command, fs::Permissions::from_mode(0o700)).unwrap();
         let cfg = DirectConfig {
             discord: crate::config::Discord {
                 guild_id: "1".into(),
@@ -947,8 +1149,13 @@ mod tests {
                 response_mode: crate::config::ResponseMode::All,
             },
             codex: Codex {
-                command: std::env::current_exe().unwrap(),
+                command: if real_codex {
+                    PathBuf::from("codex")
+                } else {
+                    mock_command
+                },
                 home,
+                workspace_root: None,
                 model_provider: "openai".into(),
                 sandbox: "workspace-write".into(),
                 approval_policy: "on-request".into(),
@@ -990,6 +1197,8 @@ mod tests {
         let posted = posts.clone();
         let callbacks = Arc::new(StdMutex::new(Vec::<Value>::new()));
         let callback_copy = callbacks.clone();
+        let edits = Arc::new(StdMutex::new(Vec::<Value>::new()));
+        let edit_copy = edits.clone();
         let router = Router::new()
             .route(
                 "/channels/4",
@@ -1027,7 +1236,13 @@ mod tests {
             )
             .route(
                 "/webhooks/{app}/{token}/messages/@original",
-                patch(|Json(_body): Json<Value>| async { Json(Value::Null) }),
+                patch(move |Json(body): Json<Value>| {
+                    let edits = edit_copy.clone();
+                    async move {
+                        edits.lock().unwrap().push(body);
+                        Json(Value::Null)
+                    }
+                }),
             );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -1075,6 +1290,7 @@ mod tests {
                 }),
                 content: DirectContent::new(&state).unwrap(),
                 state_dir: state,
+                workspace_root: cfg.workspace_root(),
                 output_limit: cfg.limits.output_bytes,
                 image_max_count: 16,
                 image_max_bytes: cfg.limits.artifact_bytes,
@@ -1211,6 +1427,47 @@ mod tests {
                     .unwrap(),
                 b"mock artifact"
             );
+        }
+        if !real_codex {
+            let slash = json!({"id":"2001","token":"token","application_id":"123","guild_id":"1","channel_id":"4","member":{"user":{"id":"2"}},"data":{"name":"model","options":[]}});
+            controller.handle_interaction(slash).await.unwrap();
+            assert_eq!(callbacks.lock().unwrap().last().unwrap()["type"], 5);
+            let menu = edits.lock().unwrap().last().unwrap().clone();
+            assert!(menu["content"].as_str().unwrap().contains("選択中のモデル"));
+            let select = &menu["components"][0]["components"][0];
+            assert_eq!(select["type"], 3);
+            assert_eq!(select["custom_id"], "direct:model:2001");
+            assert!(
+                select["options"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|o| o["value"] == "gpt-5.6-terra")
+            );
+            let choice = json!({"id":"2002","token":"token","application_id":"123","guild_id":"1","channel_id":"4","member":{"user":{"id":"2"}},"data":{"custom_id":"direct:model:2001","component_type":3,"values":["gpt-5.6-terra"]}});
+            controller.handle_interaction(choice).await.unwrap();
+            assert_eq!(callbacks.lock().unwrap().last().unwrap()["type"], 6);
+            assert_eq!(
+                store.conversation("4").await.unwrap().selected_model,
+                "gpt-5.6-terra"
+            );
+            let applied = edits.lock().unwrap().last().unwrap().clone();
+            assert!(
+                applied["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains("gpt-5.6-terra")
+            );
+            assert_eq!(applied["components"], json!([]));
+            let workspace = controller
+                .command(
+                    "2003",
+                    "4",
+                    &json!({"data":{"name":"workspace","options":[]}}),
+                )
+                .await
+                .unwrap();
+            assert!(workspace.contains("workspaces/4"));
         }
         controller.cancel.cancel();
         worker.await.unwrap().unwrap();

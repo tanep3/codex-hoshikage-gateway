@@ -28,6 +28,7 @@ fn direct_cli_never_falls_through_to_proxy_configuration() {
         codex: Codex {
             command,
             home,
+            workspace_root: None,
             model_provider: "openai".into(),
             sandbox: "workspace-write".into(),
             approval_policy: "on-request".into(),

@@ -98,11 +98,11 @@ Gatewayの設定正本は `~/.config/codex-hoshikage-gateway/config.toml`。現�
 
 直接接続用の設定型は既存Proxy設定型と分離する。`[codex]`には絶対パスの`command`と`home`を置き、Gatewayが`app-server`をstdioで起動する。`default_model`と`model_provider`、`sandbox`、`approval_policy`を明示し、初期値は`workspace-write`／`on-request`、`network_access`はfalseとする。`thread/start`の`sandbox`と`approvalPolicy`はこのCLIが受け付けるkebab-case、`turn/start`の`sandboxPolicy.type`はcamelCaseへ変換する。Turn開始時にはworkspaceを明示したsandbox policyを渡し、Codex home側の設定とも整合を検証する。Codex homeはGateway専属とし、認証・MCP設定をそこへ配置する。設定ファイルや認証を旧Proxyの領域から暗黙にコピーしない。移行中は旧設定の読取りを維持するが、直接接続の設定に`[proxy]`を要求しない。新旧のどちらを起動するかは設定型で一意にし、一つの依頼を両方へ送らない。
 
-モデル一覧と選択値の検証は、実行中Turnの2枠を占有しない専用の短命App Server子プロセスで行う。Discordのモデル変更はイベントIDの順序と一意性をSQLiteで確認し、検証完了が前後しても古い選択が新しい選択を上書きしない。選択値は新規Turnの送信境界で固定し、既存会話のCodex threadを継続したまま次のTurnに渡す。
+モデル一覧と選択値の検証は、実行中Turnの2枠を占有しない専用の短命App Server子プロセスで行う。`/model` の引数省略時は本人限定の選択メニューを表示し、選択イベントでもGuild・本人・会話を照合する。選択値は新しいcatalogで再検証し、その選択イベントIDをSQLiteの順序・一意性判定に使う。検証完了が前後しても古い選択が新しい選択を上書きしない。Discordの選択肢上限を超える候補は `/model id:` の手入力経路を案内する。選択値は新規Turnの送信境界で固定し、既存会話のCodex threadを継続したまま次のTurnに渡す。
 
 プロトコルの起動順序と設定値は[Codex App Server公式資料](https://developers.openai.com/codex/app-server/)と[Codex設定資料](https://developers.openai.com/codex/config-reference/)を基準にし、稼働バイナリのschemaと実機試験で照合する。Gatewayの`[codex]`はGateway専用の運用設定であり、Codex自身の`$CODEX_HOME/config.toml`とは別ファイルである。
 
-通常の会話ワークはGatewayの `state_dir/workspaces/<Discord会話ID>` に自動作成する。IDは数字として検証し、実パス・所有者・inodeを保存時と送信直前に照合する。Discordからcwdを入力させない。共有ワークを利用する機能を将来追加する場合も、明示操作と別の排他・認可設計なしに既定ワークを共有しない。
+通常の会話ワークはGateway設定の `codex.workspace_root/<Discord会話ID>` に自動作成する。未設定時は従来どおり `state_dir/workspaces/<Discord会話ID>` を使う。IDは数字として検証し、実パス・所有者・inodeを保存時と送信直前に照合する。既存会話ではDBに固定済みのパスを優先し、設定変更で自動移動・推測再割当をしない。`/workspace` は現在の会話で固定した実パス、または新規会話に適用する親ディレクトリを本人限定で示す。Discordからcwdを入力させない。共有ワークを利用する機能を将来追加する場合も、明示操作と別の排他・認可設計なしに既定ワークを共有しない。
 
 GatewayのSQLiteと保存ファイルは管理対象を一緒にバックアップする。バックアップmanifestと復元世代を更新し、復元直後は未完了依頼を隔離する。子プロセスが失われてもCodexの実行状態が確定したと推測しない。systemd user serviceはGatewayを監視し、Gatewayは子プロセスを監視する。子プロセス異常を静かに放置しない。
 

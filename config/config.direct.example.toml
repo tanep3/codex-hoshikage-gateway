@@ -1,5 +1,4 @@
-# Gateway-owned Codex App Server configuration. This sample is for the new
-# `direct` CLI commands; the existing service still uses the Proxy format.
+# Gateway-owned Codex App Server configuration for `direct` CLI commands.
 # Replace IDs and absolute paths. Keep the token in a separate mode-0600 file.
 default_model = "gpt-5.6-luna"
 
@@ -13,6 +12,9 @@ token_file = "/home/REPLACE_USER/.config/codex-hoshikage-gateway/discord-token"
 command = "/home/REPLACE_USER/.local/bin/codex"
 # Private, Gateway-owned CODEX_HOME (0700). Sign in and configure MCP here.
 home = "/home/REPLACE_USER/.config/codex-hoshikage-gateway/codex-home"
+# New conversations use this visible directory. Existing conversations keep
+# their original workspace and Codex context when this setting changes.
+workspace_root = "/home/REPLACE_USER/work/codex-hoshikage-gateway-workspaces"
 model_provider = "openai"
 sandbox = "workspace-write"
 approval_policy = "on-request"

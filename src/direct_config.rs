@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs,
     os::unix::fs::MetadataExt,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     time::Duration,
 };
 
@@ -30,6 +30,8 @@ pub struct DirectConfig {
 pub struct Codex {
     pub command: PathBuf,
     pub home: PathBuf,
+    #[serde(default)]
+    pub workspace_root: Option<PathBuf>,
     #[serde(default = "default_provider")]
     pub model_provider: String,
     #[serde(default = "default_sandbox")]
@@ -63,6 +65,12 @@ impl DirectConfig {
             .as_slice(),
         )
     }
+    pub fn workspace_root(&self) -> PathBuf {
+        self.codex
+            .workspace_root
+            .clone()
+            .unwrap_or_else(|| self.storage.state_dir.join("workspaces"))
+    }
     pub fn read(path: &Path) -> Result<Self> {
         let raw = fs::read_to_string(path).context("Gateway configuration unavailable")?;
         let cfg: Self = toml::from_str(&raw).context("invalid direct Codex configuration")?;
@@ -86,6 +94,21 @@ impl DirectConfig {
             &self.storage.socket_path,
         ] {
             ensure!(path.is_absolute(), "Gateway paths must be absolute");
+        }
+        if let Some(root) = &self.codex.workspace_root {
+            ensure!(root.is_absolute(), "Codex workspace root must be absolute");
+            ensure!(
+                !root
+                    .components()
+                    .any(|part| matches!(part, Component::CurDir | Component::ParentDir)),
+                "Codex workspace root must be normalized"
+            );
+            ensure!(
+                !root.starts_with(&self.codex.home)
+                    && !root.starts_with(&self.storage.state_dir)
+                    && !self.storage.state_dir.starts_with(root),
+                "Codex workspace root overlaps private runtime state"
+            );
         }
         let executable = fs::metadata(&self.codex.command).context("Codex command unavailable")?;
         ensure!(

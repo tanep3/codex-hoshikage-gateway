@@ -17,6 +17,7 @@ async fn later_model_selection_wins_even_when_validation_completes_out_of_order(
         codex: Codex {
             command: std::env::current_exe().unwrap(),
             home,
+            workspace_root: None,
             model_provider: "openai".into(),
             sandbox: "workspace-write".into(),
             approval_policy: "on-request".into(),
