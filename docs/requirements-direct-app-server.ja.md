@@ -1,5 +1,7 @@
 # Gateway専属Codex App Server — 目標要件
 
+> **現在は直接接続版を実装済みです。** 本文の「目標」「未確定」「切替前」は設計時点の記録です。現在の導入と操作は[導入手順](installation.ja.md)と[ユーザーマニュアル](user-manual.ja.md)を参照してください。
+
 版0.2 / 2026-09-18 / Tane Channel Technology
 
 状態：目標構成の要件案。[構造転換の決定](architecture-direction-direct-app-server.ja.md)に基づく。現行サービスと[現行要件](requirements.ja.md)の動作を直ちに変更しない。移行手順と未確定の製品選択は本書末尾に残す。

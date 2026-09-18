@@ -1,37 +1,41 @@
-default_model = "chatgpt/gpt-5.6-luna" # Choose an available Proxy model.
+# Gateway-owned Codex App Server configuration for `direct` CLI commands.
+# Replace IDs and absolute paths. Keep the token in a separate mode-0600 file.
+default_model = "gpt-5.6-luna"
 
-# Replace the IDs, paths and model for your environment before check/init.
-# Resource limits below are ready-to-use defaults. Store secrets in separate files.
 [discord]
-# all: respond to every authorized post; mention: only when the Bot is mentioned.
-response_mode = "all"
+response_mode = "all" # or "mention"
 guild_id = "REPLACE_WITH_GUILD_ID"
 allowed_user_id = "REPLACE_WITH_USER_ID"
-token_file = "/home/tane/.config/codex-hoshikage-gateway/discord-token"
+token_file = "/home/REPLACE_USER/.config/codex-hoshikage-gateway/discord-token"
 
-[proxy]
-base_url = "http://127.0.0.1:4040"
-api_key_file = "/home/tane/.config/codex-hoshikage-gateway/proxy-key"
-contract_version = "2.0"
+[codex]
+command = "/home/REPLACE_USER/.local/bin/codex"
+# Private, Gateway-owned CODEX_HOME (0700). Sign in and configure MCP here.
+home = "/home/REPLACE_USER/.config/codex-hoshikage-gateway/codex-home"
+# New conversations use this visible directory. Existing conversations keep
+# their original workspace and Codex context when this setting changes.
+workspace_root = "/home/REPLACE_USER/work/codex-hoshikage-gateway-workspaces"
+model_provider = "openai"
+sandbox = "workspace-write"
+approval_policy = "on-request"
+network_access = false
 
 [storage]
-state_dir = "/home/tane/.local/state/codex-hoshikage-gateway"
-temp_dir = "/home/tane/.config/codex-hoshikage-gateway/temp"
-socket_path = "/run/user/1000/codex-hoshikage-gateway/admin.sock"
+state_dir = "/home/REPLACE_USER/.local/state/codex-hoshikage-gateway"
+temp_dir = "/home/REPLACE_USER/.config/codex-hoshikage-gateway/temp"
+socket_path = "/run/user/REPLACE_UID/codex-hoshikage-gateway/admin.sock"
 
 [limits]
-# Start with these defaults; adjust only when needed. Zero is invalid, not unlimited.
-attachments = 4 # files
-attachment_bytes = 8388608 # 8 MiB per attachment
-input_bytes = 16777216 # 16 MiB including encoded input
-text_bytes = 262144 # 256 KiB UTF-8 text
-image_pixels = 16000000 # 16 megapixels per image
-artifact_bytes = 8388608 # 8 MiB per returned file
-temp_bytes = 67108864 # 64 MiB shared temporary budget
-output_bytes = 1048576 # 1 MiB per reply
-output_total_bytes = 8388608 # 8 MiB total reply budget
-delivery_retention_secs = 900 # 15 minutes
-# Maximum concurrent executions remains fixed at 2.
+attachments = 5
+attachment_bytes = 8388608
+input_bytes = 16777216
+text_bytes = 262144
+image_pixels = 16000000
+artifact_bytes = 8388608
+temp_bytes = 67108864
+output_bytes = 4194304
+output_total_bytes = 8388608
+delivery_retention_secs = 900
 queue_conversation = 5
 queue_global = 20
 validation_secs = 120

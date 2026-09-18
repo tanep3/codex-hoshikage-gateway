@@ -1,5 +1,7 @@
 # Gateway専属Codex App Server — 内部システム設計
 
+> **現在は直接接続版を実装済みです。** 本文の「目標」「未確定」「切替前」は設計時点の記録です。現在の導入と操作は[導入手順](installation.ja.md)と[ユーザーマニュアル](user-manual.ja.md)を参照してください。
+
 版0.2 / 2026-09-18 / Tane Channel Technology
 
 状態：目標構成の内部設計案。[目標要件](requirements-direct-app-server.ja.md)に対応。切替時の新規文脈とDB実行方式の境界を確定。現行常駐サービスは未変更。

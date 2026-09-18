@@ -1,130 +1,54 @@
 # User manual
 
-[日本語](user-manual.ja.md) · [Installation](installation.md)
+[日本語](user-manual.ja.md) · [Need to install it first?](installation.md)
 
-This manual is for people using an already configured Bot in Discord. If you are installing the Bot or setting up keys, start with the [installation guide](installation.md).
+Codex Hoshikage Gateway lets you give Codex tasks in an ordinary Discord conversation. Once it is installed, there is no special “start conversation” command.
 
-## Try your first conversation
+## Talk to the Bot
 
-1. Open the Discord server containing the Bot and enter a text channel, or open a forum post.
-2. Send “Hello, what can you help me with?” If the Bot responds only to mentions, type `@`, select the Bot, and include your message.
-3. Continue chatting after its reply. You do not need a new-conversation command or a server working-directory path.
-4. If it does not respond, type `/`, select this Bot's `/status` command, and read its guidance. Share the result with your administrator if the issue persists.
+Open a text channel or forum post in the authorized Discord server and send a message. If the Bot is set to respond only when mentioned, mention it with `@` first. Each text channel or forum post keeps its own conversation and working folder. You do not have to register a folder.
 
-Only the user allowed by the administrator can operate the Bot. Silence in response to other members is not necessarily an error. Conversation messages remain visible to people who can view that channel.
+An ordinary message is a new task. It waits if a previous task is still running. To add a direction to **the task already running**, use `/steer`. Discord may show the Bot as “typing”; that means it is working, not that the task has finished.
 
-### Using commands
+Only the person selected during setup can operate this Bot. Other people who can view the channel can still see its messages. Use a private channel for private work.
 
-Notation such as `/model id:MODEL_ID` shows a command and its input field. Choose `/model` from Discord's suggestions, then enter the value in its `id` field. Do not enter the literal text `MODEL_ID`. For an easier model selection, use `/model` without an argument to open the menu.
+## Commands
 
-## Start a conversation
+Type `/` in Discord and choose this Bot's command. In an example such as `/model id:...`, `id` is a field in Discord's command form.
 
-Talk in an authorized text channel, thread, or forum post. No cwd or `/project` registration is needed. Each text channel has its own conversation; threads and forum posts have separate conversations.
-
-The administrator chooses whether the Bot responds to all authorized posts or only mentions. The configured model is reused; a selection menu appears when a model must be chosen.
-
-## Choose models and control work
-
-| Command | Purpose |
+| Command | What it does |
 | --- | --- |
-| `/workspace` | Choose a shared workspace before starting a conversation (optional) |
-| `/retry` | Select a saved reply/file and confirm redelivery |
-| `/get scope:shared` | Explicitly list artifacts from the shared workspace |
-| `/models` | List available models |
-| `/model` | Show the selected model and choose a different model from the menu |
-| `/model id:MODEL_ID` | Select the next request's model while preserving same-provider context |
-| `/status` | Check conversation, model, pause, and Proxy connection state |
-| `/steer text:INSTRUCTION` | Add an instruction to the current Turn; ordinary messages queue the next request |
-| `/stop` | Pause the queue and stop the accepted request, including before Turn start |
-| `/cancel` | Cancel the latest queued request, or interrupt the active request if nothing is queued. Does not pause or resume the queue. |
-| `/resume` | Resume the queue, without rerunning a cancelled request |
-| `/new title:NAME` | Start a new thread or forum post |
-| `/mcp` | Inspect/revoke MCP permissions for this task. Use `/stop` to stop the whole task |
+| `/status` | Show the current task, queue, model, and conversation state |
+| `/models` | List available model IDs; use `page` for more |
+| `/model` | See the selected model and choose another from a menu |
+| `/model id:MODEL_ID` | Enter a model ID directly; use it from the next task |
+| `/workspace` | Show where this conversation's files are stored |
+| `/get` | List artifacts registered in this conversation |
+| `/get path:output/report.pdf` | Send a file from the working folder to Discord; enter a **relative path** |
+| `/steer text:MORE_DETAIL` | Add instructions to the task currently running |
+| `/cancel` | Cancel the newest queued task; if none is queued, request interruption of the running task |
+| `/stop` | Request interruption and pause the remaining queue |
+| `/resume` | Resume a queue paused by `/stop`; it does not rerun the stopped task |
+| `/recover` | Review and recover a conversation blocked by an uncertain previous task |
 
-Stop acceptance and confirmed termination are different. The Bot reports uncertainty rather than claiming success. When approval is required, inspect the target and details before using the approval buttons.
+Use `/cancel` when you want to withdraw a task you just sent; use `/stop` when you want to halt work and pause later tasks too. Sending an interrupt request and confirming that work stopped are separate. Check `/status` if needed. Changes already made to files are not automatically undone.
 
-## Send input and collect files
+## Files and images
 
-Attach supported images or UTF-8 text to your message. Oversized input is rejected before execution.
+You can attach images and text files to a message. Files exceeding the configured size or count limits are rejected. Images made by Codex normally arrive automatically in the same conversation, sometimes after the text reply.
 
-Use `/get` to select an artifact registered through the model's dedicated tool. For an unregistered file, use `/get path:output/report.pdf`. Paths are relative to the Proxy workspace; you do not need its absolute path.
+For other output, open `/get` to see registered artifacts. If you know the file location, enter a relative path such as `output/report.pdf` in `/get`'s `path` field. You do not need the absolute path shown by `/workspace`. `/get` sends a saved copy of the file as it was when fetched. A later change to the original file does not change that copy. If the result of sending to Discord is uncertain, the Gateway does not automatically resend it. Check the conversation for the attachment first.
 
-An artifact ID identifies fixed bytes. Resending that version differs from capturing an updated source file. Lists show 25 items per page; use the next-page button to continue. Selections expire after ten minutes. Open `/get` again if a menu expires. Use `/retry` to select an undelivered or uncertain delivery, then confirm the possibility of duplicate messages. This never reruns the AI task.
+## When Codex asks for permission
 
-## After a connection problem
+If Codex requests permission for a command or MCP tool, a card appears in the conversation. Select **自分だけに表示して確認** (“review privately”) and read the **operation and actual input** through to the last page. Approve only if you understand it. **今回だけ許可** (“allow once”) covers that call only. For some MCP tools, **この依頼中、このツールを許可** (“allow this tool during this task”) may appear; it can cover later calls to the same tool within this task, even when arguments or targets change. Read its scope before choosing it.
 
-Disconnecting the Gateway does not stop Proxy execution. Use `/stop` when you intend to stop. Saved final replies and artifacts can be retrieved by the same ID within the Proxy retention period, even after Gateway cache loss. Storage failure, expiration, or revoked access can prevent retrieval. Delivery recovery never automatically reruns the AI task.
+If the details are missing, unclear, or unwanted, select **拒否** (“decline”) or **取り消し** (“cancel”). Use `/stop` to stop the whole task. The tool's result appears in a later Codex reply; pressing Allow does not mean the tool succeeded.
 
-Uncertain execution and changes to the Proxy recovery generation require operator reconciliation. See [Operations](operations.md) for recovery procedures.
+## When a conversation gets stuck
 
-## Share files across conversations
+If the Bot says it cannot confirm the previous task's result, do not keep posting the same request. Check `/status`. If it offers `/recover`, open `/recover` **in that conversation**. Read what will be kept and cancelled, then choose **新しい文脈で会話を再開** (“resume with a new context”) if you agree. **The old task is not rerun; Discord history and work files remain; unsent queued tasks are cancelled; Codex starts a fresh conversation context.** Send only the instructions you still need in a new message.
 
-Each conversation normally gets its own workspace. If you want to share files, use `/workspace` before sending the first request and choose an authorized shared workspace. No config entry or host path is needed. Changes made by other conversations are visible there.
+If `/recover` is unavailable, work may still be active. Check `/status`, use `/stop` if appropriate, and contact the Gateway operator if it remains stuck. `/resume` alone cannot clear an uncertain task. Restarting the service does not automatically rerun it either.
 
-An existing conversation cannot change workspaces. Create another with `/new title:NAME` and choose there. Inside a forum post, this creates another post in the same forum. For forums that require tags, use Discord's standard post-creation screen.
-
-See [Operations guide](operations.md).
-
-Post normally in the place you want to use. `/new` is an optional shortcut to create a different Discord thread or forum post, not a prerequisite for conversation.
-
-## Generated images
-
-Ask for an image normally. With a compatible Proxy, the generated PNG appears automatically in the same conversation, even when the reply has no text. You do not need `/get`. Images may arrive after the text. Failed or interrupted work can still deliver saved images, marked as partial results when known before sending.
-
-`/get` avoids attaching a saved version that is already queued or delivered. Use `/retry` and confirm if you want another copy. A size limit or expired resource may prevent delivery; `/get` does not bypass these limits. No extra configuration is required.
-
-When image preparation or delivery takes longer, the Bot shows a progress message. That same message updates when delivery finishes, no images are found, or a problem occurs. You can wait without submitting the request again.
-
-The Bot does not add routine working or completion messages. Temporary status warnings are removed automatically once normal operation is confirmed.
-
-## Approvals and activity
-
-Approval cards show the purpose and operation in readable form. “Approve once” permits only that operation. After approval, refusal, or cancellation, the same card shows the result and removes its buttons. If delivery is still being checked, wait in the same conversation instead of submitting again.
-
-Discord’s native typing indicator shows that work is underway. Updates stop during approval waits, after completion, or when execution status is unknown; the indicator may remain visible for up to about 10 seconds. It indicates activity, not the model’s private reasoning.
-
-Intermediate text is a temporary preview. The final answer arrives as a new message at the bottom of the conversation, then the preview is removed. You do not need to search above approval cards for an edited answer.
-
-After you choose an approval button, the original card shows the result. A duplicate private confirmation is not posted.
-
-### When an MCP tool asks for confirmation
-
-MCP lets Codex use external tools such as browsers. Permission here means allowing a tool operation; it is separate from signing in.
-
-The bot shows the operation and available choices. **今回だけ許可 (Allow this call only)** permits the displayed call once. Eligible tools also offer **この依頼中、このツールを許可 (Allow this tool during this request)**; see “Repeated MCP confirmations” below for its scope. A tool may ask for more information after you allow it.
-
-Long commands and arguments appear across numbered, private pages. Open every page with **次へ (Next)** before allowing the operation. You can decline or cancel without opening every page; use `/stop` to stop the task.
-
-For a form, open **入力フォームを開く**, select a field, and choose **入力する**. Enter the displayed number for an enumerated choice, or はい / いいえ for a boolean. Extra text boxes can hold the rest of a long string. Choose **この内容で送信** when ready. Defaults are never filled automatically. Form screens are private; answers are not posted to the public conversation. Re-enter unfinished answers after a bot restart.
-
-Use `/stop` to stop the task. Expired or uncertain answers are never automatically approved or resent. Check the original card and `/status`. “Answer sent to MCP” confirms submission, not successful tool execution; the task result follows separately.
-
-## If an answer or file does not arrive
-
-- **Retrieval is being checked automatically:** wait without submitting the AI request again. If nothing arrives after a few minutes, share `/status` and the warning with the operator.
-- **Discord delivery is uncertain:** check this conversation first. If the answer or file is present, no action is needed. Otherwise, use `/retry`, select the saved item, and acknowledge the possibility of duplicate messages. This resends the same saved version; it does not rerun the AI task.
-- **Permission, capacity, corruption, or expiry errors:** address the stated cause first. Resending alone cannot fix it. Ask the operator to check settings or storage. For an expired file whose original still exists, `/get path:...` creates a new saved version. This cannot recover expired answer text.
-
-Old retrieval warnings are removed after delivery completes. If the warning's own send or deletion result is uncertain, it can remain until reconciled.
-
-### Repeated MCP confirmations
-
-The same server or tool can ask again for each separate call. **今回だけ許可 (Allow this call only)** applies to one request. If the gateway cannot verify actual arguments or code separately from the original confirmation text, it tells you. If the operation is unclear, choose **拒否 (Decline)**, or use `/stop` to stop the whole task.
-
-Cards with confirmed permission submission and resolution are consolidated into a count for the same task. The count covers accepted permissions and form submissions; it does not prove tool success. Declined, expired, and uncertain confirmations remain visible.
-
-With compatible Gateway and Proxy versions and the feature enabled, supported operations such as page searches and navigation show **the operation and its search text or URL on the first card**. Read it and choose:
-
-- **この依頼中、このツールを許可 (Allow this tool during this request):** allow repeated calls to the same tool on the same MCP server during this request. Later calls may have different arguments or targets. The permission expires when you add an instruction, stop the task, or the request ends; it does not carry over to the next request. This option appears only when the gateway can verify the actual tool call.
-- **今回だけ許可 (Allow this call only):** allow the displayed call once. Another call may ask again.
-- **拒否 (Decline):** decline this operation. Use `/stop` to stop the whole request.
-
-Anyone who can read this conversation can also see the displayed search text or URL. Credentials, secret inputs, executable code, unsupported operations, and oversized details stay off the first card. It explains why and offers **本人限定で確認 (Review privately)** instead. Open this supplemental screen only when needed; use **次へ (Next)** for long details. If the operation cannot be retrieved, decline or use `/stop`, and ask the operator for help if the problem persists. Older Proxies and requests already in progress before the update may retain the **操作内容を確認 (View operation)** private-screen workflow.
-
-Request-scoped permission includes **changed arguments to the same tool**; it is not limited to one website or read-only actions. It lasts up to ten minutes or until the request ends, and expires on stop or additional Steer instructions. It never carries into the next request. `browser_evaluate` and `browser_run_code_unsafe` always require individual confirmation.
-
-Use `/mcp` to inspect and revoke permissions for the latest request. Revocation stops future permission applications; it cannot undo completed operations. If confirmation is uncertain, reopen the list to check the original revocation without sending a new request.
-
-This feature requires an administrator to enable it and configure eligible tools on the Proxy; updating binaries alone does not enable it. Users do not need to edit configuration. If an option is missing, ask your administrator to check the [Gateway installation guide](installation.md) and the Proxy's [user and administrator guide (Japanese)](https://github.com/tanep3/codex-hoshikage-proxy/blob/main/docs/mcp-turn-approval-guide.ja.md). Unsupported or disabled environments retain individual confirmations.
-
-`/cancel` links to the original request. Multiple queued requests are cancelled one at a time, newest first. An active request remains held until the Proxy confirms it has stopped; cancellation does not undo changes already made. If you previously paused the queue with `/stop`, use `/resume` when you want remaining requests to proceed.
+See [Installation](installation.md) for setup and [Operations](operations.md) for service checks.

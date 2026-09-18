@@ -1,5 +1,7 @@
 # Gateway直接接続版：切替・受入テスト
 
+> **切替時の試験記録です。** 未実施・未整備という記述は当時の状態を指します。現在の導入と操作は[導入手順](installation.ja.md)と[ユーザーマニュアル](user-manual.ja.md)を参照してください。
+
 2026-09-18 / Tane Channel Technology
 
 状態：直接接続版を常駐サービスへ試験反映済み。実Discordでの受入は未了で、製品切替の合格判定ではない。[目標要件](requirements-direct-app-server.ja.md)のDA-A01〜DA-A11を、運用とDiscord画面で判定できる形にする。試験場所は利用者が指定済みの[Discordチャンネル](https://discord.com/channels/1547798936167915541/1547877505040654397)。

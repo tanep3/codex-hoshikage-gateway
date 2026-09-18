@@ -2,24 +2,16 @@
 
 [日本語](README.ja.md)
 
-**Talk to Codex from Discord, ask it to do work, and collect the results.**
+**Chat with Codex in Discord, even when you are away from your computer.** Ask it to investigate, create files or images, and continue the conversation in the same place. Approvals, model choices, stopping a task, and recovering a stalled conversation are available in Discord.
 
-This Discord Bot works with [Codex Hoshikage Proxy](https://github.com/tanep3/codex-hoshikage-proxy). Ask questions, request work, choose a model, approve actions, or stop a task without opening a terminal.
+The Gateway runs on your own Linux computer and starts its own Codex App Server. You do **not** need a separate Proxy service, Proxy URL, or Proxy API key. Each text channel or forum post keeps its own conversation and working folder automatically. One Discord server and one authorized user are supported at present. People who can see your channel can also see its conversation, so choose a private channel for private work.
 
-Keep conversations in text channels or individual forum posts. You do not need to register a working directory: the Proxy manages conversation workspaces. Choose whether the Bot responds to every authorized post or only mentions. The initial release is for one authorized user in one Discord server.
+The Gateway can answer every authorized message or only messages that mention the Bot. Generated images are attached to the conversation; `/get` retrieves other files. When a task needs permission, you decide in Discord. The Gateway does not silently rerun an uncertain task.
 
-API v2 lets the Proxy retain fixed versions of artifacts and final replies. The Gateway handles selection and Discord delivery. A delivery failure never triggers an automatic rerun of the AI task.
+- [Install and configure](docs/installation.md) · [日本語](docs/installation.ja.md)
+- [User manual](docs/user-manual.md) · [日本語](docs/user-manual.ja.md)
+- [Operations and recovery](docs/operations.md) · [日本語](docs/operations.ja.md)
 
-Generated PNG images are attached automatically to the conversation when the Proxy supports image registration; no `/get` is needed.
+Built in Rust. Install the Gateway from this checkout with `cargo install --path . --locked`. [Codex Hoshikage Proxy](https://github.com/tanep3/codex-hoshikage-proxy) is a separate project for applications that need a shared HTTP API; this Gateway does not depend on it.
 
-- [Installation](docs/installation.md): create the Discord server and Bot, configure credentials, and install.
-- [User manual](docs/user-manual.md): conversations, models, stopping work, and files.
-- [Implementation status (Japanese)](docs/implementation-status.ja.md): implemented paths and remaining work.
-
-**Requires Proxy API v2.** See [verification status](docs/implementation-status.ja.md) for tested coverage.
-
-Written in Rust. Install with `cargo install --path . --locked`; your existing Cargo installation destination is respected. The Bot interface currently uses Japanese.
-
-[MIT License](LICENSE) — Copyright (c) 2026 Tane Channel Technology
-
-See [Operations guide](docs/operations.md).
+[MIT License](LICENSE) · Copyright © 2026 Tane Channel Technology
