@@ -58,6 +58,10 @@ App Serverの実行数・設定隔離はtransportの単体試験直後に実機�
 
 ハング時の扱いは送信境界で分ける。initialize中の停止はruntimeをreadyにせず、新規Turnの送信を禁止する。Turn開始要求の書込み後に応答が止まれば、到達を推測せず対象依頼をUNKNOWNとして照会・保護する。承認返信後の停止はその承認操作を結果不明として同じ上流要求へ照会し、許可を別IDで送らない。stdout詰まりや通知欠落では影響したTurnを照会し、確定できないものだけUNKNOWNへ置く。いずれもハングした子プロセスをkillして元の依頼を再実行することはしない。
 
+UNKNOWNの占有枠は、後続依頼を黙って待たせる理由にしない。Discord受付は同一会話の未解除UNKNOWNを照会し、後続依頼が未送信で保留されることを本人へ通知する。管理解除はGatewayを停止し、state lockを取得して整合バックアップを作ってから実施する。対象依頼ID・UNKNOWN状態・direct dispatchのUNKNOWN・未解除holdの世代・同一会話に実行中依頼がないことを一つのSQLite transactionで再検証する。holdだけを解除し、UNKNOWN依頼の状態と履歴は保存する。同時に保存済みCodex thread IDを外し、会話継続をNEWへ切り替える。既存のpauseは維持する。管理操作の理由とリスク受容を監査記録へ書き、未送信の待機依頼は再起動後に新しい文脈へ送る。旧UNKNOWNを推測で完了・取消に変えない。
+
+運用者は `direct holds` を稼働中でも読み取り専用で実行し、依頼ID・会話ID・hold世代・未送信件数を確認する。解除時はサービス停止後、`direct abandon --request-id … --generation … --reason … --backup-to … --accept-risk` を実行する。バックアップ先は新規パスのみ許し、整合したDBと保存物のバックアップが成功しなければ解除しない。サービス再起動後の未送信依頼は従来の受付IDのまま処理し、UNKNOWNの旧依頼を再利用しない。
+
 ## 5. 承認と制御
 
 Codex transportは上流の承認要求を `ApprovalRequest { app_server_request_id, thread_id, turn_id, call_id, full_arguments, definition_generation }` のような論理型で渡す。approvalが保存した対象とDiscordの表示証跡を照合し、本人の明示選択を得てからtransportへ返信する。実際の上流形式に存在しない項目を捏造せず、欠ける場合は必要なイベント連結を実証する。

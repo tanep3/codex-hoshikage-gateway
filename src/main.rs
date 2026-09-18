@@ -52,6 +52,8 @@ enum Command {
 #[derive(Subcommand)]
 enum DirectCommand {
     Check,
+    /// List UNKNOWN requests that still hold a direct conversation.
+    Holds,
     Init,
     ArchiveInit {
         #[arg(long)]
@@ -62,6 +64,19 @@ enum DirectCommand {
     Cutover {
         #[arg(long)]
         backup_to: PathBuf,
+    },
+    /// Release an UNKNOWN direct execution's hold after stopping the service.
+    Abandon {
+        #[arg(long)]
+        request_id: String,
+        #[arg(long)]
+        generation: i64,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        backup_to: PathBuf,
+        #[arg(long)]
+        accept_risk: bool,
     },
     Run,
 }
@@ -152,6 +167,35 @@ async fn run(cli: Cli) -> Result<()> {
                 );
                 Ok(())
             }
+            DirectCommand::Holds => {
+                let db = direct_migration::direct_database(&cfg)?;
+                let connection = rusqlite::Connection::open_with_flags(
+                    db,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )?;
+                let mut query = connection.prepare(
+                    "SELECT h.request_id,r.thread_id,h.generation,(SELECT count(*) FROM requests waiting WHERE waiting.thread_id=r.thread_id AND waiting.state='QUEUED') FROM holds h JOIN requests r ON r.id=h.request_id WHERE h.released=0 AND r.state='UNKNOWN' ORDER BY r.updated_at",
+                )?;
+                let holds = query
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, i64>(3)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                if holds.is_empty() {
+                    println!("未解除のUNKNOWN依頼はありません。");
+                }
+                for (request_id, thread_id, generation, queued) in holds {
+                    println!(
+                        "request_id={request_id} conversation={thread_id} generation={generation} waiting={queued}"
+                    );
+                }
+                Ok(())
+            }
             DirectCommand::Init => {
                 let instance = storage::initialize_direct(&cfg)?;
                 println!("直接接続DBを初期化しました。instance_uuid={instance}");
@@ -171,6 +215,27 @@ async fn run(cli: Cli) -> Result<()> {
                 let backup = direct_migration::cutover(&cfg, backup_to)?;
                 println!(
                     "検証済みバックアップを作成して直接接続へ切り替えました。backup_id={backup}"
+                );
+                Ok(())
+            }
+            DirectCommand::Abandon {
+                request_id,
+                generation,
+                reason,
+                backup_to,
+                accept_risk,
+            } => {
+                ensure!(*accept_risk, "explicit --accept-risk required");
+                let _lock = storage::StateLock::acquire(&cfg.storage.state_dir)?;
+                let db = direct_migration::direct_database(&cfg)?;
+                let backup = backup::create(&db, backup_to)?;
+                let (store, _done) = storage::Store::open_direct(&cfg)?;
+                store
+                    .abandon_direct_unknown(request_id.clone(), *generation, reason.clone())
+                    .await?;
+                println!(
+                    "旧依頼のUNKNOWN記録を残して占有枠を解除しました。会話の次の依頼は新しいCodex文脈で開始します。backup_id={}",
+                    backup.backup_id
                 );
                 Ok(())
             }

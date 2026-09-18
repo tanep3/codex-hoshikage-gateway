@@ -166,6 +166,65 @@ async fn direct_send_commit_survives_restart_without_replay() {
 }
 
 #[tokio::test]
+async fn unknown_hold_requires_explicit_abandon_before_next_direct_turn() {
+    let temp = tempfile::tempdir().unwrap();
+    let cfg = common::config(&temp);
+    let (store, _lock) = common::store(&cfg).await;
+    let first = common::queued(&store, &cfg, "102").await;
+    let second = common::queued(&store, &cfg, "103").await;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let intent = store
+        .prepare_direct(first.clone(), "4".into(), workspace, "openai".into())
+        .await
+        .unwrap();
+    store
+        .begin_direct_send(first.clone(), intent)
+        .await
+        .unwrap();
+    store.fence_direct_after_restart().await.unwrap();
+    assert!(store.direct_unknown_blocker("4").await.unwrap());
+    assert!(
+        store
+            .candidates()
+            .await
+            .unwrap()
+            .iter()
+            .all(|r| r.id != second)
+    );
+    assert!(
+        store
+            .abandon_direct_unknown(first.clone(), 1, "operator recovery".into())
+            .await
+            .is_err()
+    );
+    assert!(store.direct_unknown_blocker("4").await.unwrap());
+    store
+        .abandon_direct_unknown(first.clone(), 0, "operator recovery".into())
+        .await
+        .unwrap();
+    assert!(!store.direct_unknown_blocker("4").await.unwrap());
+    assert_eq!(
+        store.request(&first).await.unwrap().state,
+        RequestState::Unknown
+    );
+    assert!(
+        store
+            .candidates()
+            .await
+            .unwrap()
+            .iter()
+            .any(|r| r.id == second)
+    );
+    assert!(
+        store
+            .abandon_direct_unknown(first, 0, "duplicate".into())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn acknowledgement_is_bound_to_the_original_request_and_thread() {
     let temp = tempfile::tempdir().unwrap();
     let cfg = common::config(&temp);

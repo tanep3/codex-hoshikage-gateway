@@ -20,6 +20,87 @@ pub struct DirectDispatch {
 }
 
 impl Store {
+    pub async fn direct_unknown_blocker(&self, discord_thread_id: &str) -> Result<bool> {
+        let thread = discord_thread_id.to_owned();
+        self.call(false, move |connection| {
+            Ok(connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM holds h JOIN requests r ON r.id=h.request_id WHERE r.thread_id=?1 AND r.state='UNKNOWN' AND h.released=0)",
+                [&thread],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+    }
+
+    /// Operator-only recovery after the old runtime has stopped. The caller
+    /// must hold the state lock and create a verified backup first.
+    pub async fn abandon_direct_unknown(
+        &self,
+        request_id: String,
+        expected_generation: i64,
+        reason: String,
+    ) -> Result<()> {
+        ensure!(
+            !reason.trim().is_empty() && reason.len() <= 1024,
+            "recovery reason required (up to 1024 bytes)"
+        );
+        self.call(true, move |connection| {
+            let tx = connection.transaction()?;
+            let (thread, state, send_state): (String, String, String) = tx.query_row(
+                "SELECT r.thread_id,r.state,d.send_state FROM requests r JOIN direct_dispatches d ON d.request_id=r.id WHERE r.id=?1",
+                [&request_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            ensure!(state == "UNKNOWN" && send_state == "UNKNOWN", "request is not an unknown direct execution");
+            let generation: i64 = tx.query_row(
+                "SELECT generation FROM holds WHERE request_id=?1 AND released=0",
+                [&request_id],
+                |row| row.get(0),
+            )?;
+            ensure!(generation == expected_generation, "unknown hold generation changed");
+            let active: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM requests WHERE thread_id=?1 AND state IN ('SENDING','RUNNING','APPROVAL_REQUIRED','CANCEL_REQUESTED'))",
+                [&thread],
+                |row| row.get(0),
+            )?;
+            ensure!(!active, "conversation still has an active direct request");
+            let another_hold: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM holds h JOIN requests r ON r.id=h.request_id WHERE r.thread_id=?1 AND h.request_id!=?2 AND h.released=0)",
+                params![thread, request_id],
+                |row| row.get(0),
+            )?;
+            ensure!(!another_hold, "conversation has another unreleased hold");
+            ensure!(
+                tx.execute(
+                    "UPDATE holds SET released=1,generation=generation+1 WHERE request_id=?1 AND released=0 AND generation=?2",
+                    params![request_id, expected_generation],
+                )? == 1,
+                "unknown hold changed before release"
+            );
+            ensure!(
+                tx.execute(
+                    "UPDATE direct_conversations SET codex_thread_id=NULL WHERE discord_thread_id=?1",
+                    [&thread],
+                )? == 1,
+                "direct conversation binding missing"
+            );
+            ensure!(
+                tx.execute(
+                    "UPDATE conversations SET continuation='NEW' WHERE thread_id=?1",
+                    [&thread],
+                )? == 1,
+                "conversation missing"
+            );
+            tx.execute(
+                "INSERT INTO admin_audit(id,uid,kind,target_id,reason,risk_accepted,created_at) VALUES(?1,?2,'direct_unknown_abandon',?3,?4,1,?5)",
+                params![domain::id(), unsafe { libc::geteuid() }, request_id, reason, domain::now_ms()],
+            )?;
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+    }
+
     pub async fn bound_direct_workspace(&self, discord_thread_id: &str) -> Result<Option<PathBuf>> {
         let thread = discord_thread_id.to_owned();
         self.call(false, move |connection| {

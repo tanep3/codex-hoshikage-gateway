@@ -284,6 +284,8 @@ impl DirectCoordinator {
                                 let conversation = this.app.store.conversation(&request.thread_id).await?;
                                 if conversation.paused {
                                     this.notice(&id, &request.thread_id, "受け付けました。待機列は停止中です。/resume で再開、/cancel でこの待機依頼を取り消せます。").await?;
+                                } else if this.app.store.direct_unknown_blocker(&request.thread_id).await? {
+                                    this.notice(&id, &request.thread_id, "前の作業の結果を確認できず、この依頼はまだCodexへ送っていません。運用者による復旧が必要です。/status で状態を確認してください。依頼を取り消す場合は /cancel を使えます。").await?;
                                 }
                             }
                             Ok(DirectAdmission::Ignored | DirectAdmission::Duplicate) => {}
