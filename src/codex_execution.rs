@@ -16,6 +16,7 @@ pub struct ExecutionOptions {
     pub model_provider: String,
     pub sandbox: String,
     pub approval_policy: String,
+    pub network_access: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,6 +30,8 @@ pub struct TurnSnapshot {
     pub identity: TurnIdentity,
     pub status: String,
     pub final_text: Option<String>,
+    pub items_view_full: bool,
+    pub items: Vec<Value>,
 }
 
 impl CodexExecution {
@@ -95,6 +98,15 @@ impl CodexExecution {
         if input.is_empty() {
             return Err(TransportError::NotSent("empty turn input".into()));
         }
+        let sandbox_policy = match options.sandbox.as_str() {
+            "workspace-write" => json!({
+                "type": "workspaceWrite",
+                "writableRoots": [options.cwd],
+                "networkAccess": options.network_access
+            }),
+            "read-only" => json!({"type":"readOnly","networkAccess":options.network_access}),
+            _ => return Err(TransportError::NotSent("invalid sandbox policy".into())),
+        };
         let result = self
             .transport
             .request(
@@ -105,6 +117,7 @@ impl CodexExecution {
                     "model":options.model,
                     "input":input,
                     "approvalPolicy":options.approval_policy,
+                    "sandboxPolicy":sandbox_policy,
                 }),
             )
             .await?;
@@ -146,18 +159,21 @@ impl CodexExecution {
         let status = turn["status"]
             .as_str()
             .ok_or_else(|| TransportError::Protocol("turn status absent".into()))?;
-        let final_text = turn["items"].as_array().and_then(|items| {
-            items.iter().rev().find_map(|item| {
-                (item["type"] == "agentMessage" && item["phase"] != "commentary")
-                    .then(|| item["text"].as_str())
-                    .flatten()
-                    .map(str::to_owned)
-            })
+        let items = turn["items"]
+            .as_array()
+            .ok_or_else(|| TransportError::Protocol("turn items absent".into()))?;
+        let final_text = items.iter().rev().find_map(|item| {
+            (item["type"] == "agentMessage" && item["phase"] != "commentary")
+                .then(|| item["text"].as_str())
+                .flatten()
+                .map(str::to_owned)
         });
         Ok(TurnSnapshot {
             identity: identity.clone(),
             status: status.into(),
             final_text,
+            items_view_full: turn["itemsView"] == "full",
+            items: items.clone(),
         })
     }
 

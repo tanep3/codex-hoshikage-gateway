@@ -2,7 +2,7 @@
 
 版0.2 / 2026-09-18 / Tane Channel Technology
 
-状態：目標構成の内部設計案。[目標要件](requirements-direct-app-server.ja.md)に対応。具体schema・Codex設定・旧データの移行方式は現行コードと実データの調査後に確定する。現行常駐サービスは未変更。
+状態：目標構成の内部設計案。[目標要件](requirements-direct-app-server.ja.md)に対応。切替時の新規文脈とDB実行方式の境界を確定。現行常駐サービスは未変更。
 
 ## 1. 配置と依存方向
 
@@ -60,6 +60,10 @@ App Serverの実行数・設定隔離はtransportの単体試験直後に実機�
 
 Codex transportは上流の承認要求を `ApprovalRequest { app_server_request_id, thread_id, turn_id, call_id, full_arguments, definition_generation }` のような論理型で渡す。approvalが保存した対象とDiscordの表示証跡を照合し、本人の明示選択を得てからtransportへ返信する。実際の上流形式に存在しない項目を捏造せず、欠ける場合は必要なイベント連結を実証する。
 
+実装では上流要求IDを文字列／数値のまま保持し、現在のRunのthread／turnと照合する。MCP elicitationで上流にturn IDが無い場合のみ、Run専属子プロセスで一致したthreadへ紐付ける。要求本文とfingerprintは承認の本人向け表示へ渡すが、通常の公開投稿やログへ生の引数を出さない。単発のコマンド／ファイル変更承認は、上流が提示した選択肢だけを返信する。MCP入力・権限要求・動的ツールには別の返信schemaを適用し、単発承認の`decision`を流用しない。
+
+`direct_interactions`はGateway依頼ID、上流RPC ID、method、thread／turn、表示fingerprint、提示された判断候補、返信状態を保存する。判断を送る前に`PENDING→SENDING`をcommitし、送信結果が不明なら`UNKNOWN`として再送しない。Gateway再起動で旧子プロセスに紐付く`PENDING`は`UNAVAILABLE`、`SENDING`／未解決`SENT`は`UNKNOWN`へ移し、同じ上流RPC IDへの自動再返信を禁止する。上流の`serverRequest/resolved`で同じ要求を照合できた場合だけ解決へ訂正する。完全な実引数は現状メモリ上の表示用データであり、再起動後に古い承認を再表示・再許可する根拠にはしない。
+
 拒否は表示取得に依存しない。Steerは新しい利用者入力世代を作り、以前の依頼中許可を失効させてから上流へ送る。/stopは待機列のpauseとactive Turnへの中断を区別する。/cancelは現行仕様どおり、直近待機1件、なければactive依頼を対象とし、queue全体をpauseしない。返信送信結果不明時は同一上流要求を調べ、新しい承認として再送しない。
 
 意味ベース委任はapprovalへ後付けできる判断providerの一つとする。標準の手動承認を動かしてから要件を再評価する。LLM、対象証拠、委任範囲、サイト固有知識をCodex transportやDiscord adapterへ組み込まない。
@@ -76,7 +80,11 @@ Discordへ再配信する際は、依頼の会話IDと送信先を照合し、`d
 
 ## 7. 設定・保存場所・運用
 
-Gatewayの設定正本は `~/.config/codex-hoshikage-gateway/config.toml`。現在の `[proxy]`を最終的に削除し、専属Codexコマンド、Codex home、作業先・権限、保存容量・保持、モデルの設定へ移す。新項目の名前と既定値はconfig migrationを設計してから確定する。設定検証は子プロセス起動前に行い、state_dirや認証先の稼働中切替を許さない。
+Gatewayの設定正本は `~/.config/codex-hoshikage-gateway/config.toml`。現在の `[proxy]`を最終的に削除し、専属Codexコマンド、Codex home、作業先・権限、保存容量・保持、モデルの設定へ移す。既存設定からの切替手順は、保存済み依頼の隔離方法を確認して確定する。設定検証は子プロセス起動前に行い、state_dirや認証先の稼働中切替を許さない。
+
+直接接続用の設定型は既存Proxy設定型と分離する。`[codex]`には絶対パスの`command`と`home`を置き、Gatewayが`app-server`をstdioで起動する。`default_model`と`model_provider`、`sandbox`、`approval_policy`を明示し、初期値は`workspace-write`／`on-request`、`network_access`はfalseとする。`thread/start`の`sandbox`と`approvalPolicy`はこのCLIが受け付けるkebab-case、`turn/start`の`sandboxPolicy.type`はcamelCaseへ変換する。Turn開始時にはworkspaceを明示したsandbox policyを渡し、Codex home側の設定とも整合を検証する。Codex homeはGateway専属とし、認証・MCP設定をそこへ配置する。設定ファイルや認証を旧Proxyの領域から暗黙にコピーしない。移行中は旧設定の読取りを維持するが、直接接続の設定に`[proxy]`を要求しない。新旧のどちらを起動するかは設定型で一意にし、一つの依頼を両方へ送らない。
+
+プロトコルの起動順序と設定値は[Codex App Server公式資料](https://developers.openai.com/codex/app-server/)と[Codex設定資料](https://developers.openai.com/codex/config-reference/)を基準にし、稼働バイナリのschemaと実機試験で照合する。Gatewayの`[codex]`はGateway専用の運用設定であり、Codex自身の`$CODEX_HOME/config.toml`とは別ファイルである。
 
 通常の会話ワークはGatewayの `state_dir/workspaces/<Discord会話ID>` に自動作成する。IDは数字として検証し、実パス・所有者・inodeを保存時と送信直前に照合する。Discordからcwdを入力させない。共有ワークを利用する機能を将来追加する場合も、明示操作と別の排他・認可設計なしに既定ワークを共有しない。
 
@@ -92,7 +100,7 @@ GatewayのSQLiteと保存ファイルは管理対象を一緒にバックアッ�
 2. 模擬App Serverによるtransport／承認／中断／ハングの試験を作り、専属子プロセスの起動・停止・異常終了時の回収を隔離環境で確認する。
 3. その直後に実App Serverで2並列Runと設定・承認の隔離を試験し、1子プロセスか複数子プロセスかを確定する。
 4. 実行・状態管理、回答／成果物保存を段階的に内部呼出しへ置換する。現行常駐サービスの設定は変えず、試験用state_dirとCodex homeを使用する。
-5. 旧Proxy DB・保存物の実データに対する移行可能性を確認する。旧実行の未終端・UNKNOWN、期限付き保存物、Discordの既存配信記録を区別し、切替方法を決める。
+5. 旧Gateway DBをオフラインで切り替える。旧サービスが状態ディレクトリのlockを保持していないことを確認し、整合したバックアップを作成・検証する。依頼・受付・成果物配信・制御に未終端状態があれば切替を拒否する。DB内の実行方式を`proxy`から`direct`へ一度だけ変更し、旧サービスからの再オープンを拒否する。Discord会話IDと過去の依頼・配信記録は残し、会話のProxy継続IDだけ消して次の発言を新しいCodex文脈で開始する。pause状態はそのまま保持し、本人の意図しない待機再開をしない。
 6. 英日README・導入・利用者マニュアルと設定例を新構成へ改める。Proxyが必須と書かれたまま新方式を配布しない。
 7. 実Codex・実Discordで主要受入を通してから、常駐Gatewayの設定とバイナリを切り替える。旧Proxyサービス自体は他クライアントのために維持できる。
 

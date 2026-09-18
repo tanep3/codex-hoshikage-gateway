@@ -9,10 +9,13 @@ use std::{path::PathBuf, time::Duration};
 async fn typed_execution_preserves_thread_and_turn_identity() {
     let transport = CodexTransport::launch(&LaunchConfig {
         command: "python3".into(),
-        args: vec![format!(
-            "{}/tests/fixtures/mock_app_server.py",
-            env!("CARGO_MANIFEST_DIR")
-        )],
+        args: vec![
+            format!(
+                "{}/tests/fixtures/mock_app_server.py",
+                env!("CARGO_MANIFEST_DIR")
+            ),
+            "--enforce-sandbox".into(),
+        ],
         codex_home: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
         initialize_timeout: Duration::from_secs(2),
         request_timeout: Duration::from_secs(2),
@@ -27,6 +30,7 @@ async fn typed_execution_preserves_thread_and_turn_identity() {
         model_provider: "openai".into(),
         sandbox: "workspace-write".into(),
         approval_policy: "on-request".into(),
+        network_access: false,
     };
     let thread = execution.start_thread(&options).await.unwrap();
     execution.resume_thread(&thread, &options).await.unwrap();

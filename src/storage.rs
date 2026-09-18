@@ -1,5 +1,6 @@
 use crate::{
     config::{Config, Workspace},
+    direct_config::DirectConfig,
     domain::{self, Conversation, Request, RequestState},
 };
 use anyhow::{Context, Result, ensure};
@@ -15,7 +16,9 @@ use std::{
 };
 use tokio::sync::{mpsc, oneshot};
 
-pub const SCHEMA: i64 = 10;
+pub const SCHEMA: i64 = 12;
+pub const MIGRATION_V12: &str = include_str!("../migrations/012_runtime_mode.sql");
+pub const MIGRATION_V11: &str = include_str!("../migrations/011_direct_approvals.sql");
 pub const MIGRATION_V10: &str = include_str!("../migrations/010_direct_app_server.sql");
 pub const MIGRATION_V9: &str = include_str!("../migrations/009_mcp_v06.sql");
 pub const MIGRATION_V8: &str = include_str!("../migrations/008_mcp_inline.sql");
@@ -120,12 +123,51 @@ pub fn initialize(cfg: &Config) -> Result<String> {
     c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
     Ok(instance)
 }
-fn migrate_v2(c: &mut Connection, quarantine: bool) -> Result<()> {
+pub fn initialize_direct(cfg: &DirectConfig) -> Result<String> {
+    cfg.validate()?;
+    let _lock = StateLock::acquire(&cfg.storage.state_dir)?;
+    let path = cfg.storage.state_dir.join("gateway.sqlite3");
+    ensure!(
+        !path.exists(),
+        "database already exists; refusing initialization"
+    );
+    let instance = domain::id();
+    let _file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&path)?;
+    let mut connection = Connection::open(&path)?;
+    configure(&connection)?;
+    let transaction = connection.transaction()?;
+    transaction.execute_batch(MIGRATION)?;
+    transaction.execute(
+        "INSERT INTO schema_meta(singleton,schema_version,instance_uuid,fixed_digest) VALUES(1,1,?1,?2)",
+        params![instance,cfg.fixed_digest()],
+    )?;
+    transaction.execute(
+        "INSERT INTO schema_migrations VALUES(1,?1,?2)",
+        params![domain::digest(MIGRATION.as_bytes()), domain::now_ms()],
+    )?;
+    transaction.execute(
+        "INSERT INTO projects VALUES(?1,'direct-default','Gateway Codex runtime','',0,0,'ACTIVE',?2)",
+        params![PROXY_SCOPE,cfg.default_model],
+    )?;
+    transaction.commit()?;
+    migrate_v2(&mut connection, false)?;
+    connection.execute(
+        "UPDATE runtime_mode SET mode='direct',changed_at=?1 WHERE singleton=1",
+        [domain::now_ms()],
+    )?;
+    connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+    Ok(instance)
+}
+pub(crate) fn migrate_v2(c: &mut Connection, quarantine: bool) -> Result<()> {
     let version: i64 = c.query_row("SELECT schema_version FROM schema_meta", [], |r| r.get(0))?;
     if version == SCHEMA {
         return Ok(());
     }
-    ensure!((1..=9).contains(&version), "unsupported schema migration");
+    ensure!((1..=11).contains(&version), "unsupported schema migration");
     if version == 1 {
         let tx = c.transaction()?;
         tx.execute_batch(MIGRATION_V2)?;
@@ -154,6 +196,8 @@ fn migrate_v2(c: &mut Connection, quarantine: bool) -> Result<()> {
         (8, MIGRATION_V8),
         (9, MIGRATION_V9),
         (10, MIGRATION_V10),
+        (11, MIGRATION_V11),
+        (12, MIGRATION_V12),
     ] {
         if version >= target {
             continue;
@@ -169,7 +213,7 @@ fn migrate_v2(c: &mut Connection, quarantine: bool) -> Result<()> {
     }
     Ok(())
 }
-fn configure(c: &Connection) -> Result<()> {
+pub(crate) fn configure(c: &Connection) -> Result<()> {
     c.busy_timeout(Duration::from_secs(2))?;
     c.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
     ensure!(
@@ -208,6 +252,8 @@ pub fn validate_database(path: &Path) -> Result<(i64, String)> {
         (8, MIGRATION_V8),
         (9, MIGRATION_V9),
         (10, MIGRATION_V10),
+        (11, MIGRATION_V11),
+        (12, MIGRATION_V12),
     ] {
         if v < version {
             continue;
@@ -254,6 +300,12 @@ pub struct Store {
     pub path: PathBuf,
 }
 impl Store {
+    pub fn open_direct(cfg: &DirectConfig) -> Result<(Self, oneshot::Receiver<()>)> {
+        let path = crate::direct_migration::direct_database(cfg)?;
+        let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        configure(&connection)?;
+        Self::start_worker(path, connection)
+    }
     pub fn open(cfg: &Config) -> Result<(Self, oneshot::Receiver<()>)> {
         Self::open_mode(cfg, false)
     }
@@ -276,8 +328,16 @@ impl Store {
         cfg.validate()?;
         let _ = recovery;
         configure(&c)?;
-        ensure_proxy_scope(&mut c, cfg.registration_model().unwrap_or(""), false)?;
         migrate_v2(&mut c, true)?;
+        let mode: String =
+            c.query_row("SELECT mode FROM runtime_mode WHERE singleton=1", [], |r| {
+                r.get(0)
+            })?;
+        ensure!(mode == "proxy", "database belongs to direct Codex runtime");
+        ensure_proxy_scope(&mut c, cfg.registration_model().unwrap_or(""), false)?;
+        Self::start_worker(path, c)
+    }
+    fn start_worker(path: PathBuf, mut c: Connection) -> Result<(Self, oneshot::Receiver<()>)> {
         let (urgent, mut ur) = mpsc::channel::<Job>(64);
         let (normal, mut nr) = mpsc::channel::<Job>(128);
         let (finished, done) = oneshot::channel();

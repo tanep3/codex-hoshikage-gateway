@@ -4,12 +4,13 @@
 use crate::{
     codex_execution::{CodexExecution, ExecutionOptions, TurnIdentity, TurnSnapshot},
     codex_transport::{CodexRuntimePool, Event, RuntimeLease, TransportError},
+    direct_approval::{DirectInteraction, ManualDecision},
     direct_content::DirectContent,
     direct_workspace::ensure_conversation_workspace,
     storage::Store,
 };
 use anyhow::{Context, Result, ensure};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{
     path::PathBuf,
     sync::atomic::{AtomicBool, Ordering},
@@ -61,6 +62,60 @@ impl Drop for UnknownOnDrop {
 }
 
 impl DirectRunService {
+    /// Persist the exact App Server request before any approval card is shown.
+    pub async fn register_interaction(
+        &self,
+        run: &ActiveRun,
+        event: &Event,
+    ) -> Result<Option<(String, DirectInteraction)>> {
+        let Some(interaction) = run.interaction(event)? else {
+            return Ok(None);
+        };
+        let id = self
+            .store
+            .record_direct_interaction(run.request_id.clone(), interaction.clone())
+            .await?;
+        Ok(Some((id, interaction)))
+    }
+
+    /// The action is bound to the active Run, displayed fingerprint and one
+    /// upstream RPC request. Even a definite write failure stays fenced after
+    /// the durable SENDING commit.
+    pub async fn reply_manual(
+        &self,
+        run: &ActiveRun,
+        interaction_id: String,
+        expected_fingerprint: String,
+        decision: ManualDecision,
+    ) -> Result<()> {
+        let rpc_id = self
+            .store
+            .begin_direct_approval_reply(
+                run.request_id.clone(),
+                interaction_id.clone(),
+                expected_fingerprint,
+                decision,
+            )
+            .await?;
+        let wire_decision = match decision {
+            ManualDecision::AcceptOnce => "accept",
+            ManualDecision::Decline => "decline",
+            ManualDecision::Cancel => "cancel",
+        };
+        if let Err(error) = run
+            .transport()
+            .respond(rpc_id, json!({"decision":wire_decision}))
+            .await
+        {
+            let _ = self
+                .store
+                .mark_direct_approval_unknown(interaction_id)
+                .await;
+            return Err(error.into());
+        }
+        self.store.mark_direct_approval_sent(interaction_id).await
+    }
+
     /// The caller owns admission and authorizes this Discord conversation.
     /// The send-intent commit precedes thread/start or turn/start. Any uncertain
     /// outcome is fenced in SQLite, never transparently retried.
@@ -213,6 +268,9 @@ impl DirectRunService {
             )
             .await?;
         run._on_drop.disarm();
+        self.store
+            .close_direct_approvals(run.request_id.clone())
+            .await?;
         Ok(snapshot)
     }
 }
@@ -223,6 +281,9 @@ impl ActiveRun {
     }
     pub async fn recv(&mut self) -> Result<Event, broadcast::error::RecvError> {
         self.events.recv().await
+    }
+    pub fn interaction(&self, event: &Event) -> Result<Option<DirectInteraction>> {
+        DirectInteraction::from_event(event, &self.identity)
     }
     pub async fn interrupt(&self) -> Result<(), TransportError> {
         CodexExecution::new(self.lease.transport().clone())

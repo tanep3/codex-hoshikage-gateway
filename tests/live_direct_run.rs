@@ -39,7 +39,7 @@ async fn real_codex_answer_is_saved_without_proxy() {
     };
     let mut run=service.start(request.clone(),"4".into(),ExecutionOptions {
         cwd:PathBuf::new(),model:"gpt-5.6-luna".into(),model_provider:"openai".into(),
-        sandbox:"workspace-write".into(),approval_policy:"never".into(),
+        sandbox:"workspace-write".into(),approval_policy:"on-request".into(),network_access:false,
     },vec![json!({"type":"text","text":"Reply with exactly DIRECT_GATEWAY_OK. Do not call tools."})]).await.unwrap();
     tokio::time::timeout(Duration::from_secs(150), async {
         loop {
@@ -65,6 +65,7 @@ async fn real_codex_answer_is_saved_without_proxy() {
     .unwrap();
     let snapshot = service.confirm_terminal(&run).await.unwrap();
     assert_eq!(snapshot.status, "completed");
+    assert!(snapshot.items_view_full);
     assert!(
         snapshot
             .final_text

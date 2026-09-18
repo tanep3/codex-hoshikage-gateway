@@ -64,8 +64,14 @@ impl Store {
                 params![request_id,discord_thread_id], |r| r.get(0),
             ).optional()?.unwrap_or(false);
             ensure!(eligible, "request is not a fresh direct-mode candidate");
-            ensure!(!tx.prepare("SELECT 1 FROM proxy_conversations WHERE thread_id=?1 AND send_started!=0")?.exists([&discord_thread_id])?, "legacy Proxy conversation has an execution boundary");
-            ensure!(!tx.prepare("SELECT 1 FROM requests r WHERE r.thread_id=?1 AND (r.response_id IS NOT NULL OR r.client_request_id IS NOT NULL OR (r.dispatch_started_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM direct_dispatches d WHERE d.request_id=r.id)))")?.exists([&discord_thread_id])?, "legacy execution requires explicit migration before direct use");
+            let mode: String = tx.query_row("SELECT mode FROM runtime_mode WHERE singleton=1", [], |r| r.get(0))?;
+            if mode != "direct" {
+                // Compatibility while the legacy daemon still owns execution.
+                // The direct-mode handover is explicit and resets continuation
+                // pointers; no Proxy execution record becomes a local Turn.
+                ensure!(!tx.prepare("SELECT 1 FROM proxy_conversations WHERE thread_id=?1 AND send_started!=0")?.exists([&discord_thread_id])?, "legacy Proxy conversation has an execution boundary");
+                ensure!(!tx.prepare("SELECT 1 FROM requests r WHERE r.thread_id=?1 AND (r.response_id IS NOT NULL OR r.client_request_id IS NOT NULL OR (r.dispatch_started_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM direct_dispatches d WHERE d.request_id=r.id)))")?.exists([&discord_thread_id])?, "legacy execution requires explicit migration before direct use");
+            }
             tx.execute(
                 "INSERT OR IGNORE INTO direct_conversations(discord_thread_id,workspace_path,workspace_dev,workspace_ino,model_provider,created_at) VALUES(?1,?2,?3,?4,?5,?6)",
                 params![discord_thread_id,workspace,dev,ino,model_provider,domain::now_ms()],
