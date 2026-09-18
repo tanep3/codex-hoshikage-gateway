@@ -225,6 +225,43 @@ async fn unknown_hold_requires_explicit_abandon_before_next_direct_turn() {
 }
 
 #[tokio::test]
+async fn stop_pauses_an_unknown_run_and_cancel_removes_its_unsent_followup() {
+    let temp = tempfile::tempdir().unwrap();
+    let cfg = common::config(&temp);
+    let (store, _lock) = common::store(&cfg).await;
+    let first = common::queued(&store, &cfg, "104").await;
+    let second = common::queued(&store, &cfg, "105").await;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let intent = store
+        .prepare_direct(first.clone(), "4".into(), workspace, "openai".into())
+        .await
+        .unwrap();
+    store
+        .begin_direct_send(first.clone(), intent)
+        .await
+        .unwrap();
+    store.fence_direct_after_restart().await.unwrap();
+    let target = store.stop("stop-1".into(), "4".into()).await.unwrap();
+    assert_eq!(target.unwrap().id, first);
+    assert!(store.conversation("4").await.unwrap().paused);
+    assert_eq!(
+        store.request(&first).await.unwrap().state,
+        RequestState::Unknown
+    );
+    let (decision, target) = store
+        .cancel_latest("cancel-1".into(), "4".into())
+        .await
+        .unwrap();
+    assert_eq!(decision, "waiting");
+    assert_eq!(target.as_deref(), Some(second.as_str()));
+    assert_eq!(
+        store.request(&second).await.unwrap().state,
+        RequestState::Cancelled
+    );
+}
+
+#[tokio::test]
 async fn acknowledgement_is_bound_to_the_original_request_and_thread() {
     let temp = tempfile::tempdir().unwrap();
     let cfg = common::config(&temp);

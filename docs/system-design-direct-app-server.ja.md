@@ -62,6 +62,8 @@ UNKNOWNの占有枠は、後続依頼を黙って待たせる理由にしない�
 
 運用者は `direct holds` を稼働中でも読み取り専用で実行し、依頼ID・会話ID・hold世代・未送信件数を確認する。解除時はサービス停止後、`direct abandon --request-id … --generation … --reason … --backup-to … --accept-risk` を実行する。バックアップ先は新規パスのみ許し、整合したDBと保存物のバックアップが成功しなければ解除しない。サービス再起動後の未送信依頼は従来の受付IDのまま処理し、UNKNOWNの旧依頼を再利用しない。
 
+Discordの `/stop`／`/cancel` はRun actorの送信チャンネルが閉じていた場合、同じ操作IDでStore側の待機列停止／未送信取消へフォールバックする。送信済みか不明な制御を新しいIDで再送しない。`/stop` の応答では待機列を停止できた事実と、旧Turnへのinterruptが確認できない事実を分離する。結果取得の再試行エラーは理由を内部ログへ残し、利用者には「AIの実行状態」と「回答の取得状態」を別々に案内する。
+
 ## 5. 承認と制御
 
 Codex transportは上流の承認要求を `ApprovalRequest { app_server_request_id, thread_id, turn_id, call_id, full_arguments, definition_generation }` のような論理型で渡す。approvalが保存した対象とDiscordの表示証跡を照合し、本人の明示選択を得てからtransportへ返信する。実際の上流形式に存在しない項目を捏造せず、欠ける場合は必要なイベント連結を実証する。

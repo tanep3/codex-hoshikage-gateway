@@ -75,7 +75,7 @@ pub enum RunEvent {
     UnsupportedApproval,
     Terminal(DirectDeliveryResult),
     DeliveryPending,
-    ResultUnknown,
+    ResultUnknown(&'static str),
 }
 
 pub struct RunActor {
@@ -125,6 +125,7 @@ async fn serve(
     let mut run_grants = HashMap::<(String, String), RunGrant>::new();
     let mut input_generation = 0_u64;
     let mut terminal_seen = None::<Instant>;
+    let mut terminal_error_logged = false;
     let mut ticker = tokio::time::interval(Duration::from_secs(5));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -240,7 +241,7 @@ async fn serve(
                                     if app.runs.reply_mcp_tool(&run,id.clone(),operation,ManualDecision::AcceptOnce,Some(audit)).await.is_err() {
                                         run_grants.clear();
                                         app.store.mark_direct_unknown(run.request_id.clone(),"run_grant_reply_unknown".into()).await?;
-                                        emit(&events,RunEvent::ResultUnknown)?;
+                                        emit(&events,RunEvent::ResultUnknown("run_grant_reply_unknown"))?;
                                         return Ok(());
                                     }
                                 } else if seen_approvals.insert(id.clone()) {
@@ -250,7 +251,7 @@ async fn serve(
                             None=>{
                                 if let Err(error)=run.transport().reject(rpc_id,-32601,"unsupported App Server request").await {
                                     app.store.mark_direct_unknown(run.request_id.clone(),"unsupported_request_reply_unknown".into()).await?;
-                                    emit(&events,RunEvent::ResultUnknown)?;
+                                    emit(&events,RunEvent::ResultUnknown("unsupported_request_reply_unknown"))?;
                                     return Err(error.into());
                                 }
                                 emit(&events,RunEvent::UnsupportedApproval)?;
@@ -293,18 +294,18 @@ async fn serve(
                     }
                     Ok(Event::Closed(_))|Err(tokio::sync::broadcast::error::RecvError::Closed)=>{
                         app.store.mark_direct_unknown(run.request_id.clone(),"runtime_closed".into()).await?;
-                        emit(&events,RunEvent::ResultUnknown)?;
+                        emit(&events,RunEvent::ResultUnknown("runtime_closed"))?;
                         return Ok(());
                     }
                     Ok(Event::ProtocolError(_))|Ok(Event::InvalidServerRequest{..})=>{
                         app.store.mark_direct_unknown(run.request_id.clone(),"runtime_protocol_error".into()).await?;
-                        emit(&events,RunEvent::ResultUnknown)?;
+                        emit(&events,RunEvent::ResultUnknown("runtime_protocol_error"))?;
                         return Ok(());
                     }
                     Ok(Event::Notification{method,params}) if method=="turn/completed"=>{
                         ensure!(params["threadId"]==run.identity.thread_id && params["turn"]["id"]==run.identity.turn_id,"another turn completed on this child");
                         terminal_seen.get_or_insert_with(Instant::now);
-                        if let Some(outcome)=finish_if_ready(&app,&run).await? {
+                        if let Some(outcome)=finish_if_ready(&app,&run,&mut terminal_error_logged).await? {
                             emit(&events,outcome)?;
                             return Ok(());
                         }
@@ -320,19 +321,19 @@ async fn serve(
                 if let Ok(Ok(snapshot))=tokio::time::timeout(Duration::from_secs(2),execution.read_turn(&run.identity)).await {
                     if matches!(snapshot.status.as_str(),"completed"|"failed"|"interrupted") {
                         terminal_seen.get_or_insert_with(Instant::now);
-                        if let Some(outcome)=finish_if_ready(&app,&run).await? {
+                        if let Some(outcome)=finish_if_ready(&app,&run,&mut terminal_error_logged).await? {
                             emit(&events,outcome)?;
                             return Ok(());
                         }
                     }
                 } else if run.transport().is_closed() {
                     app.store.mark_direct_unknown(run.request_id.clone(),"runtime_closed".into()).await?;
-                    emit(&events,RunEvent::ResultUnknown)?;
+                    emit(&events,RunEvent::ResultUnknown("runtime_closed"))?;
                     return Ok(());
                 }
                 if terminal_seen.is_some_and(|seen|seen.elapsed()>Duration::from_secs(60)) {
                     app.store.mark_direct_unknown(run.request_id.clone(),"terminal_content_unavailable".into()).await?;
-                    emit(&events,RunEvent::ResultUnknown)?;
+                    emit(&events,RunEvent::ResultUnknown("terminal_content_unavailable"))?;
                     return Ok(());
                 }
             }
@@ -346,10 +347,18 @@ fn emit(events: &mpsc::Sender<RunEvent>, event: RunEvent) -> Result<()> {
         .map_err(|_| anyhow::anyhow!("run event receiver unavailable or full"))
 }
 
-async fn finish_if_ready(app: &DirectApplication, run: &ActiveRun) -> Result<Option<RunEvent>> {
+async fn finish_if_ready(
+    app: &DirectApplication,
+    run: &ActiveRun,
+    error_logged: &mut bool,
+) -> Result<Option<RunEvent>> {
     match app.finish_and_deliver(run).await {
         Ok(result) => Ok(Some(RunEvent::Terminal(result))),
-        Err(_) => {
+        Err(error) => {
+            if !*error_logged {
+                tracing::warn!(event="direct_terminal_confirmation_pending",request_id=%run.request_id,error=%error);
+                *error_logged = true;
+            }
             let state = app.store.request(&run.request_id).await?.state;
             if matches!(
                 state,

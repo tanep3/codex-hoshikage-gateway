@@ -441,8 +441,13 @@ impl DirectCoordinator {
                     self.notice(request_id,&thread,"回答は保存されましたが、Discordへの配信を確認できません。/status で状態を確認してください。AIは再実行しません。").await?;
                     break;
                 }
-                RunEvent::ResultUnknown => {
-                    self.notice(request_id,&thread,"作業の終了を確認できません。/status で状態を確認してください。AIは再実行しません。").await?;
+                RunEvent::ResultUnknown(reason) => {
+                    let message = if reason == "terminal_content_unavailable" {
+                        "Codexの作業終了は確認できましたが、回答や成果物の取得を確定できません。新しい依頼は保留します。/status で状態を確認し、運用者に復旧を依頼してください。AIは再実行していません。"
+                    } else {
+                        "作業の状態を確認できず、新しい依頼は保留します。/status で確認し、必要なら /stop で待機列を止めてください。運用者による復旧が必要です。AIは再実行していません。"
+                    };
+                    self.notice(request_id,&thread,message).await?;
                     break;
                 }
             }
@@ -915,6 +920,7 @@ impl DirectCoordinator {
             }
             "cancel" | "stop" => {
                 let active = self.active.lock().await.get(thread).cloned();
+                let mut actor_closed = false;
                 let outcome = if let Some(active) = active {
                     let (reply, receiver) = oneshot::channel();
                     let command = if name == "cancel" {
@@ -930,14 +936,44 @@ impl DirectCoordinator {
                             reply,
                         }
                     };
-                    tokio::time::timeout(Duration::from_secs(5), active.commands.send(command))
-                        .await??;
-                    tokio::time::timeout(Duration::from_secs(20), receiver).await???
+                    match tokio::time::timeout(
+                        Duration::from_secs(5),
+                        active.commands.send(command),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {
+                            match tokio::time::timeout(Duration::from_secs(20), receiver).await {
+                                Ok(Ok(result)) => result?,
+                                Ok(Err(_)) => {
+                                    actor_closed = true;
+                                    if name == "cancel" {
+                                        self.app.cancel(id, thread, None).await?
+                                    } else {
+                                        self.app.stop(id, thread, None).await?
+                                    }
+                                }
+                                Err(_) => anyhow::bail!("direct control response timed out"),
+                            }
+                        }
+                        Ok(Err(_)) => {
+                            actor_closed = true;
+                            if name == "cancel" {
+                                self.app.cancel(id, thread, None).await?
+                            } else {
+                                self.app.stop(id, thread, None).await?
+                            }
+                        }
+                        Err(_) => anyhow::bail!("direct control send timed out"),
+                    }
                 } else if name == "cancel" {
                     self.app.cancel(id, thread, None).await?
                 } else {
                     self.app.stop(id, thread, None).await?
                 };
+                if actor_closed && name == "stop" {
+                    return Ok("待機列を停止しました。前の作業への中断は確認できません。Gatewayの運用者に状態確認を依頼してください。/status でも状態を確認できます。".into());
+                }
                 Ok(match outcome {
                     DirectControlOutcome::WaitingCancelled => {
                         "直近の待機依頼を取り消しました。実行中の依頼は継続します。"
