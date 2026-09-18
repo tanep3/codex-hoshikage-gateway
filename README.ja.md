@@ -11,6 +11,7 @@ Botは「本人の全投稿に応答」か「メンションした投稿にだ�
 - [導入・設定手順](docs/installation.ja.md) · [English](docs/installation.md)
 - [ユーザーマニュアル](docs/user-manual.ja.md) · [English](docs/user-manual.md)
 - [運用・復旧ガイド](docs/operations.ja.md) · [English](docs/operations.md)
+- [変更履歴](CHANGELOG.ja.md) · [English](CHANGELOG.md)
 
 Rust製です。このリポジトリを取得したら `cargo install --path . --locked` でインストールできます。[Codex Hoshikage Proxy](https://github.com/tanep3/codex-hoshikage-proxy)は、共有HTTP APIが必要なアプリ向けの別製品です。Gatewayの利用には必要ありません。
 

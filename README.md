@@ -11,6 +11,7 @@ The Gateway can answer every authorized message or only messages that mention th
 - [Install and configure](docs/installation.md) · [日本語](docs/installation.ja.md)
 - [User manual](docs/user-manual.md) · [日本語](docs/user-manual.ja.md)
 - [Operations and recovery](docs/operations.md) · [日本語](docs/operations.ja.md)
+- [Release notes](CHANGELOG.md) · [日本語](CHANGELOG.ja.md)
 
 Built in Rust. Install the Gateway from this checkout with `cargo install --path . --locked`. [Codex Hoshikage Proxy](https://github.com/tanep3/codex-hoshikage-proxy) is a separate project for applications that need a shared HTTP API; this Gateway does not depend on it.
 
