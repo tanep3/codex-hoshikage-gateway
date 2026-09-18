@@ -295,6 +295,23 @@ fn list_content(db: &Connection) -> Result<Vec<ContentManifest>> {
             result.push(item);
         }
     }
+    if schema >= 14 {
+        let mut stmt = db.prepare(
+            "SELECT relative_path,bytes,sha256 FROM direct_artifacts WHERE state='READY' ORDER BY relative_path",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(ContentManifest {
+                relative_path: r.get(0)?,
+                bytes: r.get::<_, i64>(1)? as u64,
+                sha256: r.get(2)?,
+            })
+        })?;
+        for row in rows {
+            let item = row?;
+            content_path(Path::new("/"), &item.relative_path)?;
+            result.push(item);
+        }
+    }
     Ok(result)
 }
 
@@ -306,7 +323,11 @@ fn content_path(root: &Path, relative: &str) -> Result<PathBuf> {
     );
     let answer = path.parent() == Some(Path::new("direct-answers"));
     let image = path.parent() == Some(Path::new("direct-images"));
-    ensure!(answer || image, "invalid backup content directory");
+    let artifact = path.parent() == Some(Path::new("direct-artifacts"));
+    ensure!(
+        answer || image || artifact,
+        "invalid backup content directory"
+    );
     let file = path
         .file_name()
         .and_then(|v| v.to_str())
@@ -318,6 +339,14 @@ fn content_path(root: &Path, relative: &str) -> Result<PathBuf> {
         ensure!(
             uuid::Uuid::parse_str(id)?.to_string() == id,
             "invalid answer identity"
+        );
+    } else if artifact {
+        let id = file
+            .strip_suffix(".bin")
+            .context("invalid artifact extension")?;
+        ensure!(
+            uuid::Uuid::parse_str(id)?.to_string() == id,
+            "invalid artifact identity"
         );
     } else {
         let stem = file

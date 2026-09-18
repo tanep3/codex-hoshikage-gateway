@@ -68,6 +68,29 @@ impl Drop for UnknownOnDrop {
 }
 
 impl DirectRunService {
+    pub async fn reject_unsupported(
+        &self,
+        run: &ActiveRun,
+        interaction_id: String,
+        fingerprint: String,
+    ) -> Result<()> {
+        let rpc = self
+            .store
+            .begin_direct_reject(run.request_id.clone(), interaction_id.clone(), fingerprint)
+            .await?;
+        if let Err(error) = run
+            .transport()
+            .reject(rpc, -32600, "Gateway cannot answer this interaction")
+            .await
+        {
+            self.store
+                .mark_direct_approval_unknown(interaction_id)
+                .await?;
+            return Err(error.into());
+        }
+        self.store.mark_direct_approval_sent(interaction_id).await
+    }
+
     pub async fn start_prepared(
         &self,
         request_id: String,

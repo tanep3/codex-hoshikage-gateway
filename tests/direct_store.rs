@@ -108,7 +108,7 @@ fn schema_nine_upgrades_without_reinterpreting_proxy_records() {
     let cfg = common::config(&temp);
     storage::initialize(&cfg).unwrap();
     let c = rusqlite::Connection::open(storage::db_path(&cfg)).unwrap();
-    c.execute_batch("DROP TABLE direct_generated_images;DROP TABLE direct_image_inventories;DELETE FROM schema_migrations WHERE version=13;DROP TABLE runtime_mode;DELETE FROM schema_migrations WHERE version=12;DROP TRIGGER direct_interaction_no_rewind;DROP TABLE direct_interactions;DELETE FROM schema_migrations WHERE version=11;DROP TRIGGER direct_dispatch_no_rewind; DROP TABLE direct_answers; DROP TABLE direct_dispatches; DROP TABLE direct_conversations; DELETE FROM schema_migrations WHERE version=10; UPDATE schema_meta SET schema_version=9;").unwrap();
+    c.execute_batch("DROP TABLE direct_artifacts;DELETE FROM schema_migrations WHERE version=14;DROP TABLE direct_generated_images;DROP TABLE direct_image_inventories;DELETE FROM schema_migrations WHERE version=13;DROP TABLE runtime_mode;DELETE FROM schema_migrations WHERE version=12;DROP TRIGGER direct_interaction_no_rewind;DROP TABLE direct_interactions;DELETE FROM schema_migrations WHERE version=11;DROP TRIGGER direct_dispatch_no_rewind; DROP TABLE direct_answers; DROP TABLE direct_dispatches; DROP TABLE direct_conversations; DELETE FROM schema_migrations WHERE version=10; UPDATE schema_meta SET schema_version=9;").unwrap();
     drop(c);
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();

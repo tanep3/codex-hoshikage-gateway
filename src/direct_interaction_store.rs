@@ -151,6 +151,39 @@ impl Store {
         .await
     }
 
+    pub async fn begin_direct_reject(
+        &self,
+        request_id: String,
+        interaction_id: String,
+        expected_fingerprint: String,
+    ) -> Result<Value> {
+        self.call(true, move |db| {
+            let tx = db.transaction()?;
+            let (rpc, fingerprint, state, dispatch): (String, String, String, String) = tx
+                .query_row(
+                    "SELECT i.rpc_id_json,i.fingerprint,i.state,d.send_state FROM direct_interactions i
+                     JOIN direct_dispatches d ON d.request_id=i.request_id
+                     WHERE i.id=?1 AND i.request_id=?2",
+                    params![interaction_id, request_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )?;
+            ensure!(
+                fingerprint == expected_fingerprint && state == "PENDING" && dispatch == "ACKED",
+                "interaction is stale or belongs to another run"
+            );
+            ensure!(
+                tx.execute(
+                    "UPDATE direct_interactions SET state='SENDING',decision='decline',updated_at=?2 WHERE id=?1 AND state='PENDING'",
+                    params![interaction_id, domain::now_ms()],
+                )? == 1,
+                "interaction reject boundary changed"
+            );
+            tx.commit()?;
+            Ok(serde_json::from_str(&rpc)?)
+        })
+        .await
+    }
+
     pub async fn mark_direct_approval_sent(&self, interaction_id: String) -> Result<()> {
         self.call(true, move |c| {
             let changed = c.execute(

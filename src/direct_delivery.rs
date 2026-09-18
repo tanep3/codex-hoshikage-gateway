@@ -1,6 +1,7 @@
 //! Delivery of the same saved answer after a Discord failure or restart.
 use crate::{
     delivery::{Delivery, chunks, nonce},
+    direct_artifacts::Artifact,
     direct_content::{DirectContent, StoredImage},
     direct_image_store::ImageRecordState,
     discord::snowflake,
@@ -44,6 +45,170 @@ struct ImageExpected<'a> {
 }
 
 impl Delivery {
+    pub async fn recover_direct_artifacts(&self, guild: &str, max_bytes: usize) -> Result<usize> {
+        let pending = self
+            .store
+            .call(false, |db| {
+                let mut stmt = db.prepare(
+                    "SELECT a.id,a.request_id,a.discord_thread_id,a.source_path,a.display_name,a.relative_path,a.sha256,a.bytes
+                     FROM direct_artifacts a JOIN deliveries d ON d.target_id=a.id
+                     WHERE d.kind='direct-artifact' AND d.state='POST_PENDING'
+                     ORDER BY d.created_at LIMIT 50",
+                )?;
+                Ok(stmt
+                    .query_map([], |r| {
+                        Ok(Artifact {
+                            id: r.get(0)?,
+                            request_id: r.get(1)?,
+                            thread_id: r.get(2)?,
+                            source_path: r.get(3)?,
+                            display_name: r.get(4)?,
+                            saved: crate::direct_content::StoredArtifact {
+                                relative_path: r.get(5)?,
+                                sha256: r.get(6)?,
+                                bytes: r.get::<_, i64>(7)? as usize,
+                            },
+                        })
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?)
+            })
+            .await?;
+        for artifact in &pending {
+            let _ = self
+                .direct_artifact(artifact, &artifact.thread_id, guild, max_bytes)
+                .await;
+        }
+        Ok(pending.len())
+    }
+
+    /// Deliver a registered immutable artifact once. A lost POST response
+    /// leaves POST_PENDING and can only be reconciled against Discord's nonce.
+    pub async fn direct_artifact(
+        &self,
+        artifact: &Artifact,
+        thread: &str,
+        guild: &str,
+        max_bytes: usize,
+    ) -> Result<bool> {
+        ensure!(
+            artifact.thread_id == thread,
+            "artifact destination mismatch"
+        );
+        let filename = &artifact.display_name;
+        let caption = "指定された成果物です。";
+        let digest = domain::digest(
+            serde_json::to_vec(&(
+                &artifact.id,
+                thread,
+                filename,
+                &artifact.saved.sha256,
+                artifact.saved.bytes,
+            ))?
+            .as_slice(),
+        );
+        let key = artifact.id.clone();
+        let existing = self
+            .store
+            .call(true, move |db| {
+                Ok(db
+                    .query_row(
+                        "SELECT id,state,message_id,confirmed_digest,pending_digest FROM deliveries WHERE target_id=?1 AND kind='direct-artifact' AND part=0",
+                        [key],
+                        |row| Ok(ExistingDelivery {
+                            id:row.get(0)?,state:row.get(1)?,message:row.get(2)?,
+                            confirmed:row.get(3)?,pending:row.get(4)?
+                        }),
+                    )
+                    .optional()?)
+            })
+            .await?;
+        if let Some(existing) = existing {
+            let delivery_id = existing.id.clone();
+            let bound: String = self
+                .store
+                .call(false, move |db| {
+                    Ok(db.query_row(
+                        "SELECT thread_id FROM deliveries WHERE id=?1",
+                        [delivery_id],
+                        |r| r.get(0),
+                    )?)
+                })
+                .await?;
+            ensure!(bound == thread, "artifact delivery destination changed");
+            if existing.state == "CONFIRMED" {
+                ensure!(
+                    existing.confirmed.as_deref() == Some(&digest),
+                    "delivered artifact identity changed"
+                );
+                return Ok(true);
+            }
+            ensure!(
+                existing.state == "POST_PENDING" && existing.pending.as_deref() == Some(&digest),
+                "pending artifact delivery identity changed"
+            );
+            return self
+                .reconcile_direct_image(
+                    &existing.id,
+                    existing.message.as_deref(),
+                    ImageExpected {
+                        thread,
+                        filename,
+                        caption,
+                        bytes: artifact.saved.bytes,
+                        digest: &digest,
+                    },
+                )
+                .await;
+        }
+        self.discord
+            .check_attachment_permissions(thread, guild)
+            .await?;
+        let content = DirectContent::new(
+            self.store
+                .path
+                .parent()
+                .context("database has no state directory")?,
+        )?;
+        let bytes = content.read_artifact(&artifact.saved, max_bytes)?;
+        self.discord
+            .check_attachment_permissions(thread, guild)
+            .await?;
+        let delivery_id = domain::id();
+        let (target, channel, hash) = (artifact.id.clone(), thread.to_owned(), digest.clone());
+        let saved_id = delivery_id.clone();
+        self.store
+            .call(true, move |db| {
+                db.execute(
+                    "INSERT INTO deliveries(id,target_id,thread_id,kind,part,state,pending_revision,pending_digest,created_at) VALUES(?1,?2,?3,'direct-artifact',0,'POST_PENDING',1,?4,?5)",
+                    params![saved_id,target,channel,hash,domain::now_ms()],
+                )?;
+                Ok(())
+            })
+            .await?;
+        let receipt = self
+            .discord
+            .upload_attachment(thread, filename.clone(), bytes, &nonce(&delivery_id), None)
+            .await;
+        let Ok(receipt) = receipt else {
+            return Ok(false);
+        };
+        let message = receipt["id"]
+            .as_str()
+            .context("Discord artifact receipt missing message ID")?;
+        ensure!(
+            receipt["channel_id"] == thread
+                && receipt["attachments"].as_array().is_some_and(|items| {
+                    items.len() == 1
+                        && items[0]["filename"] == filename.as_str()
+                        && items[0]["size"] == artifact.saved.bytes as u64
+                }),
+            "Discord artifact receipt does not match saved content"
+        );
+        self.confirm_direct_image(&delivery_id, message, &digest)
+            .await?;
+        Ok(true)
+    }
+
     /// A bounded restart scan. Pending Discord sends are reconciled by nonce;
     /// absence of a matching receipt never authorizes a second upload.
     pub async fn recover_direct_images(&self, guild: &str, max_bytes: usize) -> Result<usize> {

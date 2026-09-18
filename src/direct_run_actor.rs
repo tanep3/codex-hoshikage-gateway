@@ -32,6 +32,11 @@ pub enum RunCommand {
         decision: ManualDecision,
         reply: oneshot::Sender<Result<()>>,
     },
+    RejectUnsupported {
+        interaction_id: String,
+        fingerprint: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
     Cancel {
         interaction_id: String,
         discord_thread_id: String,
@@ -104,6 +109,10 @@ async fn serve(
                             let result=app.runs.reply_mcp_tool(&run,interaction_id,operation,decision).await;
                             let _=reply.send(result);
                         }
+                        RunCommand::RejectUnsupported{interaction_id,fingerprint,reply}=>{
+                            let result=app.runs.reject_unsupported(&run,interaction_id,fingerprint).await;
+                            let _=reply.send(result);
+                        }
                         RunCommand::Cancel{interaction_id,discord_thread_id,reply}=>{
                             let result=app.cancel(&interaction_id,&discord_thread_id,Some(&run)).await;
                             let _=reply.send(result);
@@ -121,6 +130,33 @@ async fn serve(
             }
             event=run.recv()=>{
                 match event {
+                    Ok(Event::ServerRequest{id,method,params})
+                        if method=="item/tool/call" && params["tool"]=="hoshikage_publish_artifact"=>{
+                        ensure!(
+                            params["threadId"]==run.identity.thread_id
+                                && params["turnId"]==run.identity.turn_id,
+                            "artifact tool belongs to another turn"
+                        );
+                        let outcome=async {
+                            let call=params["callId"].as_str().ok_or_else(||anyhow::anyhow!("artifact call ID missing"))?;
+                            let path=params["arguments"]["path"].as_str().ok_or_else(||anyhow::anyhow!("artifact path missing"))?;
+                            let display=params["arguments"]["display_name"].as_str();
+                            let thread=app.store.request(&run.request_id).await?.thread_id;
+                            crate::direct_artifacts::capture(
+                                &app.store,&app.runs.content,
+                                crate::direct_artifacts::CaptureTarget {
+                                    thread_id:&thread,request_id:Some(&run.request_id),
+                                    call_id:call,relative:path,display_name:display
+                                },
+                                app.cfg.limits.artifact_bytes
+                            ).await
+                        }.await;
+                        let response=match outcome {
+                            Ok(artifact)=>serde_json::json!({"success":true,"contentItems":[{"type":"inputText","text":serde_json::json!({"artifact_id":artifact.id,"state":"ready"}).to_string()}]}),
+                            Err(_)=>serde_json::json!({"success":false,"contentItems":[{"type":"inputText","text":"artifact_registration_failed"}]}),
+                        };
+                        run.transport().respond(id,response).await?;
+                    }
                     Ok(event @ Event::ServerRequest{..})=>{
                         let evidence=match &event {
                             Event::ServerRequest{params,..}=>params["itemId"].as_str().and_then(|id|mcp_items.get(id)).and_then(Option::as_ref).cloned(),

@@ -60,4 +60,5 @@ pub mod mcp_inline;
 
 pub mod mcp_v06;
 
+pub mod direct_artifacts;
 mod mcp_v06_ui;

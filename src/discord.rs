@@ -377,6 +377,7 @@ impl Discord {
             {"name":"resume","description":"一時停止した待機列を再開"},
             {"name":"models","description":"Codexで利用できるモデル一覧"},
             {"name":"model","description":"選択中モデルの確認・変更","options":[option("id","モデルID",false)]},
+            {"name":"get","description":"この会話の成果物一覧、またはファイルの保存版を返送","options":[option("path","会話ワーク内の相対パス（省略で一覧）",false)]},
             {"name":"steer","description":"実行中の依頼に追加指示","options":[option("text","追加指示",true)]}
         ]);
         self.api(

@@ -501,6 +501,64 @@ impl DirectCoordinator {
                     ))
                 }
             }
+            "get" => {
+                if let Some(path) = option("path") {
+                    let artifact = match crate::direct_artifacts::capture(
+                        &self.app.store,
+                        &self.app.runs.content,
+                        crate::direct_artifacts::CaptureTarget {
+                            thread_id: thread,
+                            request_id: None,
+                            call_id: id,
+                            relative: path,
+                            display_name: None,
+                        },
+                        self.app.cfg.limits.artifact_bytes,
+                    )
+                    .await
+                    {
+                        Ok(artifact) => artifact,
+                        Err(error) if error.to_string()=="previous artifact delivery is still unconfirmed" =>
+                            return Ok("同じファイルの前回の送信結果を確認できません。会話内の添付を確認してください。重複を避けるため、新たな送信はしていません。".into()),
+                        Err(_) => return Ok("このファイルを取得できませんでした。この会話で作成したファイルの相対パス、容量、ファイルの更新状態を確認してください。AIは再実行していません。".into()),
+                    };
+                    let sent = self
+                        .app
+                        .delivery
+                        .direct_artifact(
+                            &artifact,
+                            thread,
+                            &self.app.cfg.discord.guild_id,
+                            self.app.cfg.limits.artifact_bytes,
+                        )
+                        .await?;
+                    Ok(if sent {
+                        format!(
+                            "{} の保存版をこの会話に送信しました。",
+                            artifact.display_name
+                        )
+                    } else {
+                        "成果物の送信結果を確認できません。会話内の添付を確認してください。重複を避けるため自動再送はしません。".into()
+                    })
+                } else {
+                    let artifacts = crate::direct_artifacts::list(&self.app.store, thread).await?;
+                    if artifacts.is_empty() {
+                        return Ok("この会話に登録された成果物はまだありません。作成したファイルは /get の path 欄に相対パスを指定して取得できます。".into());
+                    }
+                    let lines = artifacts
+                        .iter()
+                        .take(20)
+                        .map(|artifact| {
+                            format!("{} — {}", artifact.display_name, artifact.source_path)
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    Ok(format!(
+                        "この会話の成果物:\n{}",
+                        lines.chars().take(1800).collect::<String>()
+                    ))
+                }
+            }
             "resume" => {
                 let changed = self.app.resume(id, thread).await?;
                 Ok(if changed {
@@ -640,7 +698,9 @@ impl DirectCoordinator {
                     {"type":2,"style":4,"label":"拒否","custom_id":format!("direct:decline:{card_id}")}
                 ]}])
             } else {
-                json!([])
+                json!([{"type":1,"components":[
+                    {"type":2,"style":4,"label":"拒否","custom_id":format!("direct:decline:{card_id}")}
+                ]}])
             };
             self.app.discord.interaction_callback(id,token,json!({"type":4,"data":{"content":detail,"flags":64,"components":choices,"allowed_mentions":{"parse":[]}}})).await?;
             return Ok(());
@@ -657,12 +717,12 @@ impl DirectCoordinator {
                 return Ok(());
             }
         };
-        if (action == "accept"
-            && serde_json::to_string_pretty(&json!({"upstream_request":card.operation.params,"matched_mcp_call":card.operation.mcp_evidence}))?
+        if action == "accept"
+            && (serde_json::to_string_pretty(&json!({"upstream_request":card.operation.params,"matched_mcp_call":card.operation.mcp_evidence}))?
                 .chars()
                 .count()
-                > 1400)
-            || !Self::answerable(&card.operation)
+                > 1400
+                || !Self::answerable(&card.operation))
         {
             self.app
                 .discord
@@ -687,7 +747,13 @@ impl DirectCoordinator {
             return Ok(());
         };
         let (reply, receiver) = oneshot::channel();
-        let command = if card.operation.kind == InteractionKind::UserInput {
+        let command = if !Self::answerable(&card.operation) {
+            RunCommand::RejectUnsupported {
+                interaction_id: card_id.into(),
+                fingerprint: card.fingerprint,
+                reply,
+            }
+        } else if card.operation.kind == InteractionKind::UserInput {
             RunCommand::McpToolApproval {
                 interaction_id: card_id.into(),
                 operation: card.operation,
@@ -747,6 +813,9 @@ pub async fn run(cfg: DirectConfig) -> Result<()> {
     delivery.recover().await?;
     delivery
         .recover_direct_images(&cfg.discord.guild_id, cfg.limits.artifact_bytes)
+        .await?;
+    delivery
+        .recover_direct_artifacts(&cfg.discord.guild_id, cfg.limits.artifact_bytes)
         .await?;
     let coordinator = DirectCoordinator::new(app);
     let (messages, messages_rx) = mpsc::channel(128);
@@ -828,21 +897,36 @@ mod tests {
 
     #[tokio::test]
     async fn raw_message_reaches_direct_child_and_saved_answer_is_delivered_once() {
-        direct_flow(false, false).await;
+        direct_flow(false, false, false, false).await;
     }
 
     #[tokio::test]
     async fn mcp_approval_button_returns_to_exact_direct_run() {
-        direct_flow(true, false).await;
+        direct_flow(true, false, false, false).await;
+    }
+
+    #[tokio::test]
+    async fn artifact_tool_registers_a_conversation_bound_saved_file() {
+        direct_flow(false, false, true, false).await;
+    }
+
+    #[tokio::test]
+    async fn unsupported_permission_prompt_can_be_rejected_without_opening_detail() {
+        direct_flow(false, false, false, true).await;
     }
 
     #[tokio::test]
     #[ignore = "requires local Codex login and network; run explicitly for integration acceptance"]
     async fn real_codex_reaches_mock_discord_through_direct_daemon() {
-        direct_flow(false, true).await;
+        direct_flow(false, true, false, false).await;
     }
 
-    async fn direct_flow(mcp_approval: bool, real_codex: bool) {
+    async fn direct_flow(
+        mcp_approval: bool,
+        real_codex: bool,
+        artifact_tool: bool,
+        unsupported_approval: bool,
+    ) {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         let home = root.join("codex-home");
@@ -972,6 +1056,12 @@ mod tests {
                         if mcp_approval {
                             args.push("--request-mcp-approval".into());
                         }
+                        if artifact_tool {
+                            args.push("--request-artifact".into());
+                        }
+                        if unsupported_approval {
+                            args.push("--request-unsupported-approval".into());
+                        }
                         args
                     },
                     codex_home: if real_codex {
@@ -1007,7 +1097,7 @@ mod tests {
         };
         tx.send(Incoming::Message(original.clone())).await.unwrap();
         tx.send(Incoming::Message(original)).await.unwrap();
-        if mcp_approval {
+        if mcp_approval || unsupported_approval {
             let card = tokio::time::timeout(Duration::from_secs(10), async {
                 loop {
                     if let Some(value) = posts
@@ -1015,9 +1105,13 @@ mod tests {
                         .unwrap()
                         .iter()
                         .find(|post| {
-                            post["content"]
-                                .as_str()
-                                .is_some_and(|s| s.contains("MCP操作"))
+                            post["content"].as_str().is_some_and(|s| {
+                                s.contains(if unsupported_approval {
+                                    "権限変更"
+                                } else {
+                                    "MCP操作"
+                                })
+                            })
                         })
                         .cloned()
                     {
@@ -1031,17 +1125,26 @@ mod tests {
             let detail = card["components"][0]["components"][0]["custom_id"]
                 .as_str()
                 .unwrap();
-            let approval = detail.replace(":detail:", ":accept:");
+            let approval = detail.replace(
+                ":detail:",
+                if unsupported_approval {
+                    ":decline:"
+                } else {
+                    ":accept:"
+                },
+            );
             let interaction = |id: &str, custom: &str| json!({"id":id,"token":"token","application_id":"123","guild_id":"1","channel_id":"4","member":{"user":{"id":"2"}},"data":{"custom_id":custom}});
-            controller
-                .handle_interaction(interaction("1001", detail))
-                .await
-                .unwrap();
-            assert!(callbacks.lock().unwrap().iter().any(|body| {
-                body["data"]["content"]
-                    .as_str()
-                    .is_some_and(|s| s.contains("mcp_tool_call_approval_item-one"))
-            }));
+            if mcp_approval {
+                controller
+                    .handle_interaction(interaction("1001", detail))
+                    .await
+                    .unwrap();
+                assert!(callbacks.lock().unwrap().iter().any(|body| {
+                    body["data"]["content"]
+                        .as_str()
+                        .is_some_and(|s| s.contains("mcp_tool_call_approval_item-one"))
+                }));
+            }
             controller
                 .handle_interaction(interaction("1002", &approval))
                 .await
@@ -1067,7 +1170,12 @@ mod tests {
             },
         )
         .await
-        .unwrap();
+        .unwrap_or_else(|_| {
+            panic!(
+                "answer delivery timed out; posts={:?}",
+                posts.lock().unwrap()
+            )
+        });
         let states = store.status().await.unwrap();
         assert_eq!(states["requests"], json!([["COMPLETED", 1]]));
         assert_eq!(
@@ -1085,6 +1193,25 @@ mod tests {
                 .count(),
             1
         );
+        if artifact_tool {
+            let artifacts = crate::direct_artifacts::list(&store, "4").await.unwrap();
+            assert_eq!(artifacts.len(), 1);
+            assert_eq!(artifacts[0].source_path, "report.txt");
+            let listing = controller
+                .command("1004", "4", &json!({"data":{"name":"get","options":[]}}))
+                .await
+                .unwrap();
+            assert!(listing.contains("report.txt"));
+            assert_eq!(
+                controller
+                    .app
+                    .runs
+                    .content
+                    .read_artifact(&artifacts[0].saved, cfg.limits.artifact_bytes)
+                    .unwrap(),
+                b"mock artifact"
+            );
+        }
         controller.cancel.cancel();
         worker.await.unwrap().unwrap();
         scheduler.await.unwrap().unwrap();

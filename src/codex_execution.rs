@@ -50,6 +50,15 @@ impl CodexExecution {
                     "modelProvider":options.model_provider,
                     "sandbox":options.sandbox,
                     "approvalPolicy":options.approval_policy,
+                    "dynamicTools":[{
+                        "type":"function",
+                        "name":"hoshikage_publish_artifact",
+                        "description":"Register a completed file from this conversation workspace as an immutable downloadable artifact. Close the file first. Registration does not send it to Discord.",
+                        "inputSchema":{"type":"object","properties":{
+                            "path":{"type":"string"},
+                            "display_name":{"type":"string"}
+                        },"required":["path"],"additionalProperties":false}
+                    }],
                 }),
             )
             .await?;

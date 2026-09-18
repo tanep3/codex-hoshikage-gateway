@@ -22,12 +22,112 @@ pub struct StoredImage {
     pub bytes: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredArtifact {
+    pub relative_path: String,
+    pub sha256: String,
+    pub bytes: usize,
+}
+
 #[derive(Clone)]
 pub struct DirectContent {
     root: PathBuf,
 }
 
 impl DirectContent {
+    pub fn save_artifact(
+        &self,
+        artifact_id: &str,
+        bytes: &[u8],
+        max_bytes: usize,
+    ) -> Result<StoredArtifact> {
+        let id = uuid::Uuid::parse_str(artifact_id).context("invalid artifact ID")?;
+        ensure!(bytes.len() <= max_bytes, "artifact exceeds storage limit");
+        let root = self
+            .root
+            .parent()
+            .context("state directory unavailable")?
+            .join("direct-artifacts");
+        private_dir(&root)?;
+        ensure!(root.canonicalize()? == root, "artifact store path changed");
+        let saved = StoredArtifact {
+            relative_path: format!("direct-artifacts/{id}.bin"),
+            sha256: domain::digest(bytes),
+            bytes: bytes.len(),
+        };
+        let final_path = root.join(format!("{id}.bin"));
+        if final_path.exists() {
+            ensure!(
+                self.read_artifact(&saved, max_bytes)? == bytes,
+                "stored artifact differs from source"
+            );
+            return Ok(saved);
+        }
+        let temporary = root.join(format!(".{id}.{}.tmp", uuid::Uuid::new_v4()));
+        let _cleanup = TempFile(temporary.clone());
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        match fs::hard_link(&temporary, &final_path) {
+            Ok(()) => File::open(&root)?.sync_all()?,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                ensure!(
+                    self.read_artifact(&saved, max_bytes)? == bytes,
+                    "stored artifact differs from source"
+                );
+            }
+            Err(error) => return Err(error.into()),
+        }
+        Ok(saved)
+    }
+
+    pub fn read_artifact(&self, saved: &StoredArtifact, max_bytes: usize) -> Result<Vec<u8>> {
+        let relative = Path::new(&saved.relative_path);
+        ensure!(
+            relative.components().count() == 2
+                && relative.parent() == Some(Path::new("direct-artifacts")),
+            "invalid artifact path"
+        );
+        let name = relative.file_name().context("artifact filename missing")?;
+        let stem = name
+            .to_str()
+            .and_then(|value| value.strip_suffix(".bin"))
+            .context("invalid artifact filename")?;
+        ensure!(
+            uuid::Uuid::parse_str(stem)?.to_string() == stem,
+            "invalid artifact filename"
+        );
+        let root = self
+            .root
+            .parent()
+            .context("state directory unavailable")?
+            .join("direct-artifacts");
+        let mut file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(root.join(name))?;
+        let md = file.metadata()?;
+        ensure!(
+            md.is_file() && md.len() as usize == saved.bytes && saved.bytes <= max_bytes,
+            "artifact size or type changed"
+        );
+        let mut bytes = Vec::with_capacity(saved.bytes);
+        Read::by_ref(&mut file)
+            .take((saved.bytes + 1) as u64)
+            .read_to_end(&mut bytes)?;
+        ensure!(
+            bytes.len() == saved.bytes && domain::digest(&bytes) == saved.sha256,
+            "artifact content changed"
+        );
+        Ok(bytes)
+    }
+
     pub fn save_image(
         &self,
         request_id: &str,

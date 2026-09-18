@@ -188,7 +188,7 @@ fn schema_nine_cutover_preserves_an_offline_verifiable_backup() {
     storage::initialize(&old).unwrap();
     let db_path = old.storage.state_dir.join("gateway.sqlite3");
     let db = Connection::open(&db_path).unwrap();
-    db.execute_batch("DROP TABLE direct_generated_images;DROP TABLE direct_image_inventories;DELETE FROM schema_migrations WHERE version=13;DROP TABLE runtime_mode;DELETE FROM schema_migrations WHERE version=12;DROP TRIGGER direct_interaction_no_rewind;DROP TABLE direct_interactions;DELETE FROM schema_migrations WHERE version=11;DROP TRIGGER direct_dispatch_no_rewind;DROP TABLE direct_answers;DROP TABLE direct_dispatches;DROP TABLE direct_conversations;DELETE FROM schema_migrations WHERE version=10;UPDATE schema_meta SET schema_version=9;").unwrap();
+    db.execute_batch("DROP TABLE direct_artifacts;DELETE FROM schema_migrations WHERE version=14;DROP TABLE direct_generated_images;DROP TABLE direct_image_inventories;DELETE FROM schema_migrations WHERE version=13;DROP TABLE runtime_mode;DELETE FROM schema_migrations WHERE version=12;DROP TRIGGER direct_interaction_no_rewind;DROP TABLE direct_interactions;DELETE FROM schema_migrations WHERE version=11;DROP TRIGGER direct_dispatch_no_rewind;DROP TABLE direct_answers;DROP TABLE direct_dispatches;DROP TABLE direct_conversations;DELETE FROM schema_migrations WHERE version=10;UPDATE schema_meta SET schema_version=9;").unwrap();
     drop(db);
     assert_eq!(storage::validate_database(&db_path).unwrap().0, 9);
     let next = direct(&temp);
