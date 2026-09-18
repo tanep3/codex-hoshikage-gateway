@@ -7,6 +7,7 @@ pub mod direct_approval;
 pub mod direct_config;
 pub mod direct_content;
 pub mod direct_control_store;
+pub mod direct_daemon;
 pub mod direct_delivery;
 pub mod direct_image_store;
 pub mod direct_images;

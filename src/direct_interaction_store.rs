@@ -74,6 +74,41 @@ impl Store {
         expected_fingerprint: String,
         decision: ManualDecision,
     ) -> Result<Value> {
+        self.begin_direct_approval_reply_inner(
+            request_id,
+            interaction_id,
+            expected_fingerprint,
+            decision,
+            false,
+        )
+        .await
+    }
+
+    pub async fn begin_direct_mcp_reply(
+        &self,
+        request_id: String,
+        interaction_id: String,
+        expected_fingerprint: String,
+        decision: ManualDecision,
+    ) -> Result<Value> {
+        self.begin_direct_approval_reply_inner(
+            request_id,
+            interaction_id,
+            expected_fingerprint,
+            decision,
+            true,
+        )
+        .await
+    }
+
+    async fn begin_direct_approval_reply_inner(
+        &self,
+        request_id: String,
+        interaction_id: String,
+        expected_fingerprint: String,
+        decision: ManualDecision,
+        mcp: bool,
+    ) -> Result<Value> {
         self.call(true, move |c| {
             let tx = c.transaction()?;
             let (rpc, fingerprint, state, dispatch, method, offered): (String, String, String, String, String, Option<String>) = tx.query_row(
@@ -86,18 +121,20 @@ impl Store {
                 "approval is stale or does not match the displayed operation"
             );
             ensure!(
-                matches!(
-                    method.as_str(),
-                    "item/commandExecution/requestApproval" | "item/fileChange/requestApproval"
-                ),
-                "approval requires a method-specific reply"
+                if mcp {method == "item/tool/requestUserInput"} else {
+                    matches!(method.as_str(),
+                        "item/commandExecution/requestApproval" | "item/fileChange/requestApproval")
+                },
+                "approval requires a different method-specific reply"
             );
-            let choice = match decision {
-                ManualDecision::AcceptOnce => "accept",
-                ManualDecision::Decline => "decline",
-                ManualDecision::Cancel => "cancel",
+            let choice = match (mcp,decision) {
+                (true,ManualDecision::AcceptOnce)=>"accept",
+                (true,ManualDecision::Decline | ManualDecision::Cancel)=>"decline",
+                (false,ManualDecision::AcceptOnce)=>"accept",
+                (false,ManualDecision::Decline)=>"decline",
+                (false,ManualDecision::Cancel)=>"cancel",
             };
-            if let Some(offered) = offered {
+            if !mcp && let Some(offered) = offered {
                 let choices: Vec<String> = serde_json::from_str(&offered)?;
                 ensure!(
                     choices.iter().any(|item| item == choice),

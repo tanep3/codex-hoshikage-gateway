@@ -27,6 +27,15 @@ use std::{
 
 #[tokio::test]
 async fn actor_routes_exact_approval_then_delivers_after_turn_completion() {
+    actor_accepts("--request-approval", InteractionKind::CommandApproval).await;
+}
+
+#[tokio::test]
+async fn actor_routes_mcp_tool_confirmation_with_its_own_reply_schema() {
+    actor_accepts("--request-mcp-approval", InteractionKind::UserInput).await;
+}
+
+async fn actor_accepts(flag: &str, expected_kind: InteractionKind) {
     let temp = tempfile::tempdir().unwrap();
     let legacy = common::config(&temp);
     let home = temp.path().join("codex-home");
@@ -90,7 +99,7 @@ async fn actor_routes_exact_approval_then_delivers_after_turn_completion() {
                 "{}/tests/fixtures/mock_app_server.py",
                 env!("CARGO_MANIFEST_DIR")
             ),
-            "--request-approval".into(),
+            flag.into(),
         ],
         codex_home: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
         initialize_timeout: Duration::from_secs(10),
@@ -138,8 +147,15 @@ async fn actor_routes_exact_approval_then_delivers_after_turn_completion() {
     else {
         panic!("expected approval")
     };
-    assert_eq!(operation.kind, InteractionKind::CommandApproval);
-    assert_eq!(operation.params["command"], "cat report.txt");
+    assert_eq!(operation.kind, expected_kind);
+    if expected_kind == InteractionKind::CommandApproval {
+        assert_eq!(operation.params["command"], "cat report.txt");
+    } else {
+        assert_eq!(
+            operation.params["questions"][0]["id"],
+            "mcp_tool_call_approval_item-one"
+        );
+    }
     let (steer_reply, steer_result) = tokio::sync::oneshot::channel();
     actor
         .commands
@@ -153,16 +169,22 @@ async fn actor_routes_exact_approval_then_delivers_after_turn_completion() {
         .unwrap();
     steer_result.await.unwrap().unwrap();
     let (reply, result) = tokio::sync::oneshot::channel();
-    actor
-        .commands
-        .send(RunCommand::Approval {
+    let command = if expected_kind == InteractionKind::UserInput {
+        RunCommand::McpToolApproval {
+            interaction_id,
+            operation: *operation,
+            decision: ManualDecision::AcceptOnce,
+            reply,
+        }
+    } else {
+        RunCommand::Approval {
             interaction_id,
             fingerprint: operation.fingerprint,
             decision: ManualDecision::AcceptOnce,
             reply,
-        })
-        .await
-        .unwrap();
+        }
+    };
+    actor.commands.send(command).await.unwrap();
     result.await.unwrap().unwrap();
     let event = tokio::time::timeout(Duration::from_secs(15), actor.events.recv())
         .await
@@ -170,6 +192,17 @@ async fn actor_routes_exact_approval_then_delivers_after_turn_completion() {
         .unwrap();
     assert!(matches!(event, RunEvent::Terminal(result) if result.answer_delivered));
     actor.task.await.unwrap().unwrap();
+    let approval_state: String = store
+        .call(true, move |connection| {
+            Ok(connection.query_row(
+                "SELECT state FROM direct_interactions WHERE request_id=?1",
+                [&request],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(approval_state, "RESOLVED");
     assert_eq!(posts.lock().unwrap().len(), 1);
     assert_eq!(posts.lock().unwrap()[0]["content"], "DONE");
     server.abort();

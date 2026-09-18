@@ -1,0 +1,39 @@
+# Gateway-owned Codex App Server configuration. This sample is for the new
+# `direct` CLI commands; the existing service still uses the Proxy format.
+# Replace IDs and absolute paths. Keep the token in a separate mode-0600 file.
+default_model = "gpt-5.6-luna"
+
+[discord]
+response_mode = "all" # or "mention"
+guild_id = "REPLACE_WITH_GUILD_ID"
+allowed_user_id = "REPLACE_WITH_USER_ID"
+token_file = "/home/REPLACE_USER/.config/codex-hoshikage-gateway/discord-token"
+
+[codex]
+command = "/home/REPLACE_USER/.local/bin/codex"
+# Private, Gateway-owned CODEX_HOME (0700). Sign in and configure MCP here.
+home = "/home/REPLACE_USER/.config/codex-hoshikage-gateway/codex-home"
+model_provider = "openai"
+sandbox = "workspace-write"
+approval_policy = "on-request"
+network_access = false
+
+[storage]
+state_dir = "/home/REPLACE_USER/.local/state/codex-hoshikage-gateway"
+temp_dir = "/home/REPLACE_USER/.config/codex-hoshikage-gateway/temp"
+socket_path = "/run/user/REPLACE_UID/codex-hoshikage-gateway/admin.sock"
+
+[limits]
+attachments = 5
+attachment_bytes = 8388608
+input_bytes = 16777216
+text_bytes = 262144
+image_pixels = 16000000
+artifact_bytes = 8388608
+temp_bytes = 67108864
+output_bytes = 4194304
+output_total_bytes = 8388608
+delivery_retention_secs = 900
+queue_conversation = 5
+queue_global = 20
+validation_secs = 120

@@ -50,6 +50,10 @@ for line in sys.stdin:
         if "--request-approval" in sys.argv:
             approval_pending = True
             print(json.dumps({"jsonrpc":"2.0","id":"approval-one","method":"item/commandExecution/requestApproval","params":{"threadId":"thread-one","turnId":"turn-one","itemId":"item-one","command":"cat report.txt","availableDecisions":["accept","decline"]}}), flush=True)
+        elif "--request-mcp-approval" in sys.argv:
+            approval_pending = True
+            print(json.dumps({"jsonrpc":"2.0","method":"item/started","params":{"threadId":"thread-one","turnId":"turn-one","item":{"type":"mcpToolCall","id":"item-one","server":"playwright","tool":"browser_tabs","arguments":{"action":"list"}}}}), flush=True)
+            print(json.dumps({"jsonrpc":"2.0","id":"mcp-approval-one","method":"item/tool/requestUserInput","params":{"threadId":"thread-one","turnId":"turn-one","itemId":"item-one","questions":[{"id":"mcp_tool_call_approval_item-one","header":"Tool","question":"Allow the playwright MCP server to run browser_tabs?","isOther":False,"isSecret":False,"options":[{"label":"Allow"},{"label":"Cancel"}]}]}}), flush=True)
     elif method == "thread/read":
         if approval_pending:
             print(json.dumps({"jsonrpc":"2.0","id":msg["id"],"result":{"thread":{"id":msg["params"]["threadId"],"turns":[{"id":"turn-one","status":"inProgress","itemsView":"full","items":[]}]}}}),flush=True)
@@ -64,6 +68,8 @@ for line in sys.stdin:
         print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"turnId": msg["params"]["expectedTurnId"]}}), flush=True)
     elif method == "turn/interrupt":
         print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {}}), flush=True)
-    elif method is None and msg.get("id") == "approval-one":
+    elif method is None and msg.get("id") in ("approval-one", "mcp-approval-one"):
+        if msg["id"] == "mcp-approval-one":
+            assert msg.get("result") == {"answers":{"mcp_tool_call_approval_item-one":{"answers":["Allow"]}}}
         approval_pending = False
-        print(json.dumps({"jsonrpc":"2.0","method":"serverRequest/resolved","params":{"threadId":"thread-one","requestId":"approval-one"}}), flush=True)
+        print(json.dumps({"jsonrpc":"2.0","method":"serverRequest/resolved","params":{"threadId":"thread-one","requestId":msg["id"]}}), flush=True)

@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.98"
 license = "MIT"
 authors = ["Tane Channel Technology"]
-description = "A private Discord gateway for codex-hoshikage-proxy"
+description = "A private Discord gateway for Codex App Server"
 
 [[bin]]
 name = "codex-hoshikage-gateway"

@@ -11,7 +11,7 @@ use crate::{
 use anyhow::{Result, ensure};
 use serde_json::Value;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     time::{Duration, Instant},
 };
 use tokio::{
@@ -23,6 +23,12 @@ pub enum RunCommand {
     Approval {
         interaction_id: String,
         fingerprint: String,
+        decision: ManualDecision,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    McpToolApproval {
+        interaction_id: String,
+        operation: DirectInteraction,
         decision: ManualDecision,
         reply: oneshot::Sender<Result<()>>,
     },
@@ -47,7 +53,7 @@ pub enum RunCommand {
 pub enum RunEvent {
     Approval {
         interaction_id: String,
-        operation: DirectInteraction,
+        operation: Box<DirectInteraction>,
     },
     UnsupportedApproval,
     Terminal(DirectDeliveryResult),
@@ -79,6 +85,8 @@ async fn serve(
     events: mpsc::Sender<RunEvent>,
 ) -> Result<()> {
     let mut seen_approvals = HashSet::new();
+    let mut approval_rpc_ids = HashMap::<String, String>::new();
+    let mut mcp_items = HashMap::<String, Option<Value>>::new();
     let mut terminal_seen = None::<Instant>;
     let mut ticker = tokio::time::interval(Duration::from_secs(5));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -90,6 +98,10 @@ async fn serve(
                     match command {
                         RunCommand::Approval{interaction_id,fingerprint,decision,reply}=>{
                             let result=app.runs.reply_manual(&run,interaction_id,fingerprint,decision).await;
+                            let _=reply.send(result);
+                        }
+                        RunCommand::McpToolApproval{interaction_id,operation,decision,reply}=>{
+                            let result=app.runs.reply_mcp_tool(&run,interaction_id,operation,decision).await;
                             let _=reply.send(result);
                         }
                         RunCommand::Cancel{interaction_id,discord_thread_id,reply}=>{
@@ -110,13 +122,45 @@ async fn serve(
             event=run.recv()=>{
                 match event {
                     Ok(event @ Event::ServerRequest{..})=>{
-                        match app.runs.register_interaction(&run,&event).await? {
+                        let evidence=match &event {
+                            Event::ServerRequest{params,..}=>params["itemId"].as_str().and_then(|id|mcp_items.get(id)).and_then(Option::as_ref).cloned(),
+                            _=>None,
+                        };
+                        match app.runs.register_interaction_with_evidence(&run,&event,evidence).await? {
                             Some((id,operation))=>{
+                                approval_rpc_ids.insert(serde_json::to_string(&operation.rpc_id)?,id.clone());
                                 if seen_approvals.insert(id.clone()) {
-                                    emit(&events,RunEvent::Approval{interaction_id:id,operation})?;
+                                    emit(&events,RunEvent::Approval{interaction_id:id,operation:Box::new(operation)})?;
                                 }
                             }
                             None=>{emit(&events,RunEvent::UnsupportedApproval)?;}
+                        }
+                    }
+                    Ok(Event::Notification{method,params}) if method=="item/started"
+                        && params["threadId"]==run.identity.thread_id
+                        && params["turnId"]==run.identity.turn_id
+                        && params["item"]["type"]=="mcpToolCall"=>{
+                        if let Some(id)=params["item"]["id"].as_str() {
+                            let bounded=serde_json::to_vec(&params["item"])?.len()<=crate::direct_approval::MAX_REQUEST_BYTES;
+                            if !bounded {
+                                if let Some(slot)=mcp_items.get_mut(id){*slot=None;}
+                                continue;
+                            }
+                            if mcp_items.len()>=128 && !mcp_items.contains_key(id){continue;}
+                            let item=params["item"].clone();
+                            match mcp_items.entry(id.into()) {
+                                std::collections::hash_map::Entry::Vacant(slot)=>{slot.insert(Some(item));}
+                                std::collections::hash_map::Entry::Occupied(mut slot)=>{
+                                    if slot.get().as_ref()!=Some(&item){slot.insert(None);}
+                                }
+                            }
+                        }
+                    }
+                    Ok(Event::Notification{method,params}) if method=="serverRequest/resolved"=>{
+                        if params["threadId"]==run.identity.thread_id
+                            && let Some(request)=params.get("requestId")
+                            && let Some(id)=approval_rpc_ids.remove(&serde_json::to_string(request)?) {
+                            app.store.resolve_direct_approval(id).await?;
                         }
                     }
                     Ok(Event::Closed(_))|Err(tokio::sync::broadcast::error::RecvError::Closed)=>{

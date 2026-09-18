@@ -106,3 +106,48 @@ fn dynamic_tool_uses_call_id_from_the_installed_app_server_schema() {
     );
     assert!(DirectInteraction::from_event(&missing_call, &active()).is_err());
 }
+
+#[test]
+fn mcp_tool_confirmation_uses_exact_question_and_never_command_decision() {
+    let event = request(
+        "item/tool/requestUserInput",
+        json!({
+            "threadId":"thread-a","turnId":"turn-a","itemId":"item-a",
+            "questions":[{"id":"mcp_tool_call_approval_item-a","question":"Allow playwright browser_tabs?",
+                "isOther":false,"isSecret":false,
+                "options":[{"label":"Allow"},{"label":"Cancel"}]}]
+        }),
+    );
+    let mut prompt = DirectInteraction::from_event(&event, &active())
+        .unwrap()
+        .unwrap();
+    prompt.bind_mcp_evidence(json!({"type":"mcpToolCall","id":"item-a","server":"playwright","tool":"browser_tabs","arguments":{"action":"list"}})).unwrap();
+    assert_eq!(prompt.kind, InteractionKind::UserInput);
+    assert_eq!(
+        prompt
+            .mcp_tool_decision(ManualDecision::AcceptOnce)
+            .unwrap(),
+        json!({"answers":{"mcp_tool_call_approval_item-a":{"answers":["Allow"]}}})
+    );
+    assert_eq!(
+        prompt.mcp_tool_decision(ManualDecision::Decline).unwrap(),
+        json!({"answers":{"mcp_tool_call_approval_item-a":{"answers":["Cancel"]}}})
+    );
+    assert!(prompt.manual_decision(ManualDecision::AcceptOnce).is_err());
+    let secret = request(
+        "item/tool/requestUserInput",
+        json!({
+            "threadId":"thread-a","turnId":"turn-a","itemId":"item-a",
+            "questions":[{"id":"mcp_tool_call_approval_item-a","isOther":false,"isSecret":true,
+                "options":[{"label":"Allow"},{"label":"Cancel"}]}]
+        }),
+    );
+    let prompt = DirectInteraction::from_event(&secret, &active())
+        .unwrap()
+        .unwrap();
+    assert!(
+        prompt
+            .mcp_tool_decision(ManualDecision::AcceptOnce)
+            .is_err()
+    );
+}

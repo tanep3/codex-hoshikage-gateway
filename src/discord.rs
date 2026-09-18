@@ -364,6 +364,33 @@ impl Discord {
         .await?;
         Ok(())
     }
+    /// Direct runtime commands are registered as one complete guild command
+    /// set. Keeping them separate prevents legacy Proxy-only commands from
+    /// appearing on a direct instance.
+    pub async fn register_direct(&self, app: &str, guild: &str) -> Result<()> {
+        self.identify_bot().await?;
+        let option = |name: &str, description: &str, required: bool| json!({"type":3,"name":name,"description":description,"required":required});
+        let commands = json!([
+            {"name":"status","description":"この会話の実行・待機状態を確認"},
+            {"name":"stop","description":"実行中の依頼を中断し、待機列を一時停止"},
+            {"name":"cancel","description":"直近の待機依頼を取り消し。なければ実行中を中断"},
+            {"name":"resume","description":"一時停止した待機列を再開"},
+            {"name":"models","description":"Codexで利用できるモデル一覧"},
+            {"name":"model","description":"選択中モデルの確認・変更","options":[option("id","モデルID",false)]},
+            {"name":"steer","description":"実行中の依頼に追加指示","options":[option("text","追加指示",true)]}
+        ]);
+        self.api(
+            reqwest::Method::PUT,
+            &format!(
+                "/applications/{}/guilds/{}/commands",
+                snowflake(app)?,
+                snowflake(guild)?
+            ),
+            Some(commands),
+        )
+        .await?;
+        Ok(())
+    }
     pub async fn upload(
         &self,
         thread: &str,

@@ -28,6 +28,9 @@ pub struct DirectInteraction {
     /// field directly to a public Discord message or logs.
     pub params: Value,
     pub fingerprint: String,
+    /// A matching `item/started` MCP call. The question text alone cannot
+    /// establish which server, tool, or arguments are about to run.
+    pub mcp_evidence: Option<Value>,
 }
 
 impl DirectInteraction {
@@ -81,7 +84,35 @@ impl DirectInteraction {
             method: method.clone(),
             params: params.clone(),
             fingerprint: domain::digest(&canonical),
+            mcp_evidence: None,
         }))
+    }
+
+    pub fn bind_mcp_evidence(&mut self, item: Value) -> Result<()> {
+        ensure!(
+            self.kind == InteractionKind::UserInput,
+            "MCP evidence on another interaction"
+        );
+        ensure!(
+            item["type"] == "mcpToolCall"
+                && item["id"].as_str() == self.item_id.as_deref()
+                && item["server"]
+                    .as_str()
+                    .is_some_and(|s| !s.is_empty() && s.len() <= 128)
+                && item["tool"]
+                    .as_str()
+                    .is_some_and(|s| !s.is_empty() && s.len() <= 128)
+                && item["arguments"].is_object(),
+            "MCP call evidence does not match the question"
+        );
+        ensure!(
+            serde_json::to_vec(&item)?.len() <= MAX_REQUEST_BYTES,
+            "MCP call evidence too large"
+        );
+        self.fingerprint =
+            domain::digest(serde_json::to_vec(&json!([self.fingerprint, item]))?.as_slice());
+        self.mcp_evidence = Some(item);
+        Ok(())
     }
 
     /// Only the exact upstream command/file-change schema can use this reply.
@@ -110,6 +141,51 @@ impl DirectInteraction {
             );
         }
         Ok(json!({"decision":wire}))
+    }
+
+    /// The current Codex MCP prompt is one non-secret Allow/Cancel question.
+    /// Its wire shape differs from command/file approvals. Other user input
+    /// must use an explicit form coordinator and cannot use these buttons.
+    pub fn mcp_tool_decision(&self, decision: ManualDecision) -> Result<Value> {
+        ensure!(
+            self.kind == InteractionKind::UserInput && self.method == "item/tool/requestUserInput",
+            "not a Codex MCP tool confirmation"
+        );
+        ensure!(
+            self.mcp_evidence.is_some(),
+            "matching MCP tool call evidence is missing"
+        );
+        let questions = self.params["questions"]
+            .as_array()
+            .context("MCP confirmation questions missing")?;
+        ensure!(
+            questions.len() == 1,
+            "MCP confirmation must have one question"
+        );
+        let question = &questions[0];
+        let item = self.item_id.as_deref().context("MCP item ID missing")?;
+        let id = question["id"].as_str().context("MCP question ID missing")?;
+        ensure!(
+            id == format!("mcp_tool_call_approval_{item}")
+                && question["isOther"] == false
+                && question["isSecret"] == false,
+            "MCP confirmation shape is not trusted"
+        );
+        let offered = question["options"]
+            .as_array()
+            .context("MCP confirmation options missing")?;
+        ensure!(
+            offered.iter().any(|option| option["label"] == "Allow")
+                && offered.iter().any(|option| option["label"] == "Cancel"),
+            "MCP confirmation choices are incomplete"
+        );
+        let choice = match decision {
+            ManualDecision::AcceptOnce => "Allow",
+            ManualDecision::Decline | ManualDecision::Cancel => "Cancel",
+        };
+        let mut answers = serde_json::Map::new();
+        answers.insert(id.into(), json!({"answers":[choice]}));
+        Ok(json!({"answers":answers}))
     }
 }
 

@@ -249,16 +249,24 @@ impl CodexTransport {
                 inner: &self.0,
                 finished: false,
             };
-            let write = async {
+            let write = tokio::time::timeout(Duration::from_secs(10), async {
                 stdin.write_all(&bytes).await?;
                 stdin.write_all(b"\n").await?;
                 stdin.flush().await
-            }
+            })
             .await;
-            if let Err(e) = write {
-                return Err(TransportError::ResultUnknown(format!(
-                    "write {method}: {e}"
-                )));
+            match write {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    return Err(TransportError::ResultUnknown(format!(
+                        "write {method}: {e}"
+                    )));
+                }
+                Err(_) => {
+                    return Err(TransportError::ResultUnknown(format!(
+                        "write timed out: {method}"
+                    )));
+                }
             }
             write_guard.finished = true;
             (receiver, guard)
@@ -304,18 +312,14 @@ impl CodexTransport {
             inner: &self.0,
             finished: false,
         };
-        stdin
-            .write_all(&bytes)
-            .await
-            .map_err(|e| TransportError::ResultUnknown(e.to_string()))?;
-        stdin
-            .write_all(b"\n")
-            .await
-            .map_err(|e| TransportError::ResultUnknown(e.to_string()))?;
-        stdin
-            .flush()
-            .await
-            .map_err(|e| TransportError::ResultUnknown(e.to_string()))?;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            stdin.write_all(&bytes).await?;
+            stdin.write_all(b"\n").await?;
+            stdin.flush().await
+        })
+        .await
+        .map_err(|_| TransportError::ResultUnknown("App Server stdin write timed out".into()))?
+        .map_err(|e| TransportError::ResultUnknown(e.to_string()))?;
         write_guard.finished = true;
         Ok(())
     }

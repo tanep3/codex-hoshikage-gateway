@@ -86,9 +86,22 @@ impl DirectRunService {
         run: &ActiveRun,
         event: &Event,
     ) -> Result<Option<(String, DirectInteraction)>> {
-        let Some(interaction) = run.interaction(event)? else {
+        self.register_interaction_with_evidence(run, event, None)
+            .await
+    }
+
+    pub async fn register_interaction_with_evidence(
+        &self,
+        run: &ActiveRun,
+        event: &Event,
+        evidence: Option<Value>,
+    ) -> Result<Option<(String, DirectInteraction)>> {
+        let Some(mut interaction) = run.interaction(event)? else {
             return Ok(None);
         };
+        if let Some(evidence) = evidence {
+            interaction.bind_mcp_evidence(evidence)?;
+        }
         let id = self
             .store
             .record_direct_interaction(run.request_id.clone(), interaction.clone())
@@ -125,6 +138,38 @@ impl DirectRunService {
             .respond(rpc_id, json!({"decision":wire_decision}))
             .await
         {
+            let _ = self
+                .store
+                .mark_direct_approval_unknown(interaction_id)
+                .await;
+            return Err(error.into());
+        }
+        self.store.mark_direct_approval_sent(interaction_id).await
+    }
+
+    pub async fn reply_mcp_tool(
+        &self,
+        run: &ActiveRun,
+        interaction_id: String,
+        interaction: DirectInteraction,
+        decision: ManualDecision,
+    ) -> Result<()> {
+        let result = interaction.mcp_tool_decision(decision)?;
+        ensure!(
+            interaction.thread_id == run.identity.thread_id
+                && interaction.turn_id == run.identity.turn_id,
+            "MCP confirmation belongs to another run"
+        );
+        let rpc_id = self
+            .store
+            .begin_direct_mcp_reply(
+                run.request_id.clone(),
+                interaction_id.clone(),
+                interaction.fingerprint,
+                decision,
+            )
+            .await?;
+        if let Err(error) = run.transport().respond(rpc_id, result).await {
             let _ = self
                 .store
                 .mark_direct_approval_unknown(interaction_id)

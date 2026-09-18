@@ -5,6 +5,8 @@ use codex_hoshikage_gateway::{
     application::App,
     backup,
     config::{Config, secret},
+    direct_config::DirectConfig,
+    direct_migration,
     discord::{Discord, Handler},
     domain,
     proxy::Proxy,
@@ -32,6 +34,12 @@ enum Command {
         #[arg(long)]
         recovery: bool,
     },
+    /// Gateway-owned Codex App Server. Uses a separate config schema and
+    /// cannot fall through to the Proxy-backed daemon.
+    Direct {
+        #[command(subcommand)]
+        command: DirectCommand,
+    },
     Restore {
         #[arg(long)]
         from: PathBuf,
@@ -40,6 +48,16 @@ enum Command {
         #[command(subcommand)]
         command: Admin,
     },
+}
+#[derive(Subcommand)]
+enum DirectCommand {
+    Check,
+    Init,
+    Cutover {
+        #[arg(long)]
+        backup_to: PathBuf,
+    },
+    Run,
 }
 #[derive(Subcommand)]
 enum Admin {
@@ -118,6 +136,31 @@ async fn run(cli: Cli) -> Result<()> {
         .config
         .canonicalize()
         .context("設定ファイルを読み込めません")?;
+    if let Command::Direct { command } = &cli.command {
+        let cfg = DirectConfig::read(&config_path)?;
+        return match command {
+            DirectCommand::Check => {
+                secret(&cfg.discord.token_file)?;
+                println!(
+                    "直接接続設定と認証ファイルを確認しました。Discord/Codexへの接続は未検証です。"
+                );
+                Ok(())
+            }
+            DirectCommand::Init => {
+                let instance = storage::initialize_direct(&cfg)?;
+                println!("直接接続DBを初期化しました。instance_uuid={instance}");
+                Ok(())
+            }
+            DirectCommand::Cutover { backup_to } => {
+                let backup = direct_migration::cutover(&cfg, backup_to)?;
+                println!(
+                    "検証済みバックアップを作成して直接接続へ切り替えました。backup_id={backup}"
+                );
+                Ok(())
+            }
+            DirectCommand::Run => codex_hoshikage_gateway::direct_daemon::run(cfg).await,
+        };
+    }
     let cfg = Config::read(&config_path)?;
     match cli.command {
         Command::Check => {
@@ -193,6 +236,7 @@ async fn run(cli: Cli) -> Result<()> {
             ensure!(result["ok"] == true, "管理操作に失敗しました");
         }
         Command::Run { recovery } => daemon(cfg, config_path, recovery).await?,
+        Command::Direct { .. } => unreachable!("direct mode handled before legacy configuration"),
     }
     Ok(())
 }

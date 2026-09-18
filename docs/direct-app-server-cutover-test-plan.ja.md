@@ -2,19 +2,19 @@
 
 2026-09-18 / Tane Channel Technology
 
-状態：テスト計画。常駐切替は未実施。[目標要件](requirements-direct-app-server.ja.md)のDA-A01〜DA-A11を、運用とDiscord画面で判定できる形にする。試験場所は利用者が指定済みの[Discordチャンネル](https://discord.com/channels/1547798936167915541/1547877505040654397)。
+状態：テスト計画・実装中。常駐切替は未実施。[目標要件](requirements-direct-app-server.ja.md)のDA-A01〜DA-A11を、運用とDiscord画面で判定できる形にする。試験場所は利用者が指定済みの[Discordチャンネル](https://discord.com/channels/1547798936167915541/1547877505040654397)。
 
-現在、内部のCodex実行・保存・模擬Discord試験は一部合格しているが、U系列の直接接続版実Discord試験は全件未実施。合格表は実行時に証跡とともに更新する。
+`direct check/init/cutover/run` の独立CLI入口を実装した。模擬Discordの投稿重複→専属App Server→保存回答1回配信、承認ボタン→実callへの返信→回答配信、MCPの対応する `item/started` と質問の照合は自動試験を通した。U系列の直接接続版実Discord試験は全件未実施。合格表は実行時に証跡とともに更新する。
 
 ## 試験開始条件
 
 次を満たすまで、既存systemdサービスと本番DBは切り替えない。
 
-1. Gatewayのrunコマンドが専属Codex App Serverを起動する製品経路を持つ。現状のrunはProxy版daemonに入るため未達。
-2. Discord投稿受付・スケジューラ、承認画面と押下、MCP入力、状態表示、成果物取得、配信復旧を直接接続経路へ接続し、実Codexと模擬Discordの結合試験を通す。内部モジュール単体試験だけでは未達。
-3. Proxyを要求しないGateway専用config.toml例、専属Codex homeの認証・MCP設定、英日導入／利用者向け説明を用意する。
+1. `direct run` が専属Codex App Serverを起動する入口は実装済み。旧 `run` はProxy版のままであり、設定形式で誤って混同しないことをCLI試験で確認した。実Codex・実Discordでの常駐受入は未実施。
+2. Discord投稿受付・スケジューラ、基本操作、コマンド／ファイル変更の単発承認、MCPの1問Allow/Cancel確認、回答・生成画像配信を直接接続経路へ接続した。一般の追加質問・権限変更・MCPフォーム、成果物登録／`/get`、実Discord表示、再起動後の配信復旧は引き続き未達。模擬試験の合格だけで常駐切替しない。
+3. Proxyを要求しない[Gateway専用設定例](../config/config.direct.example.toml)は用意した。専属Codex homeの認証・MCP設定、英日導入／利用者向け説明は未整備。
 4. 別のstate_dirとCodex homeで隔離試験し、旧サービスと同じBotがDiscordイベントを二重受信しないようにする。
-5. 旧サービス停止後、DB・保存ファイルの整合バックアップを検証する。未終端の依頼・配信・制御があれば移行を拒否する。2026-09-18の読取検査では旧resource_deliveriesにWAITINGが2件あり、現状の移行前検査は通らない。状態を照合して本人へ示し、自動放棄やAI再実行で埋めない。
+5. 旧サービス停止後、DB・保存ファイルの整合バックアップを検証する。未終端の依頼・配信・制御があれば移行を拒否する。2026-09-18の読取検査では旧 `resource_deliveries` にWAITINGが2件ある。Proxyの回答保存は両方 `ready` だが、Discord配信記録は一方 `PATCH_PENDING`、もう一方 `POST_PENDING` であり、移行前検査は通らない。Discord送信結果を照合し、自動放棄・成功化・AI再実行で埋めない。
 6. 切替後の既存Discord会話は次の発言から新しいCodex文脈を始める。旧投稿・依頼記録は保持し、旧Codex thread／response IDは引き継がない。
 
 ## 利用者がDiscordで確認するケース
