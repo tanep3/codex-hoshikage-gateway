@@ -93,6 +93,8 @@ MCP lets Codex use external tools such as browsers. Permission here means allowi
 
 The bot shows the operation and available choices. **今回だけ許可 (Allow this call only)** permits the displayed call once. Eligible tools also offer **この依頼中、このツールを許可 (Allow this tool during this request)**; see “Repeated MCP confirmations” below for its scope. A tool may ask for more information after you allow it.
 
+Long commands and arguments appear across numbered, private pages. Open every page with **次へ (Next)** before allowing the operation. You can decline or cancel without opening every page; use `/stop` to stop the task.
+
 For a form, open **入力フォームを開く**, select a field, and choose **入力する**. Enter the displayed number for an enumerated choice, or はい / いいえ for a boolean. Extra text boxes can hold the rest of a long string. Choose **この内容で送信** when ready. Defaults are never filled automatically. Form screens are private; answers are not posted to the public conversation. Re-enter unfinished answers after a bot restart.
 
 Use `/stop` to stop the task. Expired or uncertain answers are never automatically approved or resent. Check the original card and `/status`. “Answer sent to MCP” confirms submission, not successful tool execution; the task result follows separately.

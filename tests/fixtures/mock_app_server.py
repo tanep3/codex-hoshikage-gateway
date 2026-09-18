@@ -55,7 +55,11 @@ for line in sys.stdin:
             print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32600, "message": "turn policy mismatch"}}), flush=True)
             continue
         print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"turn": {"id": "turn-one"}}}), flush=True)
-        if "--request-approval" in sys.argv:
+        if "--request-long-command-approval" in sys.argv:
+            approval_pending = True
+            command = "LONG_COMMAND_START " + ("x" * 6000) + " LONG_COMMAND_END"
+            print(json.dumps({"jsonrpc":"2.0","id":"long-approval-one","method":"item/commandExecution/requestApproval","params":{"threadId":"thread-one","turnId":"turn-one","itemId":"item-one","command":command,"availableDecisions":["accept","cancel"]}}), flush=True)
+        elif "--request-approval" in sys.argv:
             approval_pending = True
             print(json.dumps({"jsonrpc":"2.0","id":"approval-one","method":"item/commandExecution/requestApproval","params":{"threadId":"thread-one","turnId":"turn-one","itemId":"item-one","command":"cat report.txt","availableDecisions":["accept","decline"]}}), flush=True)
         elif "--request-mcp-approval" in sys.argv:
@@ -98,7 +102,9 @@ for line in sys.stdin:
             send_second_click()
     elif method == "turn/interrupt":
         print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {}}), flush=True)
-    elif method is None and msg.get("id") in ("approval-one", "mcp-approval-one", "mcp-form-one", "mcp-run-one", "mcp-run-two", "artifact-one", "unsupported-one", "unknown-one"):
+    elif method is None and msg.get("id") in ("approval-one", "long-approval-one", "mcp-approval-one", "mcp-form-one", "mcp-run-one", "mcp-run-two", "artifact-one", "unsupported-one", "unknown-one"):
+        if msg["id"] == "long-approval-one":
+            assert msg.get("result") == {"decision":"accept"} or msg.get("result") == {"decision":"cancel"}
         if msg["id"] == "mcp-approval-one":
             assert msg.get("result") == {"answers":{"mcp_tool_call_approval_item-one":{"answers":["Allow"]}}}
         if msg["id"] == "mcp-form-one":
