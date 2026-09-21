@@ -27,6 +27,8 @@ codex-hoshikage-gateway --config "$HOME/.config/codex-hoshikage-gateway/config.t
 
 `direct check` は外部接続を試しません。設定ファイルを編集しただけでは稼働中サービスへ反映されないため、必要な変更後は再起動してください。MCPツールもGateway専用の `codex-home` に設定します。
 
+`codex login status` が「ログイン済み」でも、期限切れの認証情報が残っている場合があります。ログに `401 Unauthorized`、`token_expired`、`refresh_token_reused`、または `refresh token was already used` が出たら、上と同じ `CODEX_HOME` で `codex login --device-auth` を実行して再ログインし、Gatewayを再起動してください。普段の `~/.codex/auth.json` をコピーして済ませないでください。失敗済みの依頼は自動で再実行しないため、復旧後に新しい発言で試してください。
+
 ## 会話が結果不明で止まったら
 
 本人がDiscordの同じ会話で `/recover` を開くのが通常の復旧方法です。画面に、旧作業を再実行せず記録を残すこと、未送信の待機依頼を取り消すこと、新しいCodex文脈から再開することが表示されます。本人が確認ボタンを押すまでは解除しません。作業ファイルとDiscord履歴は残ります。

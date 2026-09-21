@@ -37,7 +37,9 @@ CODEX_HOME="$HOME/.config/codex-hoshikage-gateway/codex-home" codex login
 CODEX_HOME="$HOME/.config/codex-hoshikage-gateway/codex-home" codex login status
 ```
 
-This is separate from your usual `~/.codex`. If you want MCP tools, configure them in this dedicated `CODEX_HOME`; registering them only in your normal Codex settings will not make them available to the Gateway. See [OpenAI's authentication guide](https://learn.chatgpt.com/docs/auth) for sign-in and credential storage.
+This is separate from your usual `~/.codex`. **Do not copy your usual `auth.json` here.** Refreshing one copy can leave the other with an expired credential and stop the Bot from answering. Sign in using this dedicated `CODEX_HOME`. On a server without a browser, run `codex login --device-auth` with the same `CODEX_HOME`, then open its URL and enter the code in your own browser. `codex login status` only confirms that sign-in data exists; it does not prove that Codex can answer. Try a short conversation in Discord after starting the service.
+
+If you want MCP tools, configure them in this dedicated `CODEX_HOME`; registering them only in your normal Codex settings will not make them available to the Gateway. See [OpenAI's authentication guide](https://developers.openai.com/docs/auth) for sign-in and credential storage.
 
 ## 5. Install the Gateway
 

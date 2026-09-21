@@ -27,6 +27,8 @@ codex-hoshikage-gateway --config "$HOME/.config/codex-hoshikage-gateway/config.t
 
 `direct check` does not test outside connections. Editing the file does not change a running service; restart after changes. Configure MCP tools in the Gateway's dedicated `codex-home`.
 
+`codex login status` can report a sign-in even when the saved credentials have expired. If the service log shows `401 Unauthorized`, `token_expired`, `refresh_token_reused`, or `refresh token was already used`, run `codex login --device-auth` with the same dedicated `CODEX_HOME`, then restart the Gateway. Do not copy `~/.codex/auth.json` as a shortcut. Failed tasks are never rerun automatically; send a new message after recovery.
+
 ## Recover a blocked conversation
 
 The usual path is for the authorized person to run `/recover` **in that Discord conversation**. The screen explains that the old task is recorded but not rerun, unsent queued tasks are cancelled, and Codex starts a fresh context. Nothing is released until the person presses the confirmation button. Work files and Discord history remain.

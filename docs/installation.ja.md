@@ -37,7 +37,9 @@ CODEX_HOME="$HOME/.config/codex-hoshikage-gateway/codex-home" codex login
 CODEX_HOME="$HOME/.config/codex-hoshikage-gateway/codex-home" codex login status
 ```
 
-普段の `~/.codex` とは別の場所です。CodexのMCPツールを使う場合も、この専用 `CODEX_HOME` に設定してください。通常のCodex設定だけに登録しても、Gatewayからは見えません。認証方法と保存先は[OpenAI公式の認証案内](https://developers.openai.com/ja-JP/docs/auth)も参照してください。
+普段の `~/.codex` とは別の場所です。**普段の `auth.json` をここへコピーしないでください。** 認証の更新時に片方だけ古くなり、Botが回答できなくなることがあります。この専用の場所でログインを完了してください。サーバー上でブラウザーを開けない場合は、同じ `CODEX_HOME` を指定して `codex login --device-auth` を実行し、表示されたURLとコードを自分のブラウザーで使えます。`codex login status` はログイン情報の有無を示すだけで、実際に回答できる保証にはなりません。起動後にDiscordで短い会話を試してください。
+
+CodexのMCPツールを使う場合も、この専用 `CODEX_HOME` に設定してください。通常のCodex設定だけに登録しても、Gatewayからは見えません。認証方法と保存先は[OpenAI公式の認証案内](https://developers.openai.com/ja-JP/docs/auth)も参照してください。
 
 ## 5. Gatewayをインストールする
 
