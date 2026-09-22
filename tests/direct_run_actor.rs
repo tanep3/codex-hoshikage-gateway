@@ -79,6 +79,7 @@ async fn actor_accepts(flag: &str, expected_kind: Option<InteractionKind>) {
         storage: legacy.storage,
         limits: legacy.limits,
         default_model: "gpt-5.6-luna".into(),
+        default_reasoning_effort: "high".into(),
     };
     storage::initialize_direct(&cfg).unwrap();
     let _lock = StateLock::acquire(&cfg.storage.state_dir).unwrap();

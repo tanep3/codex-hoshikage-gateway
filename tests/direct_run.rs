@@ -40,6 +40,7 @@ async fn local_dispatch_stores_answer_before_terminal_commit() {
     let options = ExecutionOptions {
         cwd: PathBuf::new(),
         model: "gpt-5.6-luna".into(),
+        reasoning_effort: "high".into(),
         model_provider: "openai".into(),
         sandbox: "workspace-write".into(),
         approval_policy: "on-request".into(),
@@ -100,6 +101,7 @@ async fn dropping_an_unfinished_run_fences_it_as_unknown() {
             ExecutionOptions {
                 cwd: PathBuf::new(),
                 model: "gpt-5.6-luna".into(),
+                reasoning_effort: "high".into(),
                 model_provider: "openai".into(),
                 sandbox: "workspace-write".into(),
                 approval_policy: "on-request".into(),
@@ -164,6 +166,7 @@ async fn a_manual_approval_replies_to_only_the_original_app_server_call() {
             ExecutionOptions {
                 cwd: PathBuf::new(),
                 model: "gpt-5.6-luna".into(),
+                reasoning_effort: "high".into(),
                 model_provider: "openai".into(),
                 sandbox: "workspace-write".into(),
                 approval_policy: "on-request".into(),

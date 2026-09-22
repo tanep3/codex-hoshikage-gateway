@@ -14,6 +14,13 @@ async fn restored_database_can_read_the_same_saved_answer() {
     let lock = StateLock::acquire(&cfg.storage.state_dir).unwrap();
     let (store, done) = Store::open(&cfg).unwrap();
     store
+        .call(true, |db| {
+            db.execute("UPDATE projects SET default_reasoning_effort='high'", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    store
         .add_conversation("4".into(), cfg.projects[0].id.clone())
         .await
         .unwrap();

@@ -1,6 +1,7 @@
 # Gateway-owned Codex App Server configuration for `direct` CLI commands.
 # Replace IDs and absolute paths. Keep the token in a separate mode-0600 file.
-default_model = "gpt-5.6-luna"
+default_model = "gpt-6-luna"
+default_reasoning_effort = "high"
 
 [discord]
 response_mode = "all" # or "mention"

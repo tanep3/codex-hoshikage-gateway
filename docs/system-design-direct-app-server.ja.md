@@ -2,7 +2,7 @@
 
 > **現在は直接接続版を実装済みです。** 本文の「目標」「未確定」「切替前」は設計時点の記録です。現在の導入と操作は[導入手順](installation.ja.md)と[ユーザーマニュアル](user-manual.ja.md)を参照してください。
 
-版0.2 / 2026-09-18 / Tane Channel Technology
+版0.3 / 2026-09-23 / Tane Channel Technology
 
 状態：目標構成の内部設計案。[目標要件](requirements-direct-app-server.ja.md)に対応。切替時の新規文脈とDB実行方式の境界を確定。現行常駐サービスは未変更。
 
@@ -114,11 +114,13 @@ Discordへ再配信する際は、依頼の会話IDと送信先を照合し、`d
 
 ## 7. 設定・保存場所・運用
 
-Gatewayの設定正本は `~/.config/codex-hoshikage-gateway/config.toml`。現在の `[proxy]`を最終的に削除し、専属Codexコマンド、Codex home、作業先・権限、保存容量・保持、モデルの設定へ移す。既存設定からの切替手順は、保存済み依頼の隔離方法を確認して確定する。設定検証は子プロセス起動前に行い、state_dirや認証先の稼働中切替を許さない。
+Gatewayの設定正本は `~/.config/codex-hoshikage-gateway/config.direct.toml`。現在の `[proxy]`を最終的に削除し、専属Codexコマンド、Codex home、作業先・権限、保存容量・保持、モデルの設定へ移す。既存設定からの切替手順は、保存済み依頼の隔離方法を確認して確定する。設定検証は子プロセス起動前に行い、state_dirや認証先の稼働中切替を許さない。
 
-直接接続用の設定型は既存Proxy設定型と分離する。`[codex]`には絶対パスの`command`と`home`を置き、Gatewayが`app-server`をstdioで起動する。`default_model`と`model_provider`、`sandbox`、`approval_policy`を明示し、初期値は`workspace-write`／`on-request`、`network_access`はfalseとする。`thread/start`の`sandbox`と`approvalPolicy`はこのCLIが受け付けるkebab-case、`turn/start`の`sandboxPolicy.type`はcamelCaseへ変換する。Turn開始時にはworkspaceを明示したsandbox policyを渡し、Codex home側の設定とも整合を検証する。Codex homeはGateway専属とし、認証・MCP設定をそこへ配置する。設定ファイルや認証を旧Proxyの領域から暗黙にコピーしない。移行中は旧設定の読取りを維持するが、直接接続の設定に`[proxy]`を要求しない。新旧のどちらを起動するかは設定型で一意にし、一つの依頼を両方へ送らない。
+直接接続用の設定型は既存Proxy設定型と分離する。`[codex]`には絶対パスの`command`と`home`を置き、Gatewayが`app-server`をstdioで起動する。`default_model`、`default_reasoning_effort`と`model_provider`、`sandbox`、`approval_policy`を明示し、初期値は`workspace-write`／`on-request`、`network_access`はfalseとする。起動時のmigration完了後、設定のモデルと推論レベルを`projects`の新規会話用既定値へ同一transactionで同期する。既存`conversations`の選択値は上書きせず、機能追加前で値が存在しない行だけ現在の既定推論レベルで初期化する。`thread/start`の`sandbox`と`approvalPolicy`はこのCLIが受け付けるkebab-case、`turn/start`の`sandboxPolicy.type`はcamelCaseへ変換する。Turn開始時にはworkspaceを明示したsandbox policyと、送信境界で固定したモデル・推論レベルを渡す。Codex homeはGateway専属とし、認証・MCP設定をそこへ配置する。設定ファイルや認証を旧Proxyの領域から暗黙にコピーしない。移行中は旧設定の読取りを維持するが、直接接続の設定に`[proxy]`を要求しない。新旧のどちらを起動するかは設定型で一意にし、一つの依頼を両方へ送らない。
 
-モデル一覧と選択値の検証は、実行中Turnの2枠を占有しない専用の短命App Server子プロセスで行う。`/model` の引数省略時は本人限定の選択メニューを表示し、選択イベントでもGuild・本人・会話を照合する。選択値は新しいcatalogで再検証し、その選択イベントIDをSQLiteの順序・一意性判定に使う。検証完了が前後しても古い選択が新しい選択を上書きしない。Discordの選択肢上限を超える候補は `/model id:` の手入力経路を案内する。選択値は新規Turnの送信境界で固定し、既存会話のCodex threadを継続したまま次のTurnに渡す。
+モデル一覧と選択値の検証は、実行中Turnの2枠を占有しない専用の短命App Server子プロセスで行う。`/model` の引数省略時は本人限定の選択メニューを表示し、選択イベントでもGuild・本人・会話を照合する。選択値は新しいcatalogで再検証し、その選択イベントIDをSQLiteの順序・一意性判定に使う。検証完了が前後しても古い選択が新しい選択を上書きしない。Discordの選択肢上限を超える候補は `/model id:` の手入力経路を案内する。
+
+`/effort`も同じ制御経路を使い、現在選択中モデルの`model/list.supportedReasoningEfforts`を候補の正本とする。引数省略時はセレクタ、`level`指定時は同じcatalogによる再検証を行う。Gateway内にモデルIDや推論レベルの固定一覧を持たない。モデルと推論レベルは独立した選択revisionを持ち、新規Turnの送信境界で同時に固定して`turn/start.model`と`turn/start.effort`へ渡す。既存会話のCodex threadを継続したまま次のTurnから反映する。
 
 プロトコルの起動順序と設定値は[Codex App Server公式資料](https://developers.openai.com/codex/app-server/)と[Codex設定資料](https://developers.openai.com/codex/config-reference/)を基準にし、稼働バイナリのschemaと実機試験で照合する。Gatewayの`[codex]`はGateway専用の運用設定であり、Codex自身の`$CODEX_HOME/config.toml`とは別ファイルである。
 

@@ -200,15 +200,50 @@ impl DirectApplication {
         };
         self.store.apply_resume(operation).await
     }
-    pub async fn choose_model(&self, thread: &str, interaction: &str, model: &str) -> Result<bool> {
+    pub async fn choose_model(
+        &self,
+        thread: &str,
+        interaction: &str,
+        model: &str,
+    ) -> Result<(bool, Option<String>)> {
         self.verify_location(thread).await?;
+        let model_entry = crate::direct_models::DirectModelCatalog {
+            launch: self.cfg.launch(),
+        }
+        .find(model)
+        .await?;
+        self.store
+            .select_direct_model_with_efforts(
+                thread.into(),
+                interaction.into(),
+                model.into(),
+                model_entry
+                    .supported_reasoning_efforts
+                    .iter()
+                    .map(|effort| effort.id.clone())
+                    .collect(),
+                model_entry.default_reasoning_effort,
+            )
+            .await
+    }
+    pub async fn choose_effort(
+        &self,
+        thread: &str,
+        interaction: &str,
+        effort: &str,
+    ) -> Result<bool> {
+        self.verify_location(thread).await?;
+        self.store
+            .add_conversation(thread.into(), crate::storage::PROXY_SCOPE.into())
+            .await?;
+        let model = self.store.conversation(thread).await?.selected_model;
         crate::direct_models::DirectModelCatalog {
             launch: self.cfg.launch(),
         }
-        .validate(model)
+        .validate_effort(&model, effort)
         .await?;
         self.store
-            .select_direct_model(thread.into(), interaction.into(), model.into())
+            .select_direct_reasoning_effort(thread.into(), interaction.into(), effort.into())
             .await
     }
     pub async fn verify_location(&self, channel: &str) -> Result<()> {

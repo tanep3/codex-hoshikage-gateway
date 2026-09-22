@@ -18,10 +18,12 @@ Type `/` in Discord and choose this Bot's command. In an example such as `/model
 
 | Command | What it does |
 | --- | --- |
-| `/status` | Show the current task, queue, model, and conversation state |
+| `/status` | Show the current task, queue, model, reasoning effort, and conversation state |
 | `/models` | List available model IDs; use `page` for more |
 | `/model` | See the selected model and choose another from a menu |
 | `/model id:MODEL_ID` | Enter a model ID directly; use it from the next task |
+| `/effort` | See the selected reasoning effort and choose one supported by the current model |
+| `/effort level:EFFORT` | Enter a reasoning effort directly; use it from the next task |
 | `/workspace` | Show where this conversation's files are stored |
 | `/get` | List artifacts registered in this conversation |
 | `/get path:output/report.pdf` | Send a file from the working folder to Discord; enter a **relative path** |
@@ -30,6 +32,8 @@ Type `/` in Discord and choose this Bot's command. In an example such as `/model
 | `/stop` | Request interruption and pause the remaining queue |
 | `/resume` | Resume a queue paused by `/stop`; it does not rerun the stopped task |
 | `/recover` | Review and recover a conversation blocked by an uncertain previous task |
+
+The model and reasoning effort are saved for each conversation. Changing one conversation does not affect another. A conversation used for the first time starts with the defaults in the administrator's `config.direct.toml`.
 
 Use `/cancel` when you want to withdraw a task you just sent; use `/stop` when you want to halt work and pause later tasks too. Sending an interrupt request and confirming that work stopped are separate. Check `/status` if needed. Changes already made to files are not automatically undone.
 

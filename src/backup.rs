@@ -485,7 +485,7 @@ pub async fn register_recovery_projects(store: &Store, cfg: &Config) -> Result<(
     cfg.validate()?;
     let model = cfg.registration_model().unwrap_or("").to_owned();
     store.call(true,move|c|{
-        c.execute("INSERT OR IGNORE INTO projects VALUES(?1,'proxy-default','Proxy default','',0,0,'ACTIVE',?2)",params![crate::storage::PROXY_SCOPE,model])?;
+        c.execute("INSERT OR IGNORE INTO projects(id,channel_id,name,cwd,dev,ino,lifecycle,default_model) VALUES(?1,'proxy-default','Proxy default','',0,0,'ACTIVE',?2)",params![crate::storage::PROXY_SCOPE,model])?;
         c.execute("UPDATE schema_meta SET recovery_pending=1",[])?;
         Ok(())
     }).await

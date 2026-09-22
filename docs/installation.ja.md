@@ -63,11 +63,11 @@ read -r -s -p 'Discord Bot token: ' gateway_bot_token
 printf '\n'
 (umask 077; printf '%s\n' "$gateway_bot_token" > "$HOME/.config/codex-hoshikage-gateway/discord-token")
 unset gateway_bot_token
-cp config/config.example.toml "$HOME/.config/codex-hoshikage-gateway/config.toml"
-chmod 600 "$HOME/.config/codex-hoshikage-gateway/config.toml"
+cp config/config.direct.example.toml "$HOME/.config/codex-hoshikage-gateway/config.direct.toml"
+chmod 600 "$HOME/.config/codex-hoshikage-gateway/config.direct.toml"
 ```
 
-`~/.config/codex-hoshikage-gateway/config.toml` をテキストエディターで開きます。まず `REPLACE_USER` をLinuxのユーザー名に、`REPLACE_UID` を `id -u` で表示される数値に置き換えます。次の欄を確認してください。
+`~/.config/codex-hoshikage-gateway/config.direct.toml` をテキストエディターで開きます。まず `REPLACE_USER` をLinuxのユーザー名に、`REPLACE_UID` を `id -u` で表示される数値に置き換えます。次の欄を確認してください。
 
 | 設定欄 | 入れるもの |
 | --- | --- |
@@ -78,7 +78,8 @@ chmod 600 "$HOME/.config/codex-hoshikage-gateway/config.toml"
 | `codex.command` | `command -v codex` で表示されたCodexの**絶対パス**。例の `.local/bin` と違えば必ず直す |
 | `codex.home` | 手順4で作った専用 `codex-home` の絶対パス |
 | `codex.workspace_root` | 作業ファイルを置く親フォルダーの絶対パス。会話ごとの子フォルダーは自動作成 |
-| `default_model` | 最初に使うモデルのID。例のモデルが使えなければ、使えるモデルに変更 |
+| `default_model` | 新しく会話を始めたときに使うモデルID。変更しても既存会話の選択は変わりません |
+| `default_reasoning_effort` | 新しく会話を始めたときの推論レベル。通常は `high` で始められます |
 | `storage.state_dir` / `temp_dir` / `socket_path` | 会話記録・一時ファイル・管理用socketの保存先。例のユーザー名とUIDを直す |
 
 `codex.workspace_root` は例えば `/home/あなたの名前/work/codex-hoshikage-gateway-workspaces` にできます。ファイルはこの配下に保存され、Discordの `/workspace` でも現在の場所を確認できます。**保存先設定を後から変えても、既存の会話のファイルは自動移動しません。**
@@ -88,12 +89,14 @@ chmod 600 "$HOME/.config/codex-hoshikage-gateway/config.toml"
 ## 7. 設定を確認して起動する
 
 ```bash
-codex-hoshikage-gateway --config "$HOME/.config/codex-hoshikage-gateway/config.toml" direct check
-codex-hoshikage-gateway --config "$HOME/.config/codex-hoshikage-gateway/config.toml" direct init
-codex-hoshikage-gateway --config "$HOME/.config/codex-hoshikage-gateway/config.toml" direct run
+codex-hoshikage-gateway --config "$HOME/.config/codex-hoshikage-gateway/config.direct.toml" direct check
+codex-hoshikage-gateway --config "$HOME/.config/codex-hoshikage-gateway/config.direct.toml" direct init
+codex-hoshikage-gateway --config "$HOME/.config/codex-hoshikage-gateway/config.direct.toml" direct run
 ```
 
-`direct check` は**ローカルの設定とトークンを確認するだけ**で、Discordへの接続やCodexのログイン成功までは検証しません。`direct init` は初回だけ実行します。`direct run` を動かしたまま、許可したサーバーのチャンネルで「こんにちは」と送ります。`mention` モードならBotをメンションして送ってください。返事が来たら基本設定は完了です。`/models` で使えるモデルのIDを確認し、必要なら `/model` で選べます。
+`direct check` は**ローカルの設定とトークンを確認するだけ**で、Discordへの接続やCodexのログイン成功までは検証しません。`direct init` は初回だけ実行します。`direct run` を動かしたまま、許可したサーバーのチャンネルで「こんにちは」と送ります。`mention` モードならBotをメンションして送ってください。返事が来たら基本設定は完了です。`/models` で使えるモデルのIDを確認し、必要なら `/model` で選べます。推論レベルは `/effort` のメニュー、または `level` 欄への入力で変更できます。
+
+`default_model` と `default_reasoning_effort` を変更したときはGatewayを再起動してください。変更後に初めて使うDiscordの会話には新しい既定値が入ります。すでに使った会話は、その会話で選んだ値を保持します。既存会話も変更したい場合は、その会話で `/model` と `/effort` を実行してください。
 
 ここで返事がない場合は、まず **サーバーID・ユーザーID・Botトークン・Message Content Intent・チャンネル権限**を確認します。Codexのログイン状態は手順4の `codex login status` で確認します。新しいBotコマンドが見えない場合は、Botが正しいサーバーへ追加されているか確認し、Discordを開き直してください。
 
@@ -107,7 +110,7 @@ cp packaging/codex-hoshikage-gateway.service "$HOME/.config/systemd/user/"
 systemctl --user daemon-reload
 ```
 
-コピーした `~/.config/systemd/user/codex-hoshikage-gateway.service` の `ExecStart=` を確認します。初期値の実行ファイルは `%h/.cargo/bin/codex-hoshikage-gateway` です。手順5で `~/bin` など別の場所が表示された場合は、**その絶対パスへ書き換えてください**。行末は `--config %h/.config/codex-hoshikage-gateway/config.toml direct run` です。
+コピーした `~/.config/systemd/user/codex-hoshikage-gateway.service` の `ExecStart=` を確認します。初期値の実行ファイルは `%h/.cargo/bin/codex-hoshikage-gateway` です。手順5で `~/bin` など別の場所が表示された場合は、**その絶対パスへ書き換えてください**。行末は `--config %h/.config/codex-hoshikage-gateway/config.direct.toml direct run` です。
 
 ```bash
 systemctl --user daemon-reload

@@ -13,6 +13,7 @@ pub struct CodexExecution {
 pub struct ExecutionOptions {
     pub cwd: PathBuf,
     pub model: String,
+    pub reasoning_effort: String,
     pub model_provider: String,
     pub sandbox: String,
     pub approval_policy: String,
@@ -124,6 +125,7 @@ impl CodexExecution {
                     "threadId":thread_id,
                     "cwd":options.cwd,
                     "model":options.model,
+                    "effort":options.reasoning_effort,
                     "input":input,
                     "approvalPolicy":options.approval_policy,
                     "sandboxPolicy":sandbox_policy,

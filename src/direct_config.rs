@@ -23,6 +23,7 @@ pub struct DirectConfig {
     pub storage: Storage,
     pub limits: Limits,
     pub default_model: String,
+    pub default_reasoning_effort: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -126,9 +127,11 @@ impl DirectConfig {
         ensure!(
             !self.default_model.trim().is_empty()
                 && self.default_model.len() <= 128
+                && !self.default_reasoning_effort.trim().is_empty()
+                && self.default_reasoning_effort.len() <= 64
                 && !self.codex.model_provider.trim().is_empty()
                 && self.codex.model_provider.len() <= 128,
-            "Codex model or provider is invalid"
+            "Codex model, reasoning effort, or provider is invalid"
         );
         ensure!(
             matches!(self.codex.sandbox.as_str(), "workspace-write" | "read-only"),
@@ -174,6 +177,7 @@ impl DirectConfig {
         ExecutionOptions {
             cwd: PathBuf::new(),
             model: self.default_model.clone(),
+            reasoning_effort: self.default_reasoning_effort.clone(),
             model_provider: self.codex.model_provider.clone(),
             sandbox: self.codex.sandbox.clone(),
             approval_policy: self.codex.approval_policy.clone(),

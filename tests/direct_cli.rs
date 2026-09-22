@@ -37,6 +37,7 @@ fn direct_cli_never_falls_through_to_proxy_configuration() {
         storage: legacy.storage,
         limits: legacy.limits,
         default_model: "gpt-5.6-luna".into(),
+        default_reasoning_effort: "high".into(),
     };
     let path = temp.path().join("direct.toml");
     fs::write(&path, toml::to_string(&config).unwrap()).unwrap();

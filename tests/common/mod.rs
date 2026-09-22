@@ -54,6 +54,12 @@ pub async fn store(c: &Config) -> (Store, StateLock) {
     storage::initialize(c).unwrap();
     let lock = StateLock::acquire(&c.storage.state_dir).unwrap();
     let (s, _) = Store::open(c).unwrap();
+    s.call(true, |db| {
+        db.execute("UPDATE projects SET default_reasoning_effort='high'", [])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
     s.add_conversation("4".into(), c.projects[0].id.clone())
         .await
         .unwrap();

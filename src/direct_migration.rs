@@ -70,12 +70,16 @@ pub fn cutover(cfg: &DirectConfig, backup_dir: &Path) -> Result<String> {
     // The Discord conversation IDs and historical rows remain intact. Only
     // continuation pointers are cleared, so the next message starts fresh.
     transaction.execute(
-        "UPDATE conversations SET continuation='NEW',last_response_id=NULL,proxy_thread_id=NULL,effective_model=NULL,selected_model=?1,selection_revision=selection_revision+1",
-        [&cfg.default_model],
+        "UPDATE conversations SET continuation='NEW',last_response_id=NULL,proxy_thread_id=NULL,effective_model=NULL,effective_reasoning_effort=NULL,selected_model=?1,selected_reasoning_effort=?2,selection_revision=selection_revision+1,effort_revision=effort_revision+1",
+        params![cfg.default_model, cfg.default_reasoning_effort],
     )?;
     transaction.execute(
-        "UPDATE projects SET default_model=?1 WHERE id=?2",
-        params![cfg.default_model, storage::PROXY_SCOPE],
+        "UPDATE projects SET default_model=?1,default_reasoning_effort=?2 WHERE id=?3",
+        params![
+            cfg.default_model,
+            cfg.default_reasoning_effort,
+            storage::PROXY_SCOPE
+        ],
     )?;
     transaction.execute(
         "UPDATE schema_meta SET fixed_digest=?1 WHERE singleton=1",

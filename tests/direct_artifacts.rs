@@ -68,6 +68,7 @@ async fn artifact_capture_is_conversation_bound_immutable_and_backed_up() {
         storage: base.storage,
         limits: base.limits,
         default_model: "gpt-5.6-luna".into(),
+        default_reasoning_effort: "high".into(),
     };
     storage::initialize_direct(&cfg).unwrap();
     let _lock = StateLock::acquire(&cfg.storage.state_dir).unwrap();

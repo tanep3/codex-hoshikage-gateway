@@ -2,6 +2,12 @@
 
 > **過去の開発記録です。** 以下のProxy接続・旧コマンド・当時の試験結果は、現在の公開版の操作説明ではありません。現行版はGatewayがCodex App Serverを直接起動します。導入は[導入手順](installation.ja.md)、操作は[ユーザーマニュアル](user-manual.ja.md)を参照してください。
 
+## v1.1.0：会話ごとのモデル・推論レベル（2026-09-23）
+
+`config.direct.toml` の `default_model` と `default_reasoning_effort` を、新しく作るDiscord会話の初期値として起動時にDBへ同期するようにした。既存会話の選択値は上書きしない。`/effort` は、選択中モデルについてCodex App Serverが返す推論レベルをセレクタへ表示し、`level`欄への文字列入力でも変更できる。選択は会話単位でSQLiteへ保存し、モデルとともに依頼の送信境界で固定して `turn/start` へ渡す。モデル変更先が現在の推論レベルを提供しない場合は、そのモデルの既定値へ合わせたことを利用者へ表示する。
+
+Gateway内にモデルIDや推論レベルの一覧を固定していない。常駐環境のCodex 0.153.4へ実際に `model/list` を行い、`gpt-6-astra`、`gpt-6-sol`、`gpt-6-luna`を含む一覧と、モデル別の推論レベルを取得できることを確認した。全自動試験、Clippy警告禁止、差分検査を通過。`~/bin`へv1.1.0をインストールし、整合バックアップ後に常駐設定を `gpt-6-luna`／`high`へ変更した。DBはschema 15、既存5会話のモデルは`gpt-5.6-luna`のまま、推論レベルは`high`で保持され、新規会話用既定値だけが更新された。ユーザーsystemdサービスのactive状態と、実Discord Guildへの`/effort level:`登録を確認した。
+
 更新: 2026-09-16
 基準: 要件2.4、システム設計1.4、Proxy API v2契約案0.2およびMCP単一Run限定許可API合意0.3。
 

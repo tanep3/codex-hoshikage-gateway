@@ -61,6 +61,7 @@ async fn image_only_or_text_plus_image_is_saved_before_terminal_and_in_backup() 
             ExecutionOptions {
                 cwd: PathBuf::new(),
                 model: "gpt-5.6-luna".into(),
+                reasoning_effort: "high".into(),
                 model_provider: "openai".into(),
                 sandbox: "workspace-write".into(),
                 approval_policy: "on-request".into(),

@@ -51,7 +51,7 @@ async fn real_codex_answer_is_saved_without_proxy() {
         image_max_bytes: cfg.limits.artifact_bytes,
     };
     let mut run=service.start(request.clone(),"4".into(),ExecutionOptions {
-        cwd:PathBuf::new(),model:"gpt-5.6-luna".into(),model_provider:"openai".into(),
+        cwd:PathBuf::new(),model:"gpt-5.6-luna".into(),reasoning_effort:"high".into(),model_provider:"openai".into(),
         sandbox:"workspace-write".into(),approval_policy:"on-request".into(),network_access:false,
     },vec![json!({"type":"text","text":"Reply with exactly DIRECT_GATEWAY_OK. Do not call tools."})]).await.unwrap();
     tokio::time::timeout(Duration::from_secs(150), async {

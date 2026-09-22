@@ -27,6 +27,7 @@ async fn typed_execution_preserves_thread_and_turn_identity() {
     let options = ExecutionOptions {
         cwd: PathBuf::from("/tmp"),
         model: "gpt-5.6-luna".into(),
+        reasoning_effort: "high".into(),
         model_provider: "openai".into(),
         sandbox: "workspace-write".into(),
         approval_policy: "on-request".into(),

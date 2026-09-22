@@ -51,7 +51,7 @@ for line in sys.stdin:
         if not user_input or any(not isinstance(item, dict) or item.get("type") not in ("text", "image") for item in user_input):
             print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32602, "message": "invalid App Server user input"}}), flush=True)
             continue
-        if "--enforce-sandbox" in sys.argv and (policy.get("type") != "workspaceWrite" or policy.get("writableRoots") != ["/tmp"] or policy.get("networkAccess") is not False or msg["params"].get("approvalPolicy") != "on-request"):
+        if "--enforce-sandbox" in sys.argv and (policy.get("type") != "workspaceWrite" or policy.get("writableRoots") != ["/tmp"] or policy.get("networkAccess") is not False or msg["params"].get("approvalPolicy") != "on-request" or msg["params"].get("effort") != "high"):
             print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32600, "message": "turn policy mismatch"}}), flush=True)
             continue
         print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"turn": {"id": "turn-one"}}}), flush=True)
@@ -94,7 +94,16 @@ for line in sys.stdin:
             items.append({"type":"imageGeneration","id":"image-one","status":"completed","result":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jGZkAAAAASUVORK5CYII="})
         print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"thread": {"id": msg["params"]["threadId"], "turns": [{"id": "turn-one", "status": "completed", "itemsView": "full", "items": items}]}}}), flush=True)
     elif method == "model/list":
-        print(json.dumps({"jsonrpc":"2.0","id":msg["id"],"result":{"data":[{"id":"gpt-5.6-luna","displayName":"GPT 5.6 Luna"},{"id":"gpt-5.6-terra","displayName":"GPT 5.6 Terra"}],"nextCursor":None}}),flush=True)
+        efforts = [
+            {"reasoningEffort":"low","description":"Fast reasoning"},
+            {"reasoningEffort":"medium","description":"Balanced reasoning"},
+            {"reasoningEffort":"high","description":"Deep reasoning"},
+        ]
+        print(json.dumps({"jsonrpc":"2.0","id":msg["id"],"result":{"data":[
+            {"id":"gpt-5.6-luna","displayName":"GPT 5.6 Luna","defaultReasoningEffort":"medium","supportedReasoningEfforts":efforts},
+            {"id":"gpt-5.6-terra","displayName":"GPT 5.6 Terra","defaultReasoningEffort":"medium","supportedReasoningEfforts":efforts},
+            {"id":"gpt-6-luna","displayName":"GPT 6 Luna","defaultReasoningEffort":"medium","supportedReasoningEfforts":efforts},
+        ],"nextCursor":None}}),flush=True)
     elif method == "turn/steer":
         print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"turnId": msg["params"]["expectedTurnId"]}}), flush=True)
         if "--request-mcp-run-grant-steer" in sys.argv:

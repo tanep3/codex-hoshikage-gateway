@@ -378,6 +378,7 @@ impl Discord {
             {"name":"recover","description":"結果不明で止まった会話を確認して復旧"},
             {"name":"models","description":"Codexで利用できるモデル一覧","options":[{"type":4,"name":"page","description":"一覧のページ番号（省略で1）","required":false,"min_value":1}]},
             {"name":"model","description":"選択中モデルの確認・変更","options":[option("id","モデルID",false)]},
+            {"name":"effort","description":"選択中の推論レベルを確認・変更","options":[option("level","推論レベル",false)]},
             {"name":"get","description":"この会話の成果物一覧、またはファイルの保存版を返送","options":[option("path","会話ワーク内の相対パス（省略で一覧）",false)]},
             {"name":"workspace","description":"この会話の作業フォルダーを確認"},
             {"name":"steer","description":"実行中の依頼に追加指示","options":[option("text","追加指示",true)]}

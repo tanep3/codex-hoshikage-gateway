@@ -27,6 +27,7 @@ fn direct(temp: &tempfile::TempDir) -> DirectConfig {
         storage: old.storage,
         limits: old.limits,
         default_model: "gpt-5.6-luna".into(),
+        default_reasoning_effort: "high".into(),
     }
 }
 
@@ -46,13 +47,19 @@ async fn cutover_preserves_discord_history_and_starts_fresh_codex_context() {
     let id = direct_migration::cutover(&next, &bundle).unwrap();
     assert_eq!(backup::verify(&bundle).unwrap().backup_id, id);
     let db = Connection::open(next.storage.state_dir.join("gateway.sqlite3")).unwrap();
-    let context: (String, Option<String>, Option<String>, String) = db.query_row(
-        "SELECT continuation,proxy_thread_id,last_response_id,selected_model FROM conversations WHERE thread_id='4'",
-        [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+    let context: (String, Option<String>, Option<String>, String, String) = db.query_row(
+        "SELECT continuation,proxy_thread_id,last_response_id,selected_model,selected_reasoning_effort FROM conversations WHERE thread_id='4'",
+        [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
     ).unwrap();
     assert_eq!(
         context,
-        ("NEW".into(), None, None, next.default_model.clone())
+        (
+            "NEW".into(),
+            None,
+            None,
+            next.default_model.clone(),
+            next.default_reasoning_effort.clone()
+        )
     );
     assert_eq!(
         db.query_row("SELECT mode FROM runtime_mode", [], |row| row
@@ -85,6 +92,41 @@ async fn cutover_preserves_discord_history_and_starts_fresh_codex_context() {
             .await
             .is_ok()
     );
+}
+
+#[tokio::test]
+async fn restart_updates_only_new_conversation_defaults() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut cfg = direct(&temp);
+    storage::initialize_direct(&cfg).unwrap();
+    let (store, _) = Store::open_direct(&cfg).unwrap();
+    store
+        .add_conversation("4".into(), storage::PROXY_SCOPE.into())
+        .await
+        .unwrap();
+    store
+        .select_direct_model("4".into(), "100".into(), "gpt-existing".into())
+        .await
+        .unwrap();
+    store
+        .select_direct_reasoning_effort("4".into(), "101".into(), "low".into())
+        .await
+        .unwrap();
+    drop(store);
+
+    cfg.default_model = "gpt-6-luna".into();
+    cfg.default_reasoning_effort = "high".into();
+    let (store, _) = Store::open_direct(&cfg).unwrap();
+    store
+        .add_conversation("5".into(), storage::PROXY_SCOPE.into())
+        .await
+        .unwrap();
+    let existing = store.conversation("4").await.unwrap();
+    assert_eq!(existing.selected_model, "gpt-existing");
+    assert_eq!(existing.selected_reasoning_effort, "low");
+    let new = store.conversation("5").await.unwrap();
+    assert_eq!(new.selected_model, "gpt-6-luna");
+    assert_eq!(new.selected_reasoning_effort, "high");
 }
 
 #[tokio::test]
@@ -189,7 +231,7 @@ fn schema_nine_cutover_preserves_an_offline_verifiable_backup() {
     storage::initialize(&old).unwrap();
     let db_path = old.storage.state_dir.join("gateway.sqlite3");
     let db = Connection::open(&db_path).unwrap();
-    db.execute_batch("DROP TABLE direct_artifacts;DELETE FROM schema_migrations WHERE version=14;DROP TABLE direct_generated_images;DROP TABLE direct_image_inventories;DELETE FROM schema_migrations WHERE version=13;DROP TABLE runtime_mode;DELETE FROM schema_migrations WHERE version=12;DROP TRIGGER direct_interaction_no_rewind;DROP TABLE direct_interactions;DELETE FROM schema_migrations WHERE version=11;DROP TRIGGER direct_dispatch_no_rewind;DROP TABLE direct_answers;DROP TABLE direct_dispatches;DROP TABLE direct_conversations;DELETE FROM schema_migrations WHERE version=10;UPDATE schema_meta SET schema_version=9;").unwrap();
+    db.execute_batch("DELETE FROM schema_migrations WHERE version=15;ALTER TABLE operations DROP COLUMN desired_reasoning_effort;ALTER TABLE requests DROP COLUMN reasoning_effort_revision;ALTER TABLE requests DROP COLUMN reasoning_effort;ALTER TABLE conversations DROP COLUMN effort_revision;ALTER TABLE conversations DROP COLUMN effective_reasoning_effort;ALTER TABLE conversations DROP COLUMN selected_reasoning_effort;ALTER TABLE conversations DROP COLUMN latest_effort_sequence;ALTER TABLE projects DROP COLUMN default_reasoning_effort;DROP TABLE direct_artifacts;DELETE FROM schema_migrations WHERE version=14;DROP TABLE direct_generated_images;DROP TABLE direct_image_inventories;DELETE FROM schema_migrations WHERE version=13;DROP TABLE runtime_mode;DELETE FROM schema_migrations WHERE version=12;DROP TRIGGER direct_interaction_no_rewind;DROP TABLE direct_interactions;DELETE FROM schema_migrations WHERE version=11;DROP TRIGGER direct_dispatch_no_rewind;DROP TABLE direct_answers;DROP TABLE direct_dispatches;DROP TABLE direct_conversations;DELETE FROM schema_migrations WHERE version=10;UPDATE schema_meta SET schema_version=9;").unwrap();
     drop(db);
     assert_eq!(storage::validate_database(&db_path).unwrap().0, 9);
     let next = direct(&temp);

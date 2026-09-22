@@ -44,6 +44,7 @@ async fn original_discord_message_runs_locally_and_delivers_its_saved_answer() {
         storage: old.storage,
         limits: old.limits,
         default_model: "gpt-5.6-luna".into(),
+        default_reasoning_effort: "high".into(),
     };
     storage::initialize_direct(&cfg).unwrap();
     let _lock = StateLock::acquire(&cfg.storage.state_dir).unwrap();

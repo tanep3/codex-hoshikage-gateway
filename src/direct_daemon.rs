@@ -8,7 +8,7 @@ use crate::{
     direct_approval::{DirectInteraction, InteractionKind, ManualDecision},
     direct_config::DirectConfig,
     direct_content::DirectContent,
-    direct_models::{DirectModel, DirectModelCatalog},
+    direct_models::{DirectModel, DirectModelCatalog, DirectReasoningEffort},
     direct_run::DirectRunService,
     direct_run_actor::{self, RunCommand, RunEvent},
     discord::{Discord, Handler, Health, Incoming, snowflake},
@@ -92,6 +92,44 @@ fn model_menu(models: &[DirectModel], current: &str, interaction: &str) -> (Stri
             "type":3,
             "custom_id":format!("direct:model:{interaction}"),
             "placeholder":"モデルを選択",
+            "min_values":1,
+            "max_values":1,
+            "options":choices,
+        }]}]),
+    )
+}
+
+fn effort_menu(
+    efforts: &[DirectReasoningEffort],
+    current: &str,
+    interaction: &str,
+) -> (String, Value) {
+    let choices: Vec<Value> = efforts
+        .iter()
+        .filter(|effort| effort.id.len() <= 100)
+        .take(25)
+        .map(|effort| {
+            json!({
+                "label": effort.id,
+                "value": effort.id,
+                "description": effort.description.chars().take(100).collect::<String>(),
+                "default": effort.id == current,
+            })
+        })
+        .collect();
+    let text = format!("選択中の推論レベル: {current}\n次に使う推論レベルを選んでください。");
+    if choices.is_empty() {
+        return (
+            format!("{text}\n選択中のモデルで利用可能な候補を取得できませんでした。"),
+            json!([]),
+        );
+    }
+    (
+        text,
+        json!([{"type":1,"components":[{
+            "type":3,
+            "custom_id":format!("direct:effort:{interaction}"),
+            "placeholder":"推論レベルを選択",
             "min_values":1,
             "max_values":1,
             "options":choices,
@@ -649,6 +687,11 @@ impl DirectCoordinator {
                     .model_selection(id, token, app_id, thread, custom, &value)
                     .await;
             }
+            if custom.starts_with("direct:effort:") {
+                return self
+                    .effort_selection(id, token, app_id, thread, custom, &value)
+                    .await;
+            }
             if custom.starts_with("direct:recover:") {
                 return self
                     .recovery_button(id, token, app_id, thread, custom)
@@ -668,6 +711,26 @@ impl DirectCoordinator {
             let (text, components) = result.unwrap_or_else(|_| {
                 (
                     "モデル候補を取得できませんでした。少し待って /model を開き直してください。"
+                        .into(),
+                    json!([]),
+                )
+            });
+            return self
+                .app
+                .discord
+                .reply_components(app_id, token, &text, components)
+                .await;
+        }
+        if value["data"]["name"] == "effort"
+            && !value["data"]["options"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item["name"] == "level"))
+        {
+            self.app.discord.acknowledge(id, token).await?;
+            let result = self.effort_selection_menu(thread, id).await;
+            let (text, components) = result.unwrap_or_else(|_| {
+                (
+                    "推論レベル候補を取得できませんでした。少し待って /effort を開き直してください。"
                         .into(),
                     json!([]),
                 )
@@ -722,6 +785,29 @@ impl DirectCoordinator {
         .list()
         .await?;
         Ok(model_menu(&catalog, &current, interaction))
+    }
+
+    async fn effort_selection_menu(
+        &self,
+        thread: &str,
+        interaction: &str,
+    ) -> Result<(String, Value)> {
+        self.app.verify_location(thread).await?;
+        self.app
+            .store
+            .add_conversation(thread.into(), storage::PROXY_SCOPE.into())
+            .await?;
+        let conversation = self.app.store.conversation(thread).await?;
+        let model = DirectModelCatalog {
+            launch: self.app.cfg.launch(),
+        }
+        .find(&conversation.selected_model)
+        .await?;
+        Ok(effort_menu(
+            &model.supported_reasoning_efforts,
+            &conversation.selected_reasoning_effort,
+            interaction,
+        ))
     }
 
     async fn recovery_menu(&self, thread: &str) -> Result<(String, Value)> {
@@ -845,10 +931,13 @@ impl DirectCoordinator {
                 .store
                 .add_conversation(thread.into(), storage::PROXY_SCOPE.into())
                 .await?;
-            let applied = self.app.choose_model(thread, id, model).await?;
+            let (applied, adjusted_effort) = self.app.choose_model(thread, id, model).await?;
             let current = self.app.store.conversation(thread).await?.selected_model;
             Ok::<String, anyhow::Error>(if applied {
-                format!("選択中のモデルを {current} に変更しました。次の依頼から使います。")
+                match adjusted_effort {
+                    Some(effort) => format!("選択中のモデルを {current} に変更しました。このモデルで使えるよう、推論レベルは {effort} に合わせました。次の依頼から使います。"),
+                    None => format!("選択中のモデルを {current} に変更しました。次の依頼から使います。"),
+                }
             } else {
                 format!("より新しいモデル選択が優先されています。現在のモデル: {current}")
             })
@@ -856,6 +945,58 @@ impl DirectCoordinator {
         .await;
         let text = result.unwrap_or_else(|_| {
             "モデルを変更できませんでした。/model を開き直して選択してください。".into()
+        });
+        self.app
+            .discord
+            .reply_components(app_id, token, &text, json!([]))
+            .await
+    }
+
+    async fn effort_selection(
+        &self,
+        id: &str,
+        token: &str,
+        app_id: &str,
+        thread: &str,
+        custom: &str,
+        value: &Value,
+    ) -> Result<()> {
+        self.app.discord.acknowledge_update(id, token).await?;
+        let result = async {
+            ensure!(
+                value["data"]["component_type"] == 3,
+                "reasoning effort component type is invalid"
+            );
+            let source = custom
+                .strip_prefix("direct:effort:")
+                .context("reasoning effort menu identity missing")?;
+            snowflake(source)?;
+            let values = value["data"]["values"]
+                .as_array()
+                .context("reasoning effort choice missing")?;
+            ensure!(
+                values.len() == 1,
+                "exactly one reasoning effort must be selected"
+            );
+            let effort = values[0]
+                .as_str()
+                .context("reasoning effort choice is not text")?;
+            let applied = self.app.choose_effort(thread, id, effort).await?;
+            let current = self
+                .app
+                .store
+                .conversation(thread)
+                .await?
+                .selected_reasoning_effort;
+            Ok::<String, anyhow::Error>(if applied {
+                format!("選択中の推論レベルを {current} に変更しました。次の依頼から使います。")
+            } else {
+                format!("より新しい推論レベル選択が優先されています。現在: {current}")
+            })
+        }
+        .await;
+        let text = result.unwrap_or_else(|_| {
+            "推論レベルを変更できませんでした。/effort を開き直して選択してください。".into()
         });
         self.app
             .discord
@@ -891,13 +1032,14 @@ impl DirectCoordinator {
                     ""
                 };
                 Ok(format!(
-                    "実行中: {active}\n待機列: {}\n選択モデル: {}\n会話状態: {}{recovery}",
+                    "実行中: {active}\n待機列: {}\n選択モデル: {}\n推論レベル: {}\n会話状態: {}{recovery}",
                     if cv.paused {
                         "停止中"
                     } else {
                         "再開済み"
                     },
                     cv.selected_model,
+                    cv.selected_reasoning_effort,
                     cv.continuation
                 ))
             }
@@ -945,13 +1087,32 @@ impl DirectCoordinator {
             }
             "model" => {
                 if let Some(model) = option("id") {
-                    self.app.choose_model(thread, id, model).await?;
-                    Ok(format!("次の依頼からモデルを {model} に変更しました。"))
+                    let (_, adjusted_effort) = self.app.choose_model(thread, id, model).await?;
+                    Ok(match adjusted_effort {
+                        Some(effort) => format!(
+                            "次の依頼からモデルを {model} に変更しました。このモデルで使えるよう、推論レベルは {effort} に合わせました。"
+                        ),
+                        None => format!("次の依頼からモデルを {model} に変更しました。"),
+                    })
                 } else {
                     let cv = self.app.store.conversation(thread).await?;
                     Ok(format!(
                         "選択中のモデル: {}\n/models で一覧を確認できます。",
                         cv.selected_model
+                    ))
+                }
+            }
+            "effort" => {
+                if let Some(effort) = option("level") {
+                    self.app.choose_effort(thread, id, effort).await?;
+                    Ok(format!(
+                        "次の依頼から推論レベルを {effort} に変更しました。"
+                    ))
+                } else {
+                    let cv = self.app.store.conversation(thread).await?;
+                    Ok(format!(
+                        "選択中の推論レベル: {}\n/effort の level 欄へ文字列を直接入力することもできます。",
+                        cv.selected_reasoning_effort
                     ))
                 }
             }
@@ -1485,6 +1646,11 @@ mod tests {
             .map(|index| DirectModel {
                 id: format!("model-{index}"),
                 display_name: format!("Model {index}"),
+                default_reasoning_effort: "medium".into(),
+                supported_reasoning_efforts: vec![DirectReasoningEffort {
+                    id: "high".into(),
+                    description: "Deep reasoning".into(),
+                }],
             })
             .collect::<Vec<_>>();
         let (text, components) = model_menu(&models, "model-0", "123");
@@ -1495,6 +1661,25 @@ mod tests {
         assert_eq!(select["options"].as_array().unwrap().len(), 25);
         assert_eq!(select["options"][0]["value"], "model-0");
         assert_eq!(select["options"][0]["default"], true);
+    }
+
+    #[test]
+    fn effort_menu_uses_the_selected_models_catalog() {
+        let efforts = vec![
+            DirectReasoningEffort {
+                id: "medium".into(),
+                description: "Balanced reasoning".into(),
+            },
+            DirectReasoningEffort {
+                id: "high".into(),
+                description: "Deep reasoning".into(),
+            },
+        ];
+        let (_, components) = effort_menu(&efforts, "high", "456");
+        let select = &components[0]["components"][0];
+        assert_eq!(select["custom_id"], "direct:effort:456");
+        assert_eq!(select["options"][1]["value"], "high");
+        assert_eq!(select["options"][1]["default"], true);
     }
 
     #[test]
@@ -1673,6 +1858,7 @@ mod tests {
                 validation_secs: 120,
             },
             default_model: "gpt-5.6-luna".into(),
+            default_reasoning_effort: "high".into(),
         };
         fs::write(&cfg.discord.token_file, "token").unwrap();
         storage::initialize_direct(&cfg).unwrap();
@@ -2109,6 +2295,52 @@ mod tests {
                     .contains("gpt-5.6-terra")
             );
             assert_eq!(applied["components"], json!([]));
+            let effort_slash = json!({"id":"2011","token":"token","application_id":"123","guild_id":"1","channel_id":"4","member":{"user":{"id":"2"}},"data":{"name":"effort","options":[]}});
+            controller.handle_interaction(effort_slash).await.unwrap();
+            assert_eq!(callbacks.lock().unwrap().last().unwrap()["type"], 5);
+            let effort_view = edits.lock().unwrap().last().unwrap().clone();
+            assert!(
+                effort_view["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains("選択中の推論レベル")
+            );
+            let effort_select = &effort_view["components"][0]["components"][0];
+            assert_eq!(effort_select["custom_id"], "direct:effort:2011");
+            assert!(
+                effort_select["options"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|option| option["value"] == "high")
+            );
+            let effort_choice = json!({"id":"2012","token":"token","application_id":"123","guild_id":"1","channel_id":"4","member":{"user":{"id":"2"}},"data":{"custom_id":"direct:effort:2011","component_type":3,"values":["high"]}});
+            controller.handle_interaction(effort_choice).await.unwrap();
+            assert_eq!(
+                store
+                    .conversation("4")
+                    .await
+                    .unwrap()
+                    .selected_reasoning_effort,
+                "high"
+            );
+            let explicit_effort = controller
+                .command(
+                    "2013",
+                    "4",
+                    &json!({"data":{"name":"effort","options":[{"name":"level","value":"low"}]}}),
+                )
+                .await
+                .unwrap();
+            assert!(explicit_effort.contains("low"));
+            assert_eq!(
+                store
+                    .conversation("4")
+                    .await
+                    .unwrap()
+                    .selected_reasoning_effort,
+                "low"
+            );
             let workspace = controller
                 .command(
                     "2003",

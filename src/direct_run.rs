@@ -271,6 +271,7 @@ impl DirectRunService {
             }
         };
         options.model = dispatch.selected_model.clone();
+        options.reasoning_effort = dispatch.selected_reasoning_effort.clone();
         let on_drop = UnknownOnDrop {
             store: self.store.clone(),
             request_id: request_id.clone(),

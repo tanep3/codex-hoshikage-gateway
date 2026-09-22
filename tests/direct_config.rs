@@ -21,6 +21,7 @@ fn fixture(temp: &tempfile::TempDir) -> DirectConfig {
         storage: legacy.storage,
         limits: legacy.limits,
         default_model: "gpt-5.6-luna".into(),
+        default_reasoning_effort: "high".into(),
     }
 }
 
@@ -34,6 +35,7 @@ fn direct_configuration_requires_no_proxy_and_launches_stdio_only() {
     assert_eq!(loaded.launch().args, ["app-server", "--listen", "stdio://"]);
     assert_eq!(loaded.execution().approval_policy, "on-request");
     assert_eq!(loaded.execution().sandbox, "workspace-write");
+    assert_eq!(loaded.execution().reasoning_effort, "high");
 }
 
 #[test]

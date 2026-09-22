@@ -105,6 +105,8 @@ pub struct Conversation {
     pub pause_revision: i64,
     pub selected_model: String,
     pub effective_model: Option<String>,
+    pub selected_reasoning_effort: String,
+    pub effective_reasoning_effort: Option<String>,
     pub proxy_thread_id: Option<String>,
     pub last_response_id: Option<String>,
     pub continuation: String,

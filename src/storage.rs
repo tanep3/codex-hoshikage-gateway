@@ -16,7 +16,8 @@ use std::{
 };
 use tokio::sync::{mpsc, oneshot};
 
-pub const SCHEMA: i64 = 14;
+pub const SCHEMA: i64 = 15;
+pub const MIGRATION_V15: &str = include_str!("../migrations/015_direct_reasoning_effort.sql");
 pub const MIGRATION_V14: &str = include_str!("../migrations/014_direct_artifacts.sql");
 pub const MIGRATION_V13: &str = include_str!("../migrations/013_direct_images.sql");
 pub const MIGRATION_V12: &str = include_str!("../migrations/012_runtime_mode.sql");
@@ -69,7 +70,7 @@ impl Drop for StateLock {
 pub const PROXY_SCOPE: &str = "ffffffff-ffff-4fff-8fff-ffffffffffff";
 fn ensure_proxy_scope(c: &mut Connection, model: &str, fresh: bool) -> Result<()> {
     let tx = c.transaction()?;
-    tx.execute("INSERT OR IGNORE INTO projects VALUES(?1,'proxy-default','Proxy default','',0,0,'ACTIVE',?2)",params![PROXY_SCOPE,model])?;
+    tx.execute("INSERT OR IGNORE INTO projects(id,channel_id,name,cwd,dev,ino,lifecycle,default_model) VALUES(?1,'proxy-default','Proxy default','',0,0,'ACTIVE',?2)",params![PROXY_SCOPE,model])?;
     tx.execute(
         "UPDATE projects SET default_model=?2 WHERE id=?1",
         params![PROXY_SCOPE, model],
@@ -152,11 +153,12 @@ pub fn initialize_direct(cfg: &DirectConfig) -> Result<String> {
         params![domain::digest(MIGRATION.as_bytes()), domain::now_ms()],
     )?;
     transaction.execute(
-        "INSERT INTO projects VALUES(?1,'direct-default','Gateway Codex runtime','',0,0,'ACTIVE',?2)",
+        "INSERT INTO projects(id,channel_id,name,cwd,dev,ino,lifecycle,default_model) VALUES(?1,'direct-default','Gateway Codex runtime','',0,0,'ACTIVE',?2)",
         params![PROXY_SCOPE,cfg.default_model],
     )?;
     transaction.commit()?;
     migrate_v2(&mut connection, false)?;
+    sync_direct_defaults(&mut connection, cfg)?;
     connection.execute(
         "UPDATE runtime_mode SET mode='direct',changed_at=?1 WHERE singleton=1",
         [domain::now_ms()],
@@ -169,7 +171,10 @@ pub(crate) fn migrate_v2(c: &mut Connection, quarantine: bool) -> Result<()> {
     if version == SCHEMA {
         return Ok(());
     }
-    ensure!((1..=13).contains(&version), "unsupported schema migration");
+    ensure!(
+        (1..=SCHEMA).contains(&version),
+        "unsupported schema migration"
+    );
     if version == 1 {
         let tx = c.transaction()?;
         tx.execute_batch(MIGRATION_V2)?;
@@ -202,6 +207,7 @@ pub(crate) fn migrate_v2(c: &mut Connection, quarantine: bool) -> Result<()> {
         (12, MIGRATION_V12),
         (13, MIGRATION_V13),
         (14, MIGRATION_V14),
+        (15, MIGRATION_V15),
     ] {
         if version >= target {
             continue;
@@ -260,6 +266,7 @@ pub fn validate_database(path: &Path) -> Result<(i64, String)> {
         (12, MIGRATION_V12),
         (13, MIGRATION_V13),
         (14, MIGRATION_V14),
+        (15, MIGRATION_V15),
     ] {
         if v < version {
             continue;
@@ -284,7 +291,7 @@ pub fn validate_database(path: &Path) -> Result<(i64, String)> {
 }
 pub(crate) fn insert_project(c: &Connection, w: &Workspace) -> Result<()> {
     c.execute(
-        "INSERT INTO projects VALUES(?1,?2,?3,?4,?5,?6,'ACTIVE',?7)",
+        "INSERT INTO projects(id,channel_id,name,cwd,dev,ino,lifecycle,default_model) VALUES(?1,?2,?3,?4,?5,?6,'ACTIVE',?7)",
         params![
             w.project.id,
             w.project.channel_id,
@@ -298,6 +305,27 @@ pub(crate) fn insert_project(c: &Connection, w: &Workspace) -> Result<()> {
     Ok(())
 }
 
+/// Refreshes only the defaults used when a Discord conversation is first
+/// created. Existing conversations retain their explicit model and effort.
+/// Rows created before schema v15 receive the configured effort once because
+/// they have no prior user selection to preserve.
+pub(crate) fn sync_direct_defaults(c: &mut Connection, cfg: &DirectConfig) -> Result<()> {
+    let tx = c.transaction()?;
+    ensure!(
+        tx.execute(
+            "UPDATE projects SET default_model=?2,default_reasoning_effort=?3 WHERE id=?1 AND lifecycle='ACTIVE'",
+            params![PROXY_SCOPE, cfg.default_model, cfg.default_reasoning_effort],
+        )? == 1,
+        "direct project default is missing"
+    );
+    tx.execute(
+        "UPDATE conversations SET selected_reasoning_effort=?1 WHERE selected_reasoning_effort=''",
+        [&cfg.default_reasoning_effort],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 type Job = Box<dyn FnOnce(&mut Connection) + Send>;
 #[derive(Clone)]
 pub struct Store {
@@ -308,8 +336,10 @@ pub struct Store {
 impl Store {
     pub fn open_direct(cfg: &DirectConfig) -> Result<(Self, oneshot::Receiver<()>)> {
         let path = crate::direct_migration::direct_database(cfg)?;
-        let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        let mut connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         configure(&connection)?;
+        migrate_v2(&mut connection, false)?;
+        sync_direct_defaults(&mut connection, cfg)?;
         Self::start_worker(path, connection)
     }
     pub fn open(cfg: &Config) -> Result<(Self, oneshot::Receiver<()>)> {
@@ -392,7 +422,7 @@ impl Store {
             .context("store worker terminated")?
     }
     pub async fn add_conversation(&self, thread: String, project: String) -> Result<()> {
-        self.call(false,move|c|{c.execute("INSERT OR IGNORE INTO conversations(thread_id,project_id,selected_model) SELECT ?1,id,default_model FROM projects WHERE id=?2 AND lifecycle='ACTIVE'",params![thread,project])?;Ok(())}).await
+        self.call(false,move|c|{c.execute("INSERT OR IGNORE INTO conversations(thread_id,project_id,selected_model,selected_reasoning_effort) SELECT ?1,id,default_model,default_reasoning_effort FROM projects WHERE id=?2 AND lifecycle='ACTIVE'",params![thread,project])?;Ok(())}).await
     }
     pub async fn conversation(&self, thread: &str) -> Result<Conversation> {
         let thread = thread.to_owned();
@@ -700,7 +730,7 @@ fn event(c: &Connection, id: &str, old: Option<&str>, next: &str, reason: &str) 
     Ok(())
 }
 fn read_conversation(c: &Connection, thread: &str) -> Result<Conversation> {
-    Ok(c.query_row("SELECT thread_id,project_id,paused,pause_revision,selected_model,effective_model,proxy_thread_id,last_response_id,continuation FROM conversations WHERE thread_id=?1",[thread],|r|Ok(Conversation{thread_id:r.get(0)?,project_id:r.get(1)?,paused:r.get(2)?,pause_revision:r.get(3)?,selected_model:r.get(4)?,effective_model:r.get(5)?,proxy_thread_id:r.get(6)?,last_response_id:r.get(7)?,continuation:r.get(8)?}))?)
+    Ok(c.query_row("SELECT thread_id,project_id,paused,pause_revision,selected_model,effective_model,selected_reasoning_effort,effective_reasoning_effort,proxy_thread_id,last_response_id,continuation FROM conversations WHERE thread_id=?1",[thread],|r|Ok(Conversation{thread_id:r.get(0)?,project_id:r.get(1)?,paused:r.get(2)?,pause_revision:r.get(3)?,selected_model:r.get(4)?,effective_model:r.get(5)?,selected_reasoning_effort:r.get(6)?,effective_reasoning_effort:r.get(7)?,proxy_thread_id:r.get(8)?,last_response_id:r.get(9)?,continuation:r.get(10)?}))?)
 }
 const REQUEST_SELECT: &str = "SELECT r.id,r.message_id,r.thread_id,cv.project_id,r.sequence,r.state,r.input_digest,r.client_request_id,r.response_id,r.proxy_thread_id,r.turn_id,r.model,r.previous_response_id,r.stop_requested,r.dispatch_eligible FROM requests r JOIN conversations cv ON cv.thread_id=r.thread_id JOIN projects p ON p.id=cv.project_id";
 fn request_row(r: &Row<'_>) -> rusqlite::Result<Request> {

@@ -8,7 +8,7 @@ StartLimitBurst=5
 [Service]
 Type=simple
 # If Cargo installs elsewhere (for example ~/bin), edit the binary path.
-ExecStart=%h/.cargo/bin/codex-hoshikage-gateway --config %h/.config/codex-hoshikage-gateway/config.toml direct run
+ExecStart=%h/.cargo/bin/codex-hoshikage-gateway --config %h/.config/codex-hoshikage-gateway/config.direct.toml direct run
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
