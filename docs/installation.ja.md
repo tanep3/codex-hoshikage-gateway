@@ -41,6 +41,18 @@ CODEX_HOME="$HOME/.config/codex-hoshikage-gateway/codex-home" codex login status
 
 CodexのMCPツールを使う場合も、この専用 `CODEX_HOME` に設定してください。通常のCodex設定だけに登録しても、Gatewayからは見えません。認証方法と保存先は[OpenAI公式の認証案内](https://developers.openai.com/ja-JP/docs/auth)も参照してください。
 
+### 全チャンネルで使うスキル
+
+Gatewayへスキルを追加するときは、次の共通フォルダーへ1回だけ配置します。
+
+```text
+$HOME/.config/codex-hoshikage-gateway/codex-home/skills/<スキル名>/SKILL.md
+```
+
+ここは上で作ったGateway専用 `CODEX_HOME` の `skills` フォルダーです。ここへ置いたスキルは、Discordのどのチャンネルやフォーラム投稿からでも使えます。チャンネルごとの作業フォルダーへ同じスキルをコピーする必要はありません。配置先を変更した場合は、`config.direct.toml` の `codex.home` に設定したフォルダーの下にある `skills` を使ってください。
+
+特定の会話だけで使いたいスキルは、その会話の作業フォルダー内に `.agents/skills/<スキル名>/SKILL.md` として置けます。作業フォルダーの親にあたる `codex.workspace_root/.agents/skills` は、全会話共通の配置先としては使いません。スキルが反映されない場合はGatewayを再起動し、新しい投稿で確認してください。配置形式は[OpenAI公式のスキル案内](https://developers.openai.com/codex/skills/)も参照できます。
+
 ## 5. Gatewayをインストールする
 
 ```bash
@@ -83,6 +95,8 @@ chmod 600 "$HOME/.config/codex-hoshikage-gateway/config.direct.toml"
 | `storage.state_dir` / `temp_dir` / `socket_path` | 会話記録・一時ファイル・管理用socketの保存先。例のユーザー名とUIDを直す |
 
 `codex.workspace_root` は例えば `/home/あなたの名前/work/codex-hoshikage-gateway-workspaces` にできます。ファイルはこの配下に保存され、Discordの `/workspace` でも現在の場所を確認できます。**保存先設定を後から変えても、既存の会話のファイルは自動移動しません。**
+
+動画などの添付ファイルも、各会話の作業フォルダー内に保存されます。`limits.attachment_bytes` は1ファイル、`limits.input_bytes` は本文と添付の合計上限です。初期例ではそれぞれ8 MiB、16 MiBです。大きな動画を扱う場合は、メモリとディスクの空きを確認して両方を増やし、Gatewayを再起動してください。0は無制限ではありません。
 
 最初はサンプルの `[limits]` をそのまま使えます。各値は容量・件数の上限で、`0` は無制限を意味しません。`codex.sandbox = "workspace-write"`、`approval_policy = "on-request"` は通常そのままにします。`network_access = false` はCodexの作業環境からのネットワークアクセスを許可しない設定です。外部サイトへのアクセスが必要な作業では、内容を理解したうえで変更してください。
 

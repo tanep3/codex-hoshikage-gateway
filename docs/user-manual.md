@@ -37,9 +37,19 @@ The model and reasoning effort are saved for each conversation. Changing one con
 
 Use `/cancel` when you want to withdraw a task you just sent; use `/stop` when you want to halt work and pause later tasks too. Sending an interrupt request and confirming that work stopped are separate. Check `/status` if needed. Changes already made to files are not automatically undone.
 
+## Skills
+
+Skills installed by the administrator as shared Gateway skills are available from every Discord channel and forum post. You do not have to recreate the same skill for each conversation. A skill installed only in one conversation's working folder remains local to that conversation.
+
+Administrators can find the shared location and installation details in [Installation and setup](installation.md#skills-shared-by-every-discord-conversation).
+
 ## Files and images
 
-You can attach images and text files to a message. Files exceeding the configured size or count limits are rejected. Images made by Codex normally arrive automatically in the same conversation, sometimes after the text reply.
+You can attach images, text, video, audio, PDFs, and other files to a message. For example, attach a video and ask Codex to trim it or extract audio with ffmpeg. Images are sent as image input, small text files are included as text, and other files are saved in this conversation's workspace so Codex can use the appropriate tool.
+
+Files exceeding the configured size or count limits are rejected. The Bot explains what to do next, such as making the file smaller, splitting it, or attaching it again. When the message says the request was not sent to the AI, send a new message after correcting the attachment.
+
+Images made by Codex normally arrive automatically in the same conversation, sometimes after the text reply.
 
 For other output, open `/get` to see registered artifacts. If you know the file location, enter a relative path such as `output/report.pdf` in `/get`'s `path` field. You do not need the absolute path shown by `/workspace`. `/get` sends a saved copy of the file as it was when fetched. A later change to the original file does not change that copy. If the result of sending to Discord is uncertain, the Gateway does not automatically resend it. Check the conversation for the attachment first.
 

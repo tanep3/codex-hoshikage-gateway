@@ -2,7 +2,7 @@
 
 > **現在は直接接続版を実装済みです。** 本文の「目標」「未確定」「切替前」は設計時点の記録です。現在の導入と操作は[導入手順](installation.ja.md)と[ユーザーマニュアル](user-manual.ja.md)を参照してください。
 
-版0.3 / 2026-09-23 / Tane Channel Technology
+版0.4 / 2026-09-25 / Tane Channel Technology
 
 状態：目標構成の内部設計案。[目標要件](requirements-direct-app-server.ja.md)に対応。切替時の新規文脈とDB実行方式の境界を確定。現行常駐サービスは未変更。
 
@@ -102,6 +102,12 @@ actorから表示層へのイベント送信は非待機とし、表示層の停
 
 Content storeは保存物とメタデータをGateway管理領域へ書き、確定回答・不変画像・不変成果物をそれぞれIDで参照する。元のCodex出力が後で変更されても、保存済み版を別内容へ差し替えない。安全な原本読取り、特殊ファイル・リンク・サイズ・ハッシュ検証、容量予約、保持期限、バックアップの対象を設計する。Discordの投稿上限や送信先をContent storeへ入れない。
 
+入力添付は受付時とCodex送信直前の2回、同じDiscord Message IDから取得し、件数・宣言容量・実容量・合計容量・SHA-256を照合する。PNG・JPEG・WebPの静止画像は画像入力、小さなUTF-8ファイルはテキスト入力とする。それ以外の動画・音声・文書・アーカイブ等は、送信直前に会話workspaceの `.hoshikage-inputs/<Discord Message ID>/<Attachment ID>-<安全化したファイル名>` へ保存し、Codex入力には元の表示名とworkspace相対パスだけを渡す。受付段階ではパスを決定するがファイルを書かず、送信直前の再検証が成功した内容だけを書き込む。
+
+入力ファイルの保存は、所有者を検証した会話workspaceをdescriptor-relativeに開き、中間ディレクトリでsymlinkを辿らず、0600の一時ファイルを同期してから同一ディレクトリ内で置き換える。別会話のworkspace、絶対パス、Discord CDN URLはCodex入力へ出さない。保存後にTurn開始が失敗しても別依頼を自動実行せず、入力保存物は会話workspaceの一部として扱う。画像形式として解釈できるが許可形式・画素上限に合わないものは、バイナリへ黙って格下げせず具体的に拒否する。
+
+受付失敗の利用者表示は内部エラー名をそのまま出さず、件数上限、1ファイル容量、入力合計、Discordからの取得失敗、画像形式のどれに該当するかを示す。縮小・分割・再添付など利用者が行える次の操作と、Codexへは未送信であることを必ず添える。
+
 確定回答テキストは `state_dir/direct-answers/<Gateway依頼ID>.txt` に排他的に保存し、ハッシュと容量をSQLiteの `direct_answers` に記録する。ファイルの同期が済んでから、DBでTurn終端を確定する。ファイルだけ残る障害は再照合対象とし、回答本文を失ったのに「配信済み」としない。保存済み版と異なる内容で同じ依頼IDを上書きしない。画像と一般成果物も別ディレクトリに不変保存し、DBの参照・バックアップ検証・Discord配信状態を分ける。内部試験だけで製品受入としない。
 
 Discordへ再配信する際は、依頼の会話IDと送信先を照合し、`direct_answers` の容量・ハッシュを確認して同じ保存版を読む。既存の `deliveries` の送信意思・nonce・照合を利用し、送信不明を理由にCodex Turnを再実行しない。画像だけの回答は空のテキスト投稿を作らず、画像の独立配信経路へ渡す。
@@ -117,6 +123,8 @@ Discordへ再配信する際は、依頼の会話IDと送信先を照合し、`d
 Gatewayの設定正本は `~/.config/codex-hoshikage-gateway/config.direct.toml`。現在の `[proxy]`を最終的に削除し、専属Codexコマンド、Codex home、作業先・権限、保存容量・保持、モデルの設定へ移す。既存設定からの切替手順は、保存済み依頼の隔離方法を確認して確定する。設定検証は子プロセス起動前に行い、state_dirや認証先の稼働中切替を許さない。
 
 直接接続用の設定型は既存Proxy設定型と分離する。`[codex]`には絶対パスの`command`と`home`を置き、Gatewayが`app-server`をstdioで起動する。`default_model`、`default_reasoning_effort`と`model_provider`、`sandbox`、`approval_policy`を明示し、初期値は`workspace-write`／`on-request`、`network_access`はfalseとする。起動時のmigration完了後、設定のモデルと推論レベルを`projects`の新規会話用既定値へ同一transactionで同期する。既存`conversations`の選択値は上書きせず、機能追加前で値が存在しない行だけ現在の既定推論レベルで初期化する。`thread/start`の`sandbox`と`approvalPolicy`はこのCLIが受け付けるkebab-case、`turn/start`の`sandboxPolicy.type`はcamelCaseへ変換する。Turn開始時にはworkspaceを明示したsandbox policyと、送信境界で固定したモデル・推論レベルを渡す。Codex homeはGateway専属とし、認証・MCP設定をそこへ配置する。設定ファイルや認証を旧Proxyの領域から暗黙にコピーしない。移行中は旧設定の読取りを維持するが、直接接続の設定に`[proxy]`を要求しない。新旧のどちらを起動するかは設定型で一意にし、一つの依頼を両方へ送らない。
+
+Gatewayの全Discord会話で使うローカルスキルは、`codex.home/skills/<skill-name>/SKILL.md`を正本とする。すべてのRun別App Server子プロセスへ同じ`CODEX_HOME`を渡すため、会話workspaceが異なっても同じ共通カタログを読み込める。特定の会話だけに必要なスキルは、その会話workspaceの`.agents/skills`へ置く。`workspace_root`は独立した会話workspaceを収容する親ディレクトリであり、GitリポジトリルートでもCodex homeでもないため、`workspace_root/.agents/skills`を共通発見経路にしない。通常利用者へはGateway専用の共通配置先を案内し、通常のCodex利用まで対象を広げるユーザー全体の配置先と混同させない。
 
 モデル一覧と選択値の検証は、実行中Turnの2枠を占有しない専用の短命App Server子プロセスで行う。`/model` の引数省略時は本人限定の選択メニューを表示し、選択イベントでもGuild・本人・会話を照合する。選択値は新しいcatalogで再検証し、その選択イベントIDをSQLiteの順序・一意性判定に使う。検証完了が前後しても古い選択が新しい選択を上書きしない。Discordの選択肢上限を超える候補は `/model id:` の手入力経路を案内する。
 

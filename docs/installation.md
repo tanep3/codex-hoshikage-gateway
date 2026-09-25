@@ -41,6 +41,18 @@ This is separate from your usual `~/.codex`. **Do not copy your usual `auth.json
 
 If you want MCP tools, configure them in this dedicated `CODEX_HOME`; registering them only in your normal Codex settings will not make them available to the Gateway. See [OpenAI's authentication guide](https://developers.openai.com/docs/auth) for sign-in and credential storage.
 
+### Skills shared by every Discord conversation
+
+Install a Gateway skill once under the shared folder below:
+
+```text
+$HOME/.config/codex-hoshikage-gateway/codex-home/skills/<skill-name>/SKILL.md
+```
+
+This is the `skills` folder inside the dedicated Gateway `CODEX_HOME` created above. Skills placed here are available from every Discord channel and forum post. You do not need to copy them into each conversation's working folder. If you changed the location, use the `skills` folder under the path configured as `codex.home` in `config.direct.toml`.
+
+For a skill that should apply only to one conversation, place it at `.agents/skills/<skill-name>/SKILL.md` inside that conversation's working folder. Do not use `codex.workspace_root/.agents/skills` as the shared location; `workspace_root` is only the parent that contains separate conversation folders. If a new skill does not appear, restart the Gateway and try a new message. See [OpenAI's skills guide](https://developers.openai.com/codex/skills/) for the skill format.
+
 ## 5. Install the Gateway
 
 ```bash
@@ -83,6 +95,8 @@ Open `~/.config/codex-hoshikage-gateway/config.direct.toml` in a text editor. Re
 | `storage.state_dir` / `temp_dir` / `socket_path` | Conversation state, temporary files, and management socket. Correct the sample username and UID |
 
 For example, `codex.workspace_root` can be `/home/YOUR_NAME/work/codex-hoshikage-gateway-workspaces`. Files go underneath this folder. Discord's `/workspace` shows the location for the current conversation. **Changing the setting later does not move an existing conversation's files.**
+
+Video and other attached files are also stored inside each conversation workspace. `limits.attachment_bytes` is the per-file limit, while `limits.input_bytes` is the combined text-and-attachment limit. The example uses 8 MiB and 16 MiB. If you raise them for larger videos, first confirm that the host has enough memory and disk space, then restart the Gateway. Zero does not mean unlimited.
 
 You can leave the sample `[limits]` values alone at first. They are size and count limits; `0` does not mean unlimited. Normally leave `codex.sandbox = "workspace-write"` and `approval_policy = "on-request"` as shown. `network_access = false` prevents network access from Codex's working environment. Change it only when you understand that your tasks need it.
 

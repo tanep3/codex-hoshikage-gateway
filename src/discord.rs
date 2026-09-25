@@ -485,6 +485,7 @@ pub fn input_message(v: &Value, guild: &str) -> Result<InputMessage> {
                             .into(),
                         url: a["url"].as_str().context("attachment URL missing")?.into(),
                         size: a["size"].as_u64().context("attachment size missing")?,
+                        content_type: a["content_type"].as_str().map(str::to_owned),
                     })
                 })
                 .collect::<Result<Vec<_>>>()

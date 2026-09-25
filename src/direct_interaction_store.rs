@@ -9,6 +9,17 @@ use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
 
 impl Store {
+    pub async fn direct_interaction_state(&self, interaction_id: String) -> Result<String> {
+        self.call(false, move |connection| {
+            Ok(connection.query_row(
+                "SELECT state FROM direct_interactions WHERE id=?1",
+                [interaction_id],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+    }
+
     pub async fn record_direct_interaction(
         &self,
         request_id: String,
@@ -140,9 +151,18 @@ impl Store {
                 (false,ManualDecision::Cancel)=>"cancel",
             };
             if !mcp && let Some(offered) = offered {
-                let choices: Vec<String> = serde_json::from_str(&offered)?;
+                // App Server may mix plain decisions with structured policy
+                // amendment offers.  Manual approval is allowed only when the
+                // exact plain decision is present, but unrelated structured
+                // entries must not make the whole reply path fail.
+                let choices: Value = serde_json::from_str(&offered)?;
+                let choices = choices
+                    .as_array()
+                    .ok_or_else(|| anyhow::anyhow!("App Server decisions are not an array"))?;
                 ensure!(
-                    choices.iter().any(|item| item == choice),
+                    choices
+                        .iter()
+                        .any(|item| item.as_str() == Some(choice)),
                     "decision not offered by App Server"
                 );
             }

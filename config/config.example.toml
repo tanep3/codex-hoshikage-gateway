@@ -12,6 +12,7 @@ token_file = "/home/REPLACE_USER/.config/codex-hoshikage-gateway/discord-token"
 [codex]
 command = "/home/REPLACE_USER/.local/bin/codex"
 # Private, Gateway-owned CODEX_HOME (0700). Sign in and configure MCP here.
+# Put skills shared by every Discord conversation under "<home>/skills/".
 home = "/home/REPLACE_USER/.config/codex-hoshikage-gateway/codex-home"
 # New conversations use this visible directory. Existing conversations keep
 # their original workspace and Codex context when this setting changes.

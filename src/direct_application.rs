@@ -5,6 +5,7 @@ use crate::{
     direct_config::DirectConfig,
     direct_delivery::DirectImageDelivery,
     direct_run::{ActiveRun, DirectRunService},
+    direct_workspace::ensure_conversation_workspace_at,
     discord::{Discord, input_message, snowflake},
     domain,
     files::Files,
@@ -306,6 +307,15 @@ impl DirectApplication {
             anyhow::bail!("Discord author changed");
         }
         let limits = self.store.input_limits(request.id.clone()).await?;
+        let workspace = if let Some(bound) = self
+            .store
+            .bound_direct_workspace(&request.thread_id)
+            .await?
+        {
+            bound
+        } else {
+            ensure_conversation_workspace_at(&self.cfg.workspace_root(), &request.thread_id)?
+        };
         let prepared = self.files.prepare(&message, &limits).await?;
         if prepared.digest != request.input_digest {
             self.store
@@ -313,6 +323,7 @@ impl DirectApplication {
                 .await?;
             anyhow::bail!("Discord input changed after admission");
         }
+        prepared.materialize_workspace_files(&workspace)?;
         self.runs
             .start_prepared(
                 request.id,

@@ -51,6 +51,38 @@ fn command_approval_preserves_exact_identity_and_only_single_decisions() {
 }
 
 #[test]
+fn command_approval_ignores_structured_policy_offer_when_plain_accept_exists() {
+    let event = request(
+        "item/commandExecution/requestApproval",
+        json!({
+            "threadId":"thread-a",
+            "turnId":"turn-a",
+            "itemId":"item-a",
+            "command":"python3 install-skill.py",
+            "availableDecisions":[
+                "accept",
+                {"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["python3","install-skill.py"]}},
+                "cancel"
+            ]
+        }),
+    );
+    let approval = DirectInteraction::from_event(&event, &active())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        approval
+            .manual_decision(ManualDecision::AcceptOnce)
+            .unwrap(),
+        json!({"decision":"accept"})
+    );
+    assert_eq!(
+        approval.manual_decision(ManualDecision::Cancel).unwrap(),
+        json!({"decision":"cancel"})
+    );
+    assert!(approval.manual_decision(ManualDecision::Decline).is_err());
+}
+
+#[test]
 fn another_turn_and_missing_item_are_not_approved() {
     let wrong = request(
         "item/fileChange/requestApproval",

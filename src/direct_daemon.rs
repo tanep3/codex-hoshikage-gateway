@@ -32,6 +32,48 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+fn input_rejection_message(error: &anyhow::Error, limits: &crate::config::Limits) -> String {
+    let reason = error.to_string();
+    let mib = |bytes: usize| format!("{:.1} MiB", bytes as f64 / 1024.0 / 1024.0);
+    if reason.contains("too many attachments") {
+        return format!(
+            "添付ファイルは1回につき{}件までです。件数を減らして新しい投稿で送り直してください。AIへは送信していません。",
+            limits.attachments
+        );
+    }
+    if reason.contains("attachment too large") || reason.contains("attachment byte limit") {
+        return format!(
+            "添付ファイル1件の上限は{}です。ファイルを小さくするか分割して、新しい投稿で送り直してください。AIへは送信していません。",
+            mib(limits.attachment_bytes)
+        );
+    }
+    if reason.contains("total input limit") || reason.contains("encoded request size exceeded") {
+        return format!(
+            "本文と添付の合計が1回の上限{}を超えています。添付を減らすか分割して、新しい投稿で送り直してください。AIへは送信していません。",
+            mib(limits.input_bytes)
+        );
+    }
+    if reason.contains("text too large") {
+        return format!(
+            "本文が上限（{} KiB）を超えています。短くするか複数の投稿に分けてください。AIへは送信していません。",
+            limits.text_bytes / 1024
+        );
+    }
+    if reason.contains("attachment fetch")
+        || reason.contains("attachment unavailable")
+        || reason.contains("attachment read")
+    {
+        return "添付ファイルをDiscordから取得できませんでした。ファイルを添付し直し、新しい投稿で送り直してください。AIへは送信していません。".into();
+    }
+    if reason.contains("image pixel limit")
+        || reason.contains("unsupported image")
+        || reason.contains("animated image")
+    {
+        return "この画像形式または画像サイズには対応できません。PNG・JPEG・WebPの静止画像へ変換して、新しい投稿で送り直してください。AIへは送信していません。".into();
+    }
+    "受付できませんでした。本文や添付を確認して、新しい投稿で送り直してください。解決しない場合は /status の内容を運用者へ伝えてください。AIへは送信していません。".into()
+}
+
 #[derive(Clone)]
 struct LiveRun {
     request_id: String,
@@ -332,7 +374,8 @@ impl DirectCoordinator {
                                 if message["guild_id"] == this.app.cfg.discord.guild_id
                                     && message["author"]["id"] == this.app.cfg.discord.allowed_user_id
                                     && let (Some(thread),Some(message_id))=(thread,message_id) {
-                                    let _=this.notice(&message_id,&thread,"受付できませんでした。/status で会話状態を確認し、入力や添付を見直してください。AIへは送信していません。").await;
+                                    let notice=input_rejection_message(&error,&this.app.cfg.limits);
+                                    let _=this.notice(&message_id,&thread,&notice).await;
                                 }
                             }
                         }
@@ -1516,6 +1559,14 @@ impl DirectCoordinator {
             Err(error) => {
                 let message = if error.to_string().contains("earlier input generation") {
                     "追加指示の前の確認画面です。このボタンは使えません。新しい確認が届いた場合は、そちらを開いてください。"
+                } else if self
+                    .app
+                    .store
+                    .direct_interaction_state(card_id.into())
+                    .await
+                    .is_ok_and(|state| state == "PENDING")
+                {
+                    "この選択はCodexへ送信されませんでした。元の確認画面はまだ有効です。少し待って開き直すか、拒否または /stop を使ってください。"
                 } else {
                     "確認の結果を確定できません。再度押さず、/status で作業状態を確認してください。"
                 };
@@ -1680,6 +1731,34 @@ mod tests {
         assert_eq!(select["custom_id"], "direct:effort:456");
         assert_eq!(select["options"][1]["value"], "high");
         assert_eq!(select["options"][1]["default"], true);
+    }
+
+    #[test]
+    fn admission_errors_tell_the_user_what_to_do_next() {
+        let limits = crate::config::Limits {
+            attachments: 4,
+            attachment_bytes: 8 * 1024 * 1024,
+            input_bytes: 16 * 1024 * 1024,
+            text_bytes: 256 * 1024,
+            image_pixels: 20_000_000,
+            artifact_bytes: 8 * 1024 * 1024,
+            temp_bytes: 32 * 1024 * 1024,
+            output_bytes: 1024 * 1024,
+            output_total_bytes: 8 * 1024 * 1024,
+            delivery_retention_secs: 60,
+            queue_conversation: 5,
+            queue_global: 20,
+            validation_secs: 120,
+        };
+        let too_large = input_rejection_message(&anyhow::anyhow!("attachment too large"), &limits);
+        assert!(too_large.contains("8.0 MiB"));
+        assert!(too_large.contains("小さくするか分割"));
+        assert!(too_large.contains("AIへは送信していません"));
+
+        let unavailable =
+            input_rejection_message(&anyhow::anyhow!("attachment fetch failed"), &limits);
+        assert!(unavailable.contains("添付し直し"));
+        assert!(unavailable.contains("AIへは送信していません"));
     }
 
     #[test]
